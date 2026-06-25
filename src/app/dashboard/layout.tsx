@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation'
 import { getSession } from '@/lib/auth/session'
-import Sidebar from '@/components/dashboard/Sidebar'
-import TopBar from '@/components/dashboard/TopBar'
+import AppHeader from '@/components/dashboard/AppHeader'
+import TabNav    from '@/components/dashboard/TabNav'
+import AppFooter from '@/components/dashboard/AppFooter'
 
 export const metadata = { title: 'Dashboard — Lima Trade' }
 
@@ -11,39 +12,32 @@ export default async function DashboardLayout({
   children: React.ReactNode
 }) {
   const session = await getSession()
-  if (!session.isLoggedIn) redirect('/?auth_error=session_expired')
+  if (!session.isLoggedIn) redirect('/')
 
   return (
     <div
       style={{
         display: 'flex',
-        height: '100vh',
-        background: '#000',
+        flexDirection: 'column',
+        height: '100dvh',
         overflow: 'hidden',
+        background: '#000',
       }}
     >
-      <Sidebar />
-      <div
+      <AppHeader />
+      <TabNav />
+
+      <main
         style={{
           flex: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-          minWidth: 0,
+          overflowY: 'auto',
+          overflowX: 'hidden',
         }}
       >
-        <TopBar />
-        <main
-          style={{
-            flex: 1,
-            overflow: 'hidden',
-            display: 'flex',
-            minHeight: 0,
-          }}
-        >
-          {children}
-        </main>
-      </div>
+        {children}
+      </main>
+
+      <AppFooter />
     </div>
   )
 }
