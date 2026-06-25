@@ -1,38 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { generateVerifier, generateChallenge, generateState } from '@/lib/auth/pkce'
-import { DERIV_AUTH_URL, DERIV_SCOPES } from '@/lib/auth/constants'
+import { DERIV_OAUTH_URL } from '@/lib/auth/constants'
 
+/**
+ * GET /api/auth/login
+ * Redirects the user to Deriv's OAuth2 authorization page.
+ *
+ * Deriv OAuth flow for third-party apps:
+ *   → https://oauth.deriv.com/oauth2/authorize?app_id={APP_ID}&l=en&brand=deriv&redirect_uri={REDIRECT_URI}
+ *
+ * After login Deriv sends the user back to REDIRECT_URI with tokens in the query string:
+ *   ?token1=TOKEN&acct1=LOGINID&cur1=USD[&token2=...&acct2=...&cur2=...]
+ *
+ * No PKCE, no client_secret, no code exchange — tokens arrive directly.
+ * The callback page (/auth/callback) reads those tokens and saves them to the session.
+ */
 export async function GET(req: NextRequest) {
-  const mode = req.nextUrl.searchParams.get('mode') ?? 'login'
+  const appId       = process.env.DERIV_CLIENT_ID
+  const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI
 
-  const verifier  = generateVerifier()
-  const challenge = await generateChallenge(verifier)
-  const state     = generateState()
+  if (!appId || !redirectUri) {
+    console.error('Missing DERIV_CLIENT_ID or NEXT_PUBLIC_REDIRECT_URI env vars')
+    return NextResponse.redirect(
+      new URL('/?auth_error=server_config', req.url)
+    )
+  }
 
-  // Build Deriv auth URL
   const params = new URLSearchParams({
-    response_type:          'code',
-    client_id:              process.env.DERIV_CLIENT_ID!,
-    redirect_uri:           process.env.NEXT_PUBLIC_REDIRECT_URI!,
-    scope:                  DERIV_SCOPES,
-    state,
-    code_challenge:         challenge,
-    code_challenge_method:  'S256',
-    ...(mode === 'signup' && { prompt: 'registration' }),
+    app_id:       appId,
+    l:            'en',
+    brand:        'deriv',
+    redirect_uri: redirectUri,
   })
 
-  const authUrl = `${DERIV_AUTH_URL}?${params.toString()}`
-
-  // Store verifier + state in a short-lived httpOnly cookie
-  // so we can verify them when Deriv calls back
-  const res = NextResponse.redirect(authUrl)
-  res.cookies.set('lt_pkce', JSON.stringify({ verifier, state }), {
-    httpOnly: true,
-    secure:   process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge:   60 * 10, // 10 minutes — plenty of time to complete login
-    path:     '/',
-  })
-
-  return res
+  return NextResponse.redirect(`${DERIV_OAUTH_URL}?${params.toString()}`)
 }
