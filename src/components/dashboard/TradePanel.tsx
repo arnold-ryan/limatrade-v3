@@ -237,7 +237,7 @@ export default function TradePanel() {
             Rise / Fall
           </h2>
           <div style={{ color: '#888', fontSize: '0.75rem', marginTop: '2px' }}>
-            {SYMBOL} · {DURATION}{DUR_UNIT} · Stake basis
+            Volatility 100 Index · {DURATION}{DUR_UNIT} · Stake basis
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>

@@ -55,6 +55,12 @@ const CONTRACT_TYPES = [
   { value: 'DIGITUNDER', label: 'Over/Under → Under' },
 ]
 
+/** Quick lookup: raw symbol → human-readable label */
+const SYMBOL_LABEL: Record<string, string> = Object.fromEntries(
+  MARKETS.map(m => [m.symbol, m.label])
+)
+function symLabel(s: string) { return SYMBOL_LABEL[s] ?? s }
+
 /* ─── Helpers ───────────────────────────────────────────── */
 function getLastDigit(price: number): number {
   const s = price.toFixed(2)
@@ -187,13 +193,17 @@ interface RunStats {
 }
 
 interface TxEntry {
-  id: number         // contract_id
-  time: number       // epoch ms
+  id: number           // contract_id
+  time: number         // epoch ms
   contractType: string
   stake: number
   payout: number
+  potentialPayout: number  // potential payout at buy time
   won: boolean
   symbol: string
+  entrySpot?: number   // live price at moment of trade entry
+  exitSpot?:  number   // live price approximated at sell time
+  longcode?:  string   // human-readable contract description from Deriv
 }
 
 /* ─── Run Panel ─────────────────────────────────────────── */
@@ -224,7 +234,10 @@ function RunPanel({
   botReady,
   botError,
   currency,
+  accountLabel,
   txLog,
+  onViewDetail,
+  lastContractSummary,
 }: {
   open: boolean
   onToggle: () => void
@@ -240,7 +253,10 @@ function RunPanel({
   botReady: boolean
   botError: string | null
   currency: string
+  accountLabel: string
   txLog: TxEntry[]
+  onViewDetail: () => void
+  lastContractSummary: { symbol: string; contractType: string; stake: number; potentialPayout: number } | null
 }) {
   const [tab, setTab] = useState<RunTab>('summary')
   const TABS: RunTab[] = ['summary', 'transactions', 'journal']
@@ -344,6 +360,49 @@ function RunPanel({
         {tab === 'summary' && (
           <div style={{ display: 'flex', flexDirection: 'column', flex: 1, padding: '1rem' }}>
 
+            {/* Last contract summary */}
+            {lastContractSummary && (
+              <div style={{
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)',
+                borderRadius: '10px', padding: '0.75rem', marginBottom: '0.85rem',
+              }}>
+                {/* Market + direction */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#fff' }}>
+                    {lastContractSummary.symbol}
+                  </span>
+                  <span style={{
+                    display: 'flex', alignItems: 'center', gap: '4px',
+                    fontSize: '0.68rem', fontWeight: 600, color: '#FCA311',
+                    background: 'rgba(252,163,17,0.1)', border: '1px solid rgba(252,163,17,0.25)',
+                    padding: '2px 8px', borderRadius: '20px',
+                  }}>
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M3 13L13 3M13 3H7M13 3V9"/>
+                    </svg>
+                    {CONTRACT_TYPES.find(c => c.value === lastContractSummary.contractType)?.label?.split('→')[1]?.trim() ?? lastContractSummary.contractType}
+                  </span>
+                </div>
+                <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginBottom: '0.65rem' }}>
+                  Tick 0
+                </div>
+                {/* Stats 2×2 */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                  {[
+                    { label: 'Total profit/loss', value: `${stats.profit >= 0 ? '+' : ''}${stats.profit.toFixed(2)} ${currency}`, color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff' },
+                    { label: 'Contract value',    value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: '#fff' },
+                    { label: 'Stake',             value: `${lastContractSummary.stake.toFixed(2)}`, color: '#fff' },
+                    { label: 'Potential payout',  value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: '#fff' },
+                  ].map(s => (
+                    <div key={s.label}>
+                      <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginBottom: '1px' }}>{s.label}</div>
+                      <div style={{ fontSize: '0.78rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Connection badge */}
             <div style={{
               display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem',
@@ -357,7 +416,9 @@ function RunPanel({
                 boxShadow: botReady && !botError ? '0 0 6px #22c55e66' : 'none',
               }}/>
               <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
-                {botError ?? (botReady ? `Connected · ${currency}` : 'Connecting to Deriv…')}
+                {botError ?? (botReady
+                  ? `Connected · ${accountLabel || 'Account'} · ${currency}`
+                  : 'Connecting to Deriv…')}
               </span>
             </div>
 
@@ -426,22 +487,28 @@ function RunPanel({
 
             {/* Action bar */}
             <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-              {['Download', 'View Detail'].map(btn => (
-                <button
-                  key={btn}
-                  onClick={btn === 'Download' ? downloadCSV : undefined}
-                  disabled={txLog.length === 0}
-                  style={{
-                    padding: '0.4rem 0.9rem', borderRadius: '6px',
-                    border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-                    color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
-                    fontSize: '0.78rem', fontWeight: 600,
-                    cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {btn}
-                </button>
-              ))}
+              <button
+                onClick={downloadCSV}
+                disabled={txLog.length === 0}
+                style={{
+                  padding: '0.4rem 0.9rem', borderRadius: '6px',
+                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
+                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                  fontSize: '0.78rem', fontWeight: 600,
+                  cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >Download</button>
+              <button
+                onClick={onViewDetail}
+                disabled={txLog.length === 0}
+                style={{
+                  padding: '0.4rem 0.9rem', borderRadius: '6px',
+                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
+                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                  fontSize: '0.78rem', fontWeight: 600,
+                  cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >View Detail</button>
             </div>
 
             {txLog.length === 0 ? (
@@ -464,12 +531,12 @@ function RunPanel({
               <div style={{ flex: 1, overflowY: 'auto' }}>
                 {/* Column headers */}
                 <div style={{
-                  display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
-                  padding: '0.5rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  display: 'grid', gridTemplateColumns: '56px 1fr 90px',
+                  padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)',
                   position: 'sticky', top: 0, background: '#07111e',
                 }}>
                   {['Type', 'Entry/Exit spot', 'Buy price and P/L'].map(h => (
-                    <span key={h} style={{ fontSize: '0.63rem', fontWeight: 700, color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    <span key={h} style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                       {h}
                     </span>
                   ))}
@@ -479,31 +546,58 @@ function RunPanel({
                   const pl = tx.payout - tx.stake
                   return (
                     <div key={tx.id}
-                      style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', alignItems: 'center', padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.1s' }}
+                      style={{ display: 'grid', gridTemplateColumns: '56px 1fr 90px', alignItems: 'center', padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.1s' }}
                       onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
                       onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
                     >
+                      {/* Type: market grid icon + direction arrow */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        {/* 4-dot market icon */}
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="rgba(229,229,229,0.25)">
+                          <rect x="0" y="0" width="6" height="6" rx="1"/>
+                          <rect x="8" y="0" width="6" height="6" rx="1"/>
+                          <rect x="0" y="8" width="6" height="6" rx="1"/>
+                          <rect x="8" y="8" width="6" height="6" rx="1"/>
+                        </svg>
+                        {/* Diagonal arrow */}
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"
+                          style={{ color: tx.won ? '#f97316' : '#f97316' }}
+                        >
+                          <path d="M3 13L13 3M13 3H7M13 3V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                      </div>
+
+                      {/* Entry / Exit spots */}
                       <div>
-                        <div style={{ fontSize: '0.72rem', fontWeight: 600, color: tx.won ? '#22c55e' : '#ef4444' }}>
-                          {tx.won ? 'Won' : 'Lost'}
+                        {/* Entry spot — filled red circle */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{
+                            width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                            background: '#ef4444', border: '1.5px solid #ef4444',
+                          }}/>
+                          <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: '#fff' }}>
+                            {tx.entrySpot?.toFixed(2) ?? '—'}
+                          </span>
                         </div>
-                        <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px', lineHeight: 1.3 }}>
-                          {CONTRACT_TYPES.find(c => c.value === tx.contractType)?.label?.split('→')[1]?.trim() ?? tx.contractType}
-                        </div>
-                        <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.2)', marginTop: '1px' }}>
-                          {fmtTime(tx.time)}
+                        {/* Exit spot — empty circle */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '3px' }}>
+                          <span style={{
+                            width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                            background: 'transparent', border: '1.5px solid rgba(229,229,229,0.35)',
+                          }}/>
+                          <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.55)' }}>
+                            {tx.exitSpot?.toFixed(2) ?? ''}
+                          </span>
                         </div>
                       </div>
-                      <div>
-                        <div style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.55)' }}>{tx.symbol}</div>
-                        <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.25)', marginTop: '2px' }}>1 tick · digit</div>
-                      </div>
+
+                      {/* Buy price + P/L */}
                       <div style={{ textAlign: 'right' }}>
                         <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
                           {tx.stake.toFixed(2)} {currency}
                         </div>
-                        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: pl >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums', marginTop: '2px' }}>
-                          {pl >= 0 ? '+' : ''}{pl.toFixed(2)}
+                        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: pl >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums', marginTop: '3px' }}>
+                          {pl >= 0 ? '+' : ''}{pl.toFixed(2)} {currency}
                         </div>
                       </div>
                     </div>
@@ -516,60 +610,7 @@ function RunPanel({
 
         {/* ═══ JOURNAL ═══ */}
         {tab === 'journal' && (
-          <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-
-            {/* Action bar */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-              <button
-                onClick={downloadCSV}
-                disabled={txLog.length === 0}
-                style={{
-                  padding: '0.4rem 0.9rem', borderRadius: '6px',
-                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
-                  fontSize: '0.78rem', fontWeight: 600,
-                  cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Download
-              </button>
-              <button style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(229,229,229,0.5)', fontSize: '0.78rem', fontWeight: 500 }}>
-                Filters
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
-                </svg>
-              </button>
-            </div>
-
-            <div style={{ flex: 1, overflowY: 'auto' }}>
-              {/* Account info — always first */}
-              <div style={{ padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                <div style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.65)' }}>
-                  You are using your {currency} account.
-                </div>
-                <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>
-                  {new Date().toISOString().slice(0, 10)} | {new Date().toISOString().slice(11, 19)} GMT
-                </div>
-              </div>
-
-              {txLog.length === 0 ? (
-                <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.3)', fontSize: '0.78rem', lineHeight: 1.6 }}>
-                  No events yet. Start the bot to see activity here.
-                </div>
-              ) : (
-                txLog.map((tx, i) => (
-                  <div key={i} style={{ padding: '0.55rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                    <div style={{ fontSize: '0.75rem', color: tx.won ? 'rgba(34,197,94,0.85)' : 'rgba(239,68,68,0.8)', fontWeight: 600 }}>
-                      Contract #{tx.id} — {tx.won ? 'Won' : 'Lost'} {Math.abs(tx.payout - tx.stake).toFixed(2)} {currency}
-                    </div>
-                    <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)', marginTop: '2px' }}>
-                      {new Date(tx.time).toISOString().slice(0, 10)} | {new Date(tx.time).toISOString().slice(11, 19)} GMT · {tx.symbol} · Stake {tx.stake.toFixed(2)}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+          <JournalTab txLog={txLog} currency={currency} downloadCSV={downloadCSV} />
         )}
       </div>
 
@@ -621,6 +662,273 @@ function RunPanel({
           >
             Reset
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Journal Tab ───────────────────────────────────────── */
+function JournalTab({ txLog, currency, downloadCSV }: {
+  txLog: TxEntry[]; currency: string; downloadCSV: () => void
+}) {
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [filters, setFilters] = useState({ errors: true, notifications: true, system: true })
+
+  function toggle(key: keyof typeof filters) {
+    setFilters(f => ({ ...f, [key]: !f[key] }))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+      {/* Action bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)', position: 'relative' }}>
+        <button
+          onClick={downloadCSV}
+          disabled={txLog.length === 0}
+          style={{
+            padding: '0.4rem 0.9rem', borderRadius: '6px',
+            border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
+            color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+            fontSize: '0.78rem', fontWeight: 600,
+            cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
+          }}
+        >Download</button>
+
+        {/* Filters button + dropdown */}
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={() => setFiltersOpen(v => !v)}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(229,229,229,0.5)', fontSize: '0.78rem', fontWeight: 500 }}
+          >
+            Filters
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
+            </svg>
+          </button>
+          {filtersOpen && (
+            <div style={{
+              position: 'absolute', right: 0, top: 'calc(100% + 6px)',
+              background: '#0d1f35', border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '10px', padding: '0.5rem 0', minWidth: '160px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.5)', zIndex: 80,
+            }}>
+              {(['errors', 'notifications', 'system'] as const).map(key => (
+                <label key={key} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.6rem',
+                  padding: '0.45rem 0.9rem', cursor: 'pointer',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={filters[key]}
+                    onChange={() => toggle(key)}
+                    style={{ accentColor: '#FCA311', width: '14px', height: '14px', cursor: 'pointer' }}
+                  />
+                  <span style={{ fontSize: '0.82rem', color: '#E5E5E5', textTransform: 'capitalize' }}>{key}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {txLog.length === 0 ? (
+          <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.3)', fontSize: '0.78rem', lineHeight: 1.6 }}>
+            No events yet. Start the bot to see activity here.
+          </div>
+        ) : (
+          txLog.map(tx => {
+            const pl = tx.payout - tx.stake
+            const dateStr = `${new Date(tx.time).toISOString().slice(0, 10)} | ${new Date(tx.time).toISOString().slice(11, 19)} GMT`
+            const description = tx.longcode
+              ?? `Win payout if ${symLabel(tx.symbol)} after 1 tick satisfies ${tx.contractType} condition.`
+            return (
+              <div key={tx.id}>
+                {/* Bought entry */}
+                {filters.notifications && (
+                  <div style={{ padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div style={{ fontSize: '0.75rem', lineHeight: 1.5 }}>
+                      <span style={{ color: '#4A90D9', fontWeight: 600 }}>Bought</span>
+                      <span style={{ color: 'rgba(229,229,229,0.65)' }}>: {description} (ID: {tx.id})</span>
+                    </div>
+                    <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>{dateStr}</div>
+                  </div>
+                )}
+                {/* Result entry */}
+                <div style={{ padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: pl > 0 ? '#22c55e' : '#ef4444' }}>
+                    {pl > 0 ? 'Profit' : 'Loss'} amount: {pl > 0 ? '+' : ''}{pl.toFixed(2)} {currency}
+                  </div>
+                  <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>{dateStr}</div>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ─── View Detail Modal ─────────────────────────────────── */
+function ViewDetailModal({
+  onClose, txLog, stats, accountId, currency,
+}: {
+  onClose: () => void
+  txLog: TxEntry[]
+  stats: RunStats
+  accountId: string
+  currency: string
+}) {
+  return (
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 400,
+        background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '1rem',
+      }}
+    >
+      <div style={{
+        background: '#0d1f35', border: '1px solid rgba(255,255,255,0.1)',
+        borderRadius: '14px', width: '100%', maxWidth: '700px',
+        maxHeight: '85vh', display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
+      }}>
+        {/* Header */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '1rem 1.25rem', borderBottom: '1px solid rgba(255,255,255,0.08)',
+          flexShrink: 0,
+        }}>
+          <span style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff' }}>
+            Transactions detailed summary
+          </span>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              color: 'rgba(229,229,229,0.5)', padding: '4px',
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        {/* Trade rows — scrollable */}
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          {/* Column headers */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '160px 80px 80px 80px 80px 80px 80px 90px',
+            padding: '0.6rem 1rem',
+            borderBottom: '1px solid rgba(255,255,255,0.06)',
+            background: '#07111e',
+            position: 'sticky', top: 0,
+            gap: '0.5rem',
+          }}>
+            {['Timestamp','Reference','Market','Trade type','Entry spot','Exit spot','Buy price','Profit/Loss'].map(h => (
+              <span key={h} style={{
+                fontSize: '0.62rem', fontWeight: 700,
+                color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em',
+              }}>{h}</span>
+            ))}
+          </div>
+
+          {txLog.length === 0 ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: 'rgba(229,229,229,0.35)', fontSize: '0.82rem' }}>
+              No transactions yet.
+            </div>
+          ) : txLog.map(tx => {
+            const pl = tx.payout - tx.stake
+            return (
+              <div key={tx.id} style={{
+                display: 'grid',
+                gridTemplateColumns: '160px 80px 80px 80px 80px 80px 80px 90px',
+                padding: '0.65rem 1rem', gap: '0.5rem',
+                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                alignItems: 'center',
+              }}
+                onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
+                onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
+              >
+                <span style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.5)' }}>
+                  {new Date(tx.time).toISOString().slice(0, 10)} {new Date(tx.time).toISOString().slice(11, 19)} GMT
+                </span>
+                <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)', fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.id}
+                </span>
+                <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
+                  {symLabel(tx.symbol).split(' ').slice(0, 2).join(' ')}
+                </span>
+                <span>
+                  {/* Direction arrow based on contract type */}
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+                    style={{ color: tx.won ? '#22c55e' : '#ef4444' }}
+                  >
+                    <path d="M3 13L13 3M13 3H7M13 3V9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </span>
+                <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.entrySpot?.toFixed(2) ?? '—'}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.6)', fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.exitSpot?.toFixed(2) ?? '—'}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.stake.toFixed(2)}
+                </span>
+                <span style={{
+                  fontSize: '0.72rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+                  color: pl >= 0 ? '#22c55e' : '#ef4444',
+                }}>
+                  {pl >= 0 ? '+' : ''}{pl.toFixed(2)} {currency}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Summary row */}
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+          {/* Summary headers */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(8, 1fr)',
+            padding: '0.5rem 1rem',
+            background: '#07111e',
+            gap: '0.5rem',
+          }}>
+            {['Account','No. of runs','Total stake','Total payout','Win','Loss','Total profit/loss','Balance'].map(h => (
+              <span key={h} style={{
+                fontSize: '0.62rem', fontWeight: 700,
+                color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em',
+              }}>{h}</span>
+            ))}
+          </div>
+          {/* Summary values */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)',
+            padding: '0.6rem 1rem 0.9rem', gap: '0.5rem',
+          }}>
+            <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.65)' }}>{accountId || '—'}</span>
+            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.runs}</span>
+            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.totalStake.toFixed(2)}</span>
+            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.totalPayout.toFixed(2)}</span>
+            <span style={{ fontSize: '0.72rem', color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{stats.won}</span>
+            <span style={{ fontSize: '0.72rem', color: '#ef4444', fontVariantNumeric: 'tabular-nums' }}>{stats.lost}</span>
+            <span style={{
+              fontSize: '0.72rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+              color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff',
+            }}>
+              {stats.profit >= 0 ? '+' : ''}{stats.profit.toFixed(2)} {currency}
+            </span>
+            <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.55)', fontVariantNumeric: 'tabular-nums' }}>—</span>
+          </div>
         </div>
       </div>
     </div>
@@ -771,6 +1079,12 @@ export default function AnalysisPage() {
   const [botReady,     setBotReady]     = useState(false)
   const [botError,     setBotError]     = useState<string | null>(null)
   const [txLog,        setTxLog]        = useState<TxEntry[]>([])
+  const [accountLabel,    setAccountLabel]    = useState<string>('')
+  const [activeAccountId, setActiveAccountId] = useState<string>('')
+  const [showDetailModal, setShowDetailModal] = useState(false)
+  const [lastContractSummary, setLastContractSummary] = useState<{
+    symbol: string; contractType: string; stake: number; potentialPayout: number
+  } | null>(null)
 
   /* ── Refs (avoid stale closures in WS callbacks) ── */
   const runningRef      = useRef(false)
@@ -781,16 +1095,26 @@ export default function AnalysisPage() {
   const execSpeedRef    = useRef<ExecSpeed>('normal')
   const currencyRef     = useRef('USD')
   const botWsRef        = useRef<WebSocket | null>(null)
-  /** Maps contract_id → buy_price for bot trades we initiated */
-  const pendingBuysRef  = useRef<Map<number, number>>(new Map())
+  /** Tracks live price from tick stream — captured as entry spot when a trade is placed */
+  const livePriceRef      = useRef<number | null>(null)
+  /** Maps contract_id → { buyPrice, entrySpot, longcode, potentialPayout } for bot trades we initiated */
+  const pendingBuysRef    = useRef<Map<number, { buyPrice: number; entrySpot: number | null; longcode?: string; potentialPayout?: number }>>(new Map())
+  /** Maps req_id → entrySpot — bridges executeTrade (req_id) to buy response (contract_id) */
+  const pendingSpotsByReq = useRef<Map<number, number | null>>(new Map())
   const reqIdRef        = useRef(200)
   /** Auto-reconnect: attempt count + backoff timer */
   const reconnectCount  = useRef(0)
   const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** Set to true when user explicitly closes (logout/unmount) — skip reconnect */
   const intentionalClose = useRef(false)
+  /**
+   * The accountId the bot WS is currently (or last) connected to.
+   * Used to detect account switches and force a reconnect.
+   */
+  const connectedAccountRef = useRef<string | null>(null)
 
   /* ── Keep refs in sync with state ── */
+  useEffect(() => { livePriceRef.current   = livePrice   }, [livePrice])
   useEffect(() => { symbolRef.current      = symbol      }, [symbol])
   useEffect(() => { contractTypeRef.current = contractType }, [contractType])
   useEffect(() => { stakeRef.current       = stake       }, [stake])
@@ -802,10 +1126,13 @@ export default function AnalysisPage() {
   const executeTrade = useCallback((ws: WebSocket) => {
     if (!runningRef.current || ws.readyState !== WebSocket.OPEN) return
 
-    const ct      = contractTypeRef.current
-    const hasBar  = needsBarrier(ct)
-    const amount  = parseFloat(stakeRef.current) || 1.00
-    const reqId   = ++reqIdRef.current
+    const ct         = contractTypeRef.current
+    const hasBar     = needsBarrier(ct)
+    const amount     = parseFloat(stakeRef.current) || 1.00
+    const reqId      = ++reqIdRef.current
+    // Capture current tick as entry spot and map it to this reqId
+    // When the buy response arrives (with the same req_id), we look this up
+    pendingSpotsByReq.current.set(reqId, livePriceRef.current)
 
     /*
      * Deriv WebSocket API — buy (without prior proposal)
@@ -848,6 +1175,29 @@ export default function AnalysisPage() {
       setBotError(null)
       setBotReady(false)
 
+      /* ── Fetch active account + currency from session ─────────────────────
+         This MUST happen before getting the OTP so we always connect to the
+         account that is currently active in the session, not a stale one.
+      ── */
+      let activeAccountId = ''
+      try {
+        const balRes = await fetch('/api/user/balance', { cache: 'no-store' })
+        if (balRes.ok) {
+          const balData = await balRes.json() as {
+            activeAccountId: string
+            accounts: { accountId: string; currency: string; isDemo: boolean }[]
+          }
+          activeAccountId = balData.activeAccountId
+          const active = balData.accounts.find(a => a.accountId === activeAccountId)
+          if (active) {
+            setCurrency(active.currency)
+            currencyRef.current = active.currency
+            setAccountLabel(active.isDemo ? 'Demo' : 'Real')
+          }
+          setActiveAccountId(balData.activeAccountId)
+        }
+      } catch { /* non-fatal — proceed with existing currency */ }
+
       /* ── Get OTP-authenticated WS URL from server ── */
       let wsUrl = ''
       try {
@@ -868,6 +1218,9 @@ export default function AnalysisPage() {
         scheduleReconnect()
         return
       }
+
+      /* Record which account this WS is connected to */
+      connectedAccountRef.current = activeAccountId
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
@@ -907,8 +1260,25 @@ export default function AnalysisPage() {
 
         /* ── buy response ── */
         if (msg.msg_type === 'buy') {
-          const buy = msg.buy as { contract_id: number; buy_price: number }
-          pendingBuysRef.current.set(buy.contract_id, buy.buy_price)
+          const buy = msg.buy as {
+            contract_id: number; buy_price: number
+            longcode?: string; payout?: number
+          }
+          const reqId  = msg.req_id as number | undefined
+          const entrySpot = reqId != null ? (pendingSpotsByReq.current.get(reqId) ?? null) : null
+          if (reqId != null) pendingSpotsByReq.current.delete(reqId)
+          pendingBuysRef.current.set(buy.contract_id, {
+            buyPrice: buy.buy_price,
+            entrySpot,
+            longcode: buy.longcode,
+            potentialPayout: buy.payout,
+          })
+          setLastContractSummary({
+            symbol:         symbolRef.current,
+            contractType:   contractTypeRef.current,
+            stake:          buy.buy_price,
+            potentialPayout: buy.payout ?? 0,
+          })
           setRunStats(prev => ({
             ...prev,
             totalStake: prev.totalStake + buy.buy_price,
@@ -926,10 +1296,13 @@ export default function AnalysisPage() {
           }
 
           if (tx.action === 'sell' && tx.contract_id != null) {
-            const buyPrice = pendingBuysRef.current.get(tx.contract_id)
-            if (buyPrice === undefined) return
+            const pending = pendingBuysRef.current.get(tx.contract_id)
+            if (pending === undefined) return
 
             pendingBuysRef.current.delete(tx.contract_id)
+            const { buyPrice, entrySpot, longcode, potentialPayout } = pending
+            // Approximate exit spot from the live tick stream at sell time
+            const exitSpot = livePriceRef.current ?? undefined
             const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
@@ -945,13 +1318,17 @@ export default function AnalysisPage() {
             })
 
             setTxLog(prev => [{
-              id:           tx.contract_id!,
-              time:         Date.now(),
-              contractType: contractTypeRef.current,
-              stake:        buyPrice,
-              payout:       sellAmount,
+              id:              tx.contract_id!,
+              time:            Date.now(),
+              contractType:    contractTypeRef.current,
+              stake:           buyPrice,
+              payout:          sellAmount,
+              potentialPayout: potentialPayout ?? 0,
               won,
-              symbol:       symbolRef.current,
+              symbol:          symbolRef.current,
+              entrySpot:       entrySpot ?? undefined,
+              exitSpot,
+              longcode,
             }, ...prev].slice(0, 100))
 
             if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
@@ -1017,11 +1394,51 @@ export default function AnalysisPage() {
     }
   }, [running, executeTrade])
 
+  /**
+   * ── Account-change watchdog ────────────────────────────────────────────────
+   * Polls /api/user/balance every 20 seconds.
+   * If the active account has changed since the bot last connected (e.g. the
+   * user switched from Real → Demo in the header), we close the current WS so
+   * the auto-reconnect logic picks up the new account.
+   * This prevents the "insufficient balance" error that occurs when the bot is
+   * still connected to a real account with $0 after switching to the demo.
+   */
+  useEffect(() => {
+    const poll = setInterval(async () => {
+      if (intentionalClose.current) return
+      try {
+        const res = await fetch('/api/user/balance', { cache: 'no-store' })
+        if (!res.ok) return
+        const data = await res.json() as {
+          activeAccountId: string
+          accounts: { accountId: string; currency: string; isDemo: boolean }[]
+        }
+        const newId = data.activeAccountId
+        if (newId && connectedAccountRef.current && newId !== connectedAccountRef.current) {
+          // Account changed — update currency label and reconnect bot WS
+          const active = data.accounts.find(a => a.accountId === newId)
+          if (active) {
+            setCurrency(active.currency)
+            currencyRef.current = active.currency
+            setAccountLabel(active.isDemo ? 'Demo' : 'Real')
+          }
+          // Closing the WS triggers onclose → scheduleReconnect → connect()
+          // connect() will fetch the new account's OTP automatically
+          setRunning(false)
+          runningRef.current = false
+          botWsRef.current?.close()
+        }
+      } catch { /* ignore poll errors */ }
+    }, 20_000)
+    return () => clearInterval(poll)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Reset handler ── */
   function handleReset() {
     setRunning(false)
     runningRef.current = false
     pendingBuysRef.current.clear()
+    pendingSpotsByReq.current.clear()
     setRunStats({ totalStake: 0, totalPayout: 0, runs: 0, lost: 0, won: 0, profit: 0 })
     setTxLog([])
   }
@@ -1173,7 +1590,11 @@ export default function AnalysisPage() {
 
   /* ── Render ── */
   return (
-    <div style={{ background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column', paddingBottom: '48px' }}>
+    <div style={{
+      background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column', paddingBottom: '48px',
+      paddingRight: runOpen ? '340px' : '0',
+      transition: 'padding-right 0.28s cubic-bezier(0.4,0,0.2,1)',
+    }}>
 
       {/* ── Circles / Scanner toggle ── */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
@@ -1202,6 +1623,7 @@ export default function AnalysisPage() {
         <>
           {/* ── Top controls ── */}
           <div style={{
+            position: 'relative',
             display: 'flex', alignItems: 'center', gap: '1rem',
             padding: '0.75rem 1.25rem',
             borderBottom: '1px solid var(--border)',
@@ -1240,7 +1662,11 @@ export default function AnalysisPage() {
               />
             </div>
 
-            <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+            {/* Live price — absolutely centered so it sits in the middle regardless of other controls */}
+            <div style={{
+              position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+              textAlign: 'center', pointerEvents: 'none',
+            }}>
               <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Live Price
               </div>
@@ -1343,8 +1769,22 @@ export default function AnalysisPage() {
         botReady={botReady}
         botError={botError}
         currency={currency}
+        accountLabel={accountLabel}
         txLog={txLog}
+        onViewDetail={() => setShowDetailModal(true)}
+        lastContractSummary={lastContractSummary}
       />
+
+      {/* ── View Detail Modal ── */}
+      {showDetailModal && (
+        <ViewDetailModal
+          onClose={() => setShowDetailModal(false)}
+          txLog={txLog}
+          stats={runStats}
+          accountId={activeAccountId}
+          currency={currency}
+        />
+      )}
 
       {/* ── Run Bar (sticky bottom) ── */}
       <RunBar
