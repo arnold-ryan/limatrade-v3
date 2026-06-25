@@ -1,16 +1,30 @@
 /**
- * Deriv OAuth2 constants for third-party apps
+ * Deriv New API (2024+) constants
  *
- * Register your app and get your App ID at:
- *   https://developers.deriv.com/docs/app-registration
+ * The NEW Deriv API uses OAuth 2.0 Authorization Code + PKCE.
+ * App IDs registered at developers.deriv.com have alphanumeric format (e.g. "33EsxEGxJdpnIFRvtiSpY").
  *
- * OAuth flow (third-party apps):
- *   1. Redirect user → DERIV_OAUTH_URL?app_id={DERIV_CLIENT_ID}&l=en&brand=deriv&redirect_uri={REDIRECT_URI}
- *   2. After login Deriv redirects to: {REDIRECT_URI}?token1=TOKEN&acct1=LOGINID&cur1=USD
- *      (multiple accounts: &token2=...&acct2=...&cur2=...)
- *   3. Use the token directly: WS → { authorize: token1 }
+ * OAuth flow:
+ *   1. Generate PKCE (code_verifier + code_challenge + state)
+ *   2. Redirect to DERIV_OAUTH_URL with client_id, redirect_uri, scope, state, code_challenge
+ *   3. Deriv redirects back: {redirect_uri}?code=AUTH_CODE&state=STATE
+ *   4. Exchange code → Bearer token: POST DERIV_TOKEN_URL with code + code_verifier
+ *   5. Use Bearer token in all REST + WS calls
  *
- * NOTE: DERIV_CLIENT_ID is the App ID shown in your app details on developers.deriv.com.
+ * WebSocket (trading):
+ *   - Get OTP:     POST {DERIV_API_URL}/trading/v1/options/accounts/{accountId}/otp
+ *   - Connect:     wss://api.derivws.com/trading/v1/options/ws/{type}?otp=...
+ *   - Market data: wss://api.derivws.com/trading/v1/options/ws/public (no auth)
  */
-export const DERIV_OAUTH_URL = 'https://oauth.deriv.com/oauth2/authorize'
-export const DERIV_WS_URL    = 'wss://ws.binaryws.com/websockets/v3'
+export const DERIV_OAUTH_URL  = 'https://auth.deriv.com/oauth2/auth'
+export const DERIV_TOKEN_URL  = 'https://auth.deriv.com/oauth2/token'
+export const DERIV_API_URL    = 'https://api.derivws.com'
+
+/** OAuth scopes for trading apps */
+export const DERIV_SCOPE = 'trade account_manage'
+
+/**
+ * Legacy WebSocket (still used for public market data — ticks, candles, active symbols).
+ * Does NOT require auth for public endpoints.
+ */
+export const DERIV_LEGACY_WS_URL = 'wss://ws.binaryws.com/websockets/v3'

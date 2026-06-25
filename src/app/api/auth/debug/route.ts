@@ -2,17 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 
 /**
  * GET /api/auth/debug
- *
- * Shows the exact redirect_uri and app_id Lima Trade will use for OAuth.
- * Open this URL in your browser, then copy the redirect_uri value and paste it
- * into your Deriv app settings at https://developers.deriv.com
- *
- * This endpoint only returns config info — no secrets are exposed.
+ * Shows the exact OAuth config Lima Trade will use. Visit this first when debugging login.
  */
 export async function GET(req: NextRequest) {
-  const appId = process.env.DERIV_CLIENT_ID?.trim() ?? '(not set)'
+  const clientId = process.env.DERIV_CLIENT_ID?.trim() ?? '(not set)'
 
-  // ── Mirror the EXACT same logic as /api/auth/login ──────────────────────
   let redirectUri: string
   let redirectSource: string
 
@@ -31,31 +25,26 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    // ── What to register in Deriv ──────────────────────────────────────────
-    step1_register_this_in_deriv: redirectUri,
-    redirect_uri_source:          redirectSource,
+    api_version:   'NEW (auth.deriv.com — PKCE flow)',
+    client_id:     clientId,
+    redirect_uri:  redirectUri,
+    redirect_source: redirectSource,
 
-    // ── Verify these look right ────────────────────────────────────────────
-    app_id:    appId,
-    login_url: `https://oauth.deriv.com/oauth2/authorize?app_id=${appId}&l=en&brand=deriv&redirect_uri=${encodeURIComponent(redirectUri)}`,
+    login_url_preview: `https://auth.deriv.com/oauth2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=trade+account_manage&state=RANDOM&code_challenge=CHALLENGE&code_challenge_method=S256`,
 
-    // ── Raw env / header values (for diagnosing mismatches) ───────────────
     raw: {
       NEXT_PUBLIC_REDIRECT_URI: process.env.NEXT_PUBLIC_REDIRECT_URI ?? '(not set)',
       VERCEL_URL:               process.env.VERCEL_URL               ?? '(not set)',
       'x-forwarded-proto':      req.headers.get('x-forwarded-proto') ?? '(not set)',
       'x-forwarded-host':       req.headers.get('x-forwarded-host')  ?? '(not set)',
-      'x-forwarded-for':        req.headers.get('x-forwarded-for')   ?? '(not set)',
-      req_url:                  req.url,
     },
 
     instructions: [
-      '1. Go to https://developers.deriv.com',
-      '2. Click your app → Edit',
-      `3. Set "OAuth Redirect URL" to exactly: ${redirectUri}`,
-      '   (copy-paste — even a trailing slash difference will break it)',
-      '4. Save the app',
-      '5. Try logging in again',
+      '1. Go to https://developers.deriv.com → your app → Edit',
+      `2. Set "OAuth Redirect URL" to exactly: ${redirectUri}`,
+      '3. Save the app',
+      '4. The client_id above must match your app\'s App ID on developers.deriv.com',
+      '5. Try logging in — you should now be redirected back after Deriv login',
     ],
   })
 }

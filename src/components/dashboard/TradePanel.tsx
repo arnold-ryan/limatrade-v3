@@ -3,556 +3,381 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 /**
- * TradePanel — Rise/Fall trading using the Deriv WebSocket API
+ * TradePanel — Rise/Fall options trading
  *
- * API flow:
- *  1. fetch /api/user/token → { token, appId }
- *  2. Open WS: wss://ws.binaryws.com/websockets/v3?app_id={appId}
- *  3. → { authorize: token }               get currency, verify scopes
- *  4. → { proposal: 1, ... CALL, ... }     get Rise payout & proposal id
- *  5. → { proposal: 1, ... PUT,  ... }     get Fall payout & proposal id
- *  6. On Rise click → { buy: callId, price: callAskPrice }
- *     On Fall click → { buy: putId,  price: putAskPrice  }
- *  7. Handle buy response / error
+ * New Deriv API WebSocket flow (2024+):
+ *   1. GET /api/user/ws-url → { wsUrl } (server gets OTP from Deriv REST)
+ *   2. Connect to wsUrl (authenticated via OTP in URL)
+ *   3. Send proposal → get { proposal: { id, ask_price } }
+ *   4. Send buy      → get { buy: { contract_id, ... } }
  *
- *  Proposals are re-requested whenever symbol, stake, or duration changes.
- *  Duration units for Deriv: "t"=ticks, "s"=seconds, "m"=minutes, "h"=hours, "d"=days
+ * WebSocket message format is the same as legacy API.
+ * The only difference is how we authenticate the connection (OTP vs authorize msg).
  */
 
-const QUICK_STAKES = ['1', '5', '10', '25', '50']
-
-const DURATIONS = [
-  { label: '1 tick',  value: 1,  unit: 't' },
-  { label: '5 min',   value: 5,  unit: 'm' },
-  { label: '15 min',  value: 15, unit: 'm' },
-  { label: '1 hr',    value: 1,  unit: 'h' },
-]
-
-const MARKET_LABELS: Record<string, string> = {
-  R_10:     'Volatility 10',
-  R_25:     'Volatility 25',
-  R_50:     'Volatility 50',
-  R_75:     'Volatility 75',
-  R_100:    'Volatility 100',
-  RDBULL:   'Bull Market',
-  RDBEAR:   'Bear Market',
-  '1HZ100V':'Vol 100 (1s)',
-  '1HZ75V': 'Vol 75 (1s)',
-  '1HZ50V': 'Vol 50 (1s)',
-  '1HZ25V': 'Vol 25 (1s)',
-  '1HZ10V': 'Vol 10 (1s)',
-}
-
-interface Proposal {
+interface ProposalState {
   id:        string
   ask_price: number
   payout:    number
-  longcode:  string
-  spot:      number
+  error?:    string
 }
 
-interface TradeResult {
-  ok:          boolean
-  contract_id?: number
-  buy_price?:   number
-  payout?:      number
-  direction:    'rise' | 'fall'
-  error?:       string
+const SYMBOL    = 'R_100'
+const DURATION  = 1
+const DUR_UNIT  = 't'   // ticks
+
+function formatNum(n: number, dec = 2) {
+  return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })
 }
 
-const REQ_CALL = 1
-const REQ_PUT  = 2
-const REQ_BUY  = 3
-
-export default function TradePanel({ market = 'R_10' }: { market?: string }) {
-  const [stake,        setStake]        = useState('10')
-  const [duration,     setDuration]     = useState(DURATIONS[1]) // 5 min default
-  const [callProposal, setCallProposal] = useState<Proposal | null>(null)
-  const [putProposal,  setPutProposal]  = useState<Proposal | null>(null)
-  const [currency,     setCurrency]     = useState('USD')
+export default function TradePanel() {
+  const [stake,        setStake]        = useState('1.00')
+  const [callProposal, setCallProposal] = useState<ProposalState | null>(null)
+  const [putProposal,  setPutProposal]  = useState<ProposalState | null>(null)
   const [wsReady,      setWsReady]      = useState(false)
   const [wsError,      setWsError]      = useState<string | null>(null)
-  const [buying,       setBuying]       = useState<'rise' | 'fall' | null>(null)
-  const [result,       setResult]       = useState<TradeResult | null>(null)
+  const [buying,       setBuying]       = useState<'CALL' | 'PUT' | null>(null)
+  const [lastResult,   setLastResult]   = useState<string | null>(null)
+  const [reconnectCount, setReconnectCount] = useState(0)
 
-  const wsRef           = useRef<WebSocket | null>(null)
-  const marketRef       = useRef(market)
-  const stakeRef        = useRef('10')
-  const durationRef     = useRef(DURATIONS[1])
-  const reconnectCount  = useRef(0)
-  const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wsRef            = useRef<WebSocket | null>(null)
+  const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const intentionalClose = useRef(false)
+  const mountedRef       = useRef(true)
 
-  // Keep refs in sync
-  useEffect(() => { marketRef.current   = market   }, [market])
-  useEffect(() => { stakeRef.current    = stake    }, [stake])
-  useEffect(() => { durationRef.current = duration }, [duration])
+  function backoffDelay(attempt: number) {
+    return Math.min(2000 * Math.pow(2, attempt), 30_000)
+  }
 
-  /* ── Request fresh proposals ── */
-  const requestProposals = useCallback((ws: WebSocket) => {
-    if (ws.readyState !== WebSocket.OPEN) return
-    const amount = parseFloat(stakeRef.current) || 1
-    const d      = durationRef.current
-    const sym    = marketRef.current
-    const base   = {
-      proposal:      1,
-      amount,
-      basis:         'stake',
-      currency:      currency || 'USD',
-      symbol:        sym,
-      duration:      d.value,
-      duration_unit: d.unit,
-    }
-    // CALL = Rise
-    ws.send(JSON.stringify({ ...base, contract_type: 'CALL', req_id: REQ_CALL }))
-    // PUT  = Fall
-    ws.send(JSON.stringify({ ...base, contract_type: 'PUT',  req_id: REQ_PUT  }))
-  }, [currency])
-
-  /* ── TradePanel WebSocket lifecycle with auto-reconnect ── */
-  useEffect(() => {
-    let ws: WebSocket | null = null
-    let ping: ReturnType<typeof setInterval> | null = null
+  /* ── Connect to Deriv WS via OTP ────────────────────────────────────────── */
+  const connect = useCallback(async (attempt = 0) => {
+    if (!mountedRef.current) return
     intentionalClose.current = false
 
-    function backoffDelay(attempt: number) {
-      return Math.min(2000 * Math.pow(2, attempt), 30_000)
+    // Clear any pending reconnect timer
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = null
     }
 
-    function scheduleReconnect(delay = 2000) {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
-      reconnectTimer.current = setTimeout(() => {
-        if (!intentionalClose.current) connect()
-      }, delay)
-    }
+    setWsError(null)
+    setWsReady(false)
+    setCallProposal(null)
+    setPutProposal(null)
 
-    async function connect() {
-      setWsError(null)
-      setWsReady(false)
-
-      let token = '', appId = ''
-      try {
-        const res = await fetch('/api/user/token')
-        if (!res.ok) {
-          if (res.status === 401) {
-            intentionalClose.current = true
-            setWsError('Session expired — please log in again')
-            return
-          }
-          setWsError('Failed to connect')
-          scheduleReconnect()
-          return
-        }
-        ;({ token, appId } = await res.json() as { token: string; appId: string })
-      } catch {
-        setWsError('Network error — retrying…')
-        scheduleReconnect()
-        return
+    try {
+      // Get OTP WebSocket URL from our server (server calls Deriv REST with Bearer token)
+      const urlRes = await fetch('/api/user/ws-url')
+      if (!urlRes.ok) {
+        const err = await urlRes.json().catch(() => ({}))
+        throw new Error(err.error ?? `ws-url ${urlRes.status}`)
       }
+      const { wsUrl } = await urlRes.json()
+      if (!wsUrl) throw new Error('no_ws_url')
 
-      ws = new WebSocket(`wss://ws.binaryws.com/websockets/v3?app_id=${appId}`)
+      if (!mountedRef.current) return
+
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = () => {
-        reconnectCount.current = 0
+        if (!mountedRef.current) { ws.close(); return }
+        setReconnectCount(0)
+        setWsReady(true)
         setWsError(null)
-        ws!.send(JSON.stringify({ authorize: token }))
-        ping = setInterval(() => {
-          if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
-        }, 30_000)
+
+        // Request both CALL and PUT proposals
+        ws.send(JSON.stringify({
+          proposal: 1, subscribe: 1, req_id: 1,
+          amount: parseFloat(stake) || 1,
+          basis: 'stake',
+          contract_type: 'CALL',
+          currency: 'USD',
+          duration: DURATION,
+          duration_unit: DUR_UNIT,
+          symbol: SYMBOL,
+        }))
+        ws.send(JSON.stringify({
+          proposal: 1, subscribe: 1, req_id: 2,
+          amount: parseFloat(stake) || 1,
+          basis: 'stake',
+          contract_type: 'PUT',
+          currency: 'USD',
+          duration: DURATION,
+          duration_unit: DUR_UNIT,
+          symbol: SYMBOL,
+        }))
       }
 
-      ws.onmessage = (ev) => {
-        let msg: Record<string, unknown>
-        try { msg = JSON.parse(ev.data as string) } catch { return }
+      ws.onmessage = (e) => {
+        if (!mountedRef.current) return
+        try {
+          const msg = JSON.parse(e.data)
 
-        if (msg.error) {
-          const err = msg.error as { message: string; code?: string }
-          if (err.code === 'AuthorizationRequired' || err.code === 'InvalidToken') {
-            intentionalClose.current = true
-            setWsError('Session expired — please log in again')
-            ws?.close()
+          if (msg.error) {
+            // Session / auth errors — don't reconnect
+            const fatal = ['AuthorizationRequired', 'InvalidToken', 'InvalidAppID']
+            if (fatal.includes(msg.error.code)) {
+              intentionalClose.current = true
+              setWsError('Session expired. Please log out and log back in.')
+              ws.close()
+              return
+            }
+            if (msg.req_id === 1) setCallProposal({ id: '', ask_price: 0, payout: 0, error: msg.error.message })
+            if (msg.req_id === 2) setPutProposal({ id: '', ask_price: 0, payout: 0, error: msg.error.message })
             return
           }
-          if ((msg.req_id as number) === REQ_BUY) {
+
+          if (msg.msg_type === 'proposal') {
+            const p = msg.proposal
+            const state: ProposalState = {
+              id:        p.id,
+              ask_price: p.ask_price,
+              payout:    p.payout,
+            }
+            if (msg.req_id === 1) setCallProposal(state)
+            if (msg.req_id === 2) setPutProposal(state)
+          }
+
+          if (msg.msg_type === 'buy') {
+            const b = msg.buy
+            setLastResult(`✓ Contract opened — ID ${b.contract_id}. Buy price: ${formatNum(b.buy_price)} ${b.currency ?? 'USD'}`)
             setBuying(null)
-            setResult({ ok: false, direction: 'rise', error: err.message })
-          } else {
-            setWsError(err.message)
           }
-          return
-        }
-
-        /* authorize */
-        if (msg.msg_type === 'authorize') {
-          const auth = msg.authorize as { currency: string; scopes?: string[] }
-
-          /* Scope check */
-          const scopes = auth.scopes ?? []
-          if (scopes.length > 0 && !scopes.includes('trade')) {
-            intentionalClose.current = true
-            setWsError('No trading permission. Log out and log in again to grant trade access.')
-            ws?.close()
-            return
-          }
-
-          setCurrency(auth.currency)
-          setWsReady(true)
-          requestProposals(ws!)
-        }
-
-        /* proposal */
-        if (msg.msg_type === 'proposal') {
-          const p = msg.proposal as {
-            id: string; ask_price: number; payout: number; longcode: string; spot: number
-          }
-          const proposal: Proposal = { id: p.id, ask_price: p.ask_price, payout: p.payout, longcode: p.longcode, spot: p.spot }
-          if ((msg.req_id as number) === REQ_CALL) setCallProposal(proposal)
-          if ((msg.req_id as number) === REQ_PUT)  setPutProposal(proposal)
-        }
-
-        /* buy response */
-        if (msg.msg_type === 'buy') {
-          const b = msg.buy as { contract_id: number; buy_price: number; payout: number; longcode: string }
-          const dir = buying ?? 'rise'
-          setBuying(null)
-          setResult({ ok: true, direction: dir, contract_id: b.contract_id, buy_price: b.buy_price, payout: b.payout })
-          setTimeout(() => requestProposals(ws!), 500)
-        }
+        } catch { /* ignore parse errors */ }
       }
 
-      ws.onerror = () => { /* onclose handles reconnect */ }
+      ws.onerror = () => {
+        if (!mountedRef.current) return
+        setWsError('Connection error')
+        setWsReady(false)
+      }
+
       ws.onclose = () => {
+        if (!mountedRef.current) return
         setWsReady(false)
         setCallProposal(null)
         setPutProposal(null)
-        wsRef.current = null
-        if (ping) { clearInterval(ping); ping = null }
+        setBuying(null)
 
-        if (!intentionalClose.current) {
-          const attempt = reconnectCount.current++
-          const delay   = backoffDelay(attempt)
-          setWsError(`Disconnected — reconnecting in ${Math.round(delay / 1000)}s…`)
-          scheduleReconnect(delay)
-        }
+        if (intentionalClose.current) return
+
+        // Auto-reconnect with exponential backoff
+        const delay = backoffDelay(attempt)
+        setWsError(`Reconnecting in ${Math.round(delay / 1000)}s…`)
+        setReconnectCount(c => c + 1)
+        reconnectTimer.current = setTimeout(() => {
+          if (mountedRef.current) connect(attempt + 1)
+        }, delay)
+      }
+
+    } catch (err: any) {
+      if (!mountedRef.current) return
+      setWsError(err.message ?? 'Connection failed')
+      // Retry for transient errors (not auth errors)
+      if (!intentionalClose.current) {
+        const delay = backoffDelay(attempt)
+        reconnectTimer.current = setTimeout(() => {
+          if (mountedRef.current) connect(attempt + 1)
+        }, delay)
       }
     }
+  }, [stake])
 
-    connect()
+  useEffect(() => {
+    mountedRef.current = true
+    connect(0)
     return () => {
+      mountedRef.current = false
       intentionalClose.current = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
-      if (ping) clearInterval(ping)
-      ws?.close()
-      wsRef.current = null
+      wsRef.current?.close()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* Re-request proposals when market, stake, or duration changes */
+  // Re-subscribe proposals when stake changes
   useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && wsReady) {
-      // Debounce so rapid stake typing doesn't spam the API
-      const id = setTimeout(() => requestProposals(wsRef.current!), 400)
-      return () => clearTimeout(id)
-    }
-  }, [market, stake, duration, wsReady, requestProposals])
-
-  /* ── Buy handler ── */
-  function handleBuy(direction: 'rise' | 'fall') {
+    if (!wsReady || !wsRef.current) return
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    const proposal = direction === 'rise' ? callProposal : putProposal
-    if (!proposal) return
+    const s = parseFloat(stake) || 1
+    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 1, amount: s, basis: 'stake', contract_type: 'CALL', currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, symbol: SYMBOL }))
+    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 2, amount: s, basis: 'stake', contract_type: 'PUT',  currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, symbol: SYMBOL }))
+  }, [stake, wsReady])
 
-    setBuying(direction)
-    setResult(null)
-
-    /*
-     * Deriv buy API:
-     * { buy: <proposal_id>, price: <max_price_willing_to_pay> }
-     * price = ask_price to execute at the exact quoted price.
-     * Setting slightly higher (ask_price * 1.02) adds a tiny slippage buffer.
-     */
-    ws.send(JSON.stringify({
-      buy:     proposal.id,
-      price:   parseFloat((proposal.ask_price * 1.02).toFixed(2)),
-      req_id:  REQ_BUY,
+  /* ── Buy ───────────────────────────────────────────────────────────────── */
+  function buyContract(type: 'CALL' | 'PUT') {
+    const proposal = type === 'CALL' ? callProposal : putProposal
+    if (!proposal?.id || !wsRef.current || !wsReady || buying) return
+    setBuying(type)
+    setLastResult(null)
+    wsRef.current.send(JSON.stringify({
+      buy:   proposal.id,
+      price: proposal.ask_price * 1.02, // 2% slippage buffer
     }))
   }
 
-  const stakeNum  = parseFloat(stake) || 0
-  const callPayout = callProposal?.payout ?? 0
-  const putPayout  = putProposal?.payout  ?? 0
+  /* ── Render ───────────────────────────────────────────────────────────── */
+  const s = parseFloat(stake) || 1
 
   return (
     <div style={{
-      width: '100%', height: '100%',
-      display: 'flex', flexDirection: 'column',
-      padding: '1.25rem', gap: '1rem',
-      borderLeft: '1px solid var(--border)',
-      background: '#050505', overflowY: 'auto',
+      background: '#07111e',
+      border: '1px solid rgba(255,255,255,0.08)',
+      borderRadius: '12px',
+      padding: '20px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '16px',
     }}>
 
-      {/* ── Header ── */}
-      <div>
-        <h2 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff', marginBottom: '0.2rem' }}>
-          Place Trade
-        </h2>
-        <p style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.4)' }}>
-          Rise / Fall · {MARKET_LABELS[market] ?? market}
-        </p>
-      </div>
-
-      {/* ── Connection status ── */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: '0.4rem',
-        padding: '0.4rem 0.65rem',
-        borderRadius: '8px',
-        background: wsError
-          ? 'rgba(239,68,68,0.08)'
-          : wsReady
-          ? 'rgba(34,197,94,0.06)'
-          : 'rgba(252,163,17,0.06)',
-        border: `1px solid ${wsError ? 'rgba(239,68,68,0.2)' : wsReady ? 'rgba(34,197,94,0.15)' : 'rgba(252,163,17,0.15)'}`,
-      }}>
-        <span style={{
-          width: '6px', height: '6px', borderRadius: '50%',
-          background: wsError ? '#ef4444' : wsReady ? '#22c55e' : '#FCA311',
-          boxShadow: wsReady && !wsError ? '0 0 5px #22c55e' : 'none',
-          flexShrink: 0,
-        }}/>
-        <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
-          {wsError ?? (wsReady ? `Connected · ${currency}` : 'Connecting…')}
-        </span>
-      </div>
-
-      {/* ── Stake ── */}
-      <div>
-        <label style={{
-          display: 'block', fontSize: '0.72rem', fontWeight: 600,
-          color: 'rgba(229,229,229,0.5)', marginBottom: '0.5rem',
-          textTransform: 'uppercase', letterSpacing: '0.05em',
-        }}>
-          Stake ({currency})
-        </label>
-
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '0.5rem',
-          background: '#111', border: '1px solid var(--border)',
-          borderRadius: '10px', padding: '0 0.75rem', marginBottom: '0.6rem',
-        }}>
-          <span style={{ color: 'rgba(229,229,229,0.4)', fontSize: '1rem', fontWeight: 600 }}>$</span>
-          <input
-            type="number"
-            value={stake}
-            min="0.35"
-            step="0.01"
-            onChange={e => setStake(e.target.value)}
-            style={{
-              flex: 1, padding: '0.75rem 0',
-              background: 'transparent', border: 'none',
-              color: '#fff', fontSize: '1.15rem', fontWeight: 700, outline: 'none',
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          />
-        </div>
-
-        <div style={{ display: 'flex', gap: '0.4rem' }}>
-          {QUICK_STAKES.map(v => (
-            <button
-              key={v}
-              onClick={() => setStake(v)}
-              style={{
-                flex: 1, padding: '0.45rem 0',
-                borderRadius: '7px', border: '1px solid', cursor: 'pointer',
-                fontSize: '0.78rem', fontWeight: 600, transition: 'all 0.15s',
-                borderColor: stake === v ? 'var(--gold)'           : 'var(--border)',
-                background:  stake === v ? 'rgba(252,163,17,0.12)' : '#111',
-                color:       stake === v ? 'var(--gold)'           : 'rgba(229,229,229,0.5)',
-              }}
-            >
-              ${v}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Duration ── */}
-      <div>
-        <label style={{
-          display: 'block', fontSize: '0.72rem', fontWeight: 600,
-          color: 'rgba(229,229,229,0.5)', marginBottom: '0.5rem',
-          textTransform: 'uppercase', letterSpacing: '0.05em',
-        }}>
-          Duration
-        </label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-          {DURATIONS.map(d => (
-            <button
-              key={d.label}
-              onClick={() => setDuration(d)}
-              style={{
-                padding: '0.65rem', borderRadius: '8px',
-                border: '1px solid', cursor: 'pointer',
-                fontSize: '0.8rem', fontWeight: 600, transition: 'all 0.15s',
-                borderColor: duration.label === d.label ? 'var(--gold)'           : 'var(--border)',
-                background:  duration.label === d.label ? 'rgba(252,163,17,0.12)' : '#111',
-                color:       duration.label === d.label ? 'var(--gold)'           : 'rgba(229,229,229,0.5)',
-              }}
-            >
-              {d.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Payout summary (from real Deriv proposal) ── */}
-      <div style={{
-        padding: '0.9rem 1rem', borderRadius: '10px',
-        background: 'rgba(252,163,17,0.05)', border: '1px solid var(--border)',
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(229,229,229,0.45)' }}>Stake</span>
-          <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>${stakeNum.toFixed(2)}</span>
-        </div>
-        <div style={{ height: '1px', background: 'var(--border)', marginBottom: '0.5rem' }} />
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(229,229,229,0.45)' }}>
-            {wsReady && (callProposal || putProposal) ? 'Actual Payout' : 'Est. Payout'}
-          </span>
-          <span style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--gold)' }}>
-            {wsReady && callProposal
-              ? `$${callPayout.toFixed(2)}`
-              : `~$${(stakeNum * 1.85).toFixed(2)}`}
-          </span>
-        </div>
-        {callProposal && (
-          <div style={{
-            marginTop: '0.5rem', fontSize: '0.62rem',
-            color: 'rgba(229,229,229,0.3)', lineHeight: 1.4,
-          }}>
-            {callProposal.longcode}
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <h2 style={{ margin: 0, color: '#fff', fontSize: '1.05rem', fontWeight: 700 }}>
+            Rise / Fall
+          </h2>
+          <div style={{ color: '#888', fontSize: '0.75rem', marginTop: '2px' }}>
+            {SYMBOL} · {DURATION}{DUR_UNIT} · Stake basis
           </div>
-        )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{
+            width: '8px', height: '8px', borderRadius: '50%',
+            background: wsReady ? '#22c55e' : '#888',
+            animation: wsReady ? 'pulse 2s ease infinite' : 'none',
+          }} />
+          <span style={{ color: wsReady ? '#22c55e' : '#888', fontSize: '0.75rem' }}>
+            {wsReady ? 'Live' : reconnectCount > 0 ? `Reconnect #${reconnectCount}` : 'Connecting…'}
+          </span>
+        </div>
       </div>
 
-      {/* ── Trade result toast ── */}
-      {result && (
+      {/* WS error banner */}
+      {wsError && (
         <div style={{
-          padding: '0.75rem 1rem', borderRadius: '10px',
-          background: result.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
-          border: `1px solid ${result.ok ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+          background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+          borderRadius: '8px', padding: '10px 14px',
+          color: '#fca5a5', fontSize: '0.8rem',
         }}>
-          {result.ok ? (
-            <>
-              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#22c55e', marginBottom: '0.3rem' }}>
-                Trade placed ✓
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.6)', lineHeight: 1.5 }}>
-                Contract #{result.contract_id}<br/>
-                Stake: ${result.buy_price?.toFixed(2)} · Potential win: ${result.payout?.toFixed(2)}
-              </div>
-            </>
-          ) : (
-            <>
-              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#ef4444', marginBottom: '0.3rem' }}>
-                Trade failed
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.6)' }}>
-                {result.error}
-              </div>
-            </>
-          )}
-          <button
-            onClick={() => setResult(null)}
-            style={{
-              float: 'right', marginTop: '-1.5rem',
-              background: 'none', border: 'none',
-              color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1.1rem',
-            }}
-          >×</button>
+          {wsError}
         </div>
       )}
 
-      {/* ── Rise / Fall buttons ── */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: 'auto' }}>
-        {/* Rise = CALL */}
-        <button
-          onClick={() => handleBuy('rise')}
-          disabled={!wsReady || !callProposal || buying !== null}
+      {/* Stake */}
+      <div>
+        <label style={{ color: '#888', fontSize: '0.78rem', display: 'block', marginBottom: '6px' }}>
+          Stake (USD)
+        </label>
+        <input
+          type="number"
+          min="0.35"
+          step="0.01"
+          value={stake}
+          onChange={e => setStake(e.target.value)}
           style={{
-            width: '100%', padding: '1rem', borderRadius: '12px', border: 'none',
-            background: !wsReady || buying !== null ? '#1a2a1a' : 'linear-gradient(135deg, #22c55e, #16a34a)',
-            color: !wsReady || buying !== null ? 'rgba(255,255,255,0.3)' : '#fff',
-            fontSize: '0.95rem', fontWeight: 700, cursor: wsReady && buying === null ? 'pointer' : 'not-allowed',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            boxShadow: wsReady ? '0 4px 20px rgba(34,197,94,0.2)' : 'none',
-            transition: 'opacity 0.15s',
+            width: '100%', padding: '10px 12px',
+            background: 'rgba(255,255,255,0.06)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: '8px', color: '#fff',
+            fontSize: '1rem', fontWeight: 600,
+            boxSizing: 'border-box',
           }}
-        >
-          <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {buying === 'rise' ? (
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="7" cy="7" r="5" strokeDasharray="25" strokeDashoffset="0"
-                  style={{ animation: 'spin 0.8s linear infinite', transformOrigin: '7px 7px' }}/>
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <polyline points="18 15 12 9 6 15"/>
-              </svg>
-            )}
-            {buying === 'rise' ? 'Placing…' : 'Rise'}
-          </span>
-          <span style={{ fontSize: '0.78rem', opacity: 0.85 }}>
-            Win ${callPayout > 0 ? callPayout.toFixed(2) : (stakeNum * 1.85).toFixed(2)}
-          </span>
-        </button>
+        />
+      </div>
 
-        {/* Fall = PUT */}
+      {/* Payout preview */}
+      {(callProposal || putProposal) && (
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1fr 1fr',
+          gap: '8px', fontSize: '0.78rem',
+        }}>
+          {[
+            { label: 'Rise payout', val: callProposal?.payout },
+            { label: 'Fall payout', val: putProposal?.payout },
+          ].map(({ label, val }) => (
+            <div key={label} style={{
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: '8px', padding: '8px 10px',
+            }}>
+              <div style={{ color: '#888', marginBottom: '2px' }}>{label}</div>
+              <div style={{ color: '#FCA311', fontWeight: 600, fontSize: '0.9rem' }}>
+                {val ? `USD ${formatNum(val)}` : '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Buy buttons */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
         <button
-          onClick={() => handleBuy('fall')}
-          disabled={!wsReady || !putProposal || buying !== null}
+          onClick={() => buyContract('CALL')}
+          disabled={!callProposal?.id || !!buying || !wsReady}
           style={{
-            width: '100%', padding: '1rem', borderRadius: '12px', border: 'none',
-            background: !wsReady || buying !== null ? '#2a1a1a' : 'linear-gradient(135deg, #ef4444, #dc2626)',
-            color: !wsReady || buying !== null ? 'rgba(255,255,255,0.3)' : '#fff',
-            fontSize: '0.95rem', fontWeight: 700, cursor: wsReady && buying === null ? 'pointer' : 'not-allowed',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            boxShadow: wsReady ? '0 4px 20px rgba(239,68,68,0.2)' : 'none',
-            transition: 'opacity 0.15s',
+            padding: '14px 0', borderRadius: '10px', border: 'none',
+            background: !callProposal?.id || buying || !wsReady
+              ? 'rgba(34,197,94,0.2)' : 'linear-gradient(135deg, #22c55e, #16a34a)',
+            color: '#fff', fontWeight: 700, fontSize: '0.95rem',
+            cursor: !callProposal?.id || buying || !wsReady ? 'not-allowed' : 'pointer',
+            transition: 'all 0.15s',
           }}
         >
-          <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {buying === 'fall' ? (
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="7" cy="7" r="5" strokeDasharray="25" strokeDashoffset="0"
-                  style={{ animation: 'spin 0.8s linear infinite', transformOrigin: '7px 7px' }}/>
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            )}
-            {buying === 'fall' ? 'Placing…' : 'Fall'}
-          </span>
-          <span style={{ fontSize: '0.78rem', opacity: 0.85 }}>
-            Win ${putPayout > 0 ? putPayout.toFixed(2) : (stakeNum * 1.85).toFixed(2)}
-          </span>
+          {buying === 'CALL' ? '…' : `▲ Rise`}
+          {callProposal?.ask_price && !buying ? (
+            <div style={{ fontSize: '0.72rem', fontWeight: 400, opacity: 0.8, marginTop: '2px' }}>
+              {formatNum(callProposal.ask_price)} USD
+            </div>
+          ) : null}
+        </button>
+        <button
+          onClick={() => buyContract('PUT')}
+          disabled={!putProposal?.id || !!buying || !wsReady}
+          style={{
+            padding: '14px 0', borderRadius: '10px', border: 'none',
+            background: !putProposal?.id || buying || !wsReady
+              ? 'rgba(239,68,68,0.2)' : 'linear-gradient(135deg, #ef4444, #dc2626)',
+            color: '#fff', fontWeight: 700, fontSize: '0.95rem',
+            cursor: !putProposal?.id || buying || !wsReady ? 'not-allowed' : 'pointer',
+            transition: 'all 0.15s',
+          }}
+        >
+          {buying === 'PUT' ? '…' : `▼ Fall`}
+          {putProposal?.ask_price && !buying ? (
+            <div style={{ fontSize: '0.72rem', fontWeight: 400, opacity: 0.8, marginTop: '2px' }}>
+              {formatNum(putProposal.ask_price)} USD
+            </div>
+          ) : null}
         </button>
       </div>
 
-      {/* ── Risk disclaimer ── */}
-      <p style={{
-        fontSize: '0.62rem', color: 'rgba(229,229,229,0.22)',
-        textAlign: 'center', lineHeight: 1.5,
-      }}>
-        Trading involves risk. Only trade with funds you can afford to lose.
-        Payout shown is the real Deriv API quote and updates with market conditions.
-      </p>
+      {/* Error on proposal */}
+      {(callProposal?.error || putProposal?.error) && (
+        <div style={{ color: '#f87171', fontSize: '0.78rem' }}>
+          {callProposal?.error || putProposal?.error}
+        </div>
+      )}
+
+      {/* Last trade result */}
+      {lastResult && (
+        <div style={{
+          background: 'rgba(34,197,94,0.08)',
+          border: '1px solid rgba(34,197,94,0.2)',
+          borderRadius: '8px', padding: '10px 14px',
+          color: '#86efac', fontSize: '0.8rem',
+        }}>
+          {lastResult}
+        </div>
+      )}
+
+      {/* Disclaimer */}
+      <div style={{ color: '#555', fontSize: '0.7rem', lineHeight: 1.4 }}>
+        Trading derivatives involves risk. You may lose your entire stake.
+        Only trade with money you can afford to lose.
+      </div>
 
       <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
     </div>
   )

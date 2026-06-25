@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
 /* ─── Constants ─────────────────────────────────────────── */
 const WS_URL      = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
-const BOT_WS_BASE = 'wss://ws.binaryws.com/websockets/v3?app_id='
+// Bot WS URL is now fetched via /api/user/ws-url (OTP-authenticated)
 const MAX_HISTORY = 5000
 
 const MARKETS = [
@@ -847,36 +847,41 @@ export default function AnalysisPage() {
       setBotError(null)
       setBotReady(false)
 
-      let token = '', appId = ''
+      /* ── Get OTP-authenticated WS URL from server ── */
+      let wsUrl = ''
       try {
-        const res = await fetch('/api/user/token')
+        const res = await fetch('/api/user/ws-url')
         if (!res.ok) {
           if (res.status === 401) {
-            /* Session expired — redirect to login */
             intentionalClose.current = true
             window.location.href = '/'
             return
           }
-          setBotError('Failed to fetch token')
+          setBotError('Failed to get WS URL — retrying…')
+          scheduleReconnect()
           return
         }
-        ;({ token, appId } = await res.json() as { token: string; appId: string })
+        ;({ wsUrl } = await res.json() as { wsUrl: string })
       } catch {
         setBotError('Network error — retrying…')
         scheduleReconnect()
         return
       }
 
-      ws = new WebSocket(`${BOT_WS_BASE}${appId}`)
+      ws = new WebSocket(wsUrl)
       botWsRef.current = ws
 
       ws.onopen = () => {
-        reconnectCount.current = 0  // reset on successful connect
+        reconnectCount.current = 0
         setBotError(null)
-        ws!.send(JSON.stringify({ authorize: token }))
+        /* New Deriv API: connection is already authenticated via OTP in URL.
+           Subscribe to transaction stream immediately. */
+        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
+        setBotReady(true)
+        if (runningRef.current) executeTrade(ws!)
       }
 
       ws.onmessage = (ev) => {
@@ -897,35 +902,6 @@ export default function AnalysisPage() {
           setRunning(false)
           runningRef.current = false
           return
-        }
-
-        /* ── authorize ── */
-        if (msg.msg_type === 'authorize') {
-          const auth = msg.authorize as {
-            currency: string
-            loginid: string
-            scopes?: string[]
-          }
-
-          /* Scope check: token must have 'trade' permission */
-          const scopes = auth.scopes ?? []
-          if (scopes.length > 0 && !scopes.includes('trade')) {
-            intentionalClose.current = true
-            setBotError('No trading permission on this token. Log out and log in again to grant trade access.')
-            setRunning(false)
-            runningRef.current = false
-            ws?.close()
-            return
-          }
-
-          setCurrency(auth.currency)
-          currencyRef.current = auth.currency
-
-          /* Subscribe to real-time transaction stream */
-          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }))
-
-          setBotReady(true)
-          if (runningRef.current) executeTrade(ws!)
         }
 
         /* ── buy response ── */

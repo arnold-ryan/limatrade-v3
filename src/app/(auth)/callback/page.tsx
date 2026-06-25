@@ -5,44 +5,39 @@ import { useRouter } from 'next/navigation'
 
 /**
  * /callback
- * Handles the redirect from Deriv OAuth.
+ * Handles the redirect from Deriv OAuth (new API).
  *
- * Deriv sends tokens DIRECTLY in the URL — not a code:
- *   ?token1=TOKEN&acct1=LOGINID&cur1=USD
- *   [&token2=TOKEN&acct2=LOGINID&cur2=USD]   ← second account if user has real + demo
+ * New Deriv API sends an AUTHORIZATION CODE (not tokens directly):
+ *   ?code=AUTH_CODE&state=RANDOM_STATE
  *
- * This page collects all token/acct/cur groups (up to 10),
- * sends them to /api/auth/token to be saved in the iron-session cookie,
- * then redirects to the dashboard.
+ * We hand the code + state to the server-side /api/auth/token route,
+ * which exchanges it for a Bearer token and fetches the user's accounts.
  */
 export default function CallbackPage() {
   const router = useRouter()
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
+    const code   = params.get('code')
+    const state  = params.get('state')
+    const error  = params.get('error')
 
-    // Collect every token/account group Deriv returned
-    const accounts: Array<{ token: string; loginid: string; currency: string }> = []
-    for (let i = 1; i <= 10; i++) {
-      const token    = params.get(`token${i}`)
-      const loginid  = params.get(`acct${i}`)
-      const currency = params.get(`cur${i}`)
-      if (!token || !loginid) break
-      accounts.push({ token, loginid, currency: currency ?? 'USD' })
-    }
-
-    if (accounts.length === 0) {
-      // Might be an error redirect from Deriv (e.g. user cancelled)
-      const error = params.get('error') ?? 'no_tokens_received'
+    // Deriv sent an error (e.g. user cancelled)
+    if (error) {
       router.replace('/?auth_error=' + encodeURIComponent(error))
       return
     }
 
-    // Hand off to the server-side route — it saves the tokens to the encrypted cookie
+    if (!code) {
+      router.replace('/?auth_error=no_code_received')
+      return
+    }
+
+    // Exchange the auth code for a Bearer token (server-side)
     fetch('/api/auth/token', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ accounts }),
+      body:    JSON.stringify({ code, state }),
     })
       .then(r => r.json())
       .then(data => {
