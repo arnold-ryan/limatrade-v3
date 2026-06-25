@@ -447,7 +447,7 @@ export default function AnalysisPage() {
           {!loading && (
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+              gridTemplateColumns: 'repeat(2, 1fr)',
               gap: '1px',
               background: 'var(--border)',
               flex: 1,
