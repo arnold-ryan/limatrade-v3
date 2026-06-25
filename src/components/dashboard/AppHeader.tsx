@@ -131,7 +131,7 @@ export default function AppHeader() {
 
   return (
     <header style={{
-      position: 'sticky', top: 0, zIndex: 50,
+      position: 'sticky', top: 0, zIndex: 200,
       background: 'rgba(7,17,30,0.95)', backdropFilter: 'blur(12px)',
       borderBottom: '1px solid rgba(255,255,255,0.06)',
       height: '56px',
@@ -205,7 +205,7 @@ export default function AppHeader() {
           >
             <CurrencyFlag currency={displayCurrency} />
             <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {displayId || 'Account'}
+              {activeAccount ? (activeAccount.isDemo ? 'Demo' : 'Real') : 'Account'}
             </span>
             <span style={{ color: '#888', fontSize: '0.75rem' }}>{open ? '▲' : '▼'}</span>
           </button>
@@ -265,7 +265,7 @@ export default function AppHeader() {
                       <CurrencyFlag currency={acc.currency} />
                       <div style={{ flex: 1, textAlign: 'left' }}>
                         <div style={{ color: '#E5E5E5', fontSize: '0.85rem', fontWeight: 500 }}>
-                          {acc.accountId}
+                          {acc.isDemo ? 'Demo Account' : 'Real Account'}
                         </div>
                         <div style={{ color: '#888', fontSize: '0.75rem' }}>
                           {acc.currency} {(acc.balance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}

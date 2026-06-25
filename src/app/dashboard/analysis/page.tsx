@@ -659,6 +659,7 @@ function RunBar({
       borderTop: '1px solid var(--border)',
       display: 'flex',
       alignItems: 'center',
+      justifyContent: 'center',
       gap: '1rem',
       padding: '0 1.25rem',
       zIndex: 50,
@@ -1300,26 +1301,26 @@ export default function AnalysisPage() {
                 <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
                 <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
-                <Sequence seq={ouData.seq.slice(-10)} colorMap={ouColors} />
+                <Sequence seq={ouData.seq.slice(-20)} colorMap={ouColors} />
               </Card>
 
               <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}>
                 <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
                 <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
-                <Sequence seq={mdData.seq.slice(-10)} colorMap={mdColors} />
+                <Sequence seq={mdData.seq.slice(-20)} colorMap={mdColors} />
               </Card>
 
               <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
-                <Sequence seq={eoData.seq.slice(-10)} colorMap={eoColors} />
+                <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors} />
               </Card>
 
               <Card title="Rise / Fall" streak={rfData.streak} streakLabel={rfData.streakLabel}>
                 <Bar label="Rise" color="#22c55e" count={rfData.rise} total={rfData.total} />
                 <Bar label="Fall" color="#ef4444" count={rfData.fall} total={rfData.total} />
-                <Sequence seq={rfData.seq.slice(-10)} colorMap={rfColors} />
+                <Sequence seq={rfData.seq.slice(-20)} colorMap={rfColors} />
               </Card>
             </div>
           )}
