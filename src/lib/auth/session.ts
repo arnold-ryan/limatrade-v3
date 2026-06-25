@@ -19,14 +19,26 @@ export interface SessionData {
   isLoggedIn:   boolean
 }
 
+/* Validate critical env vars at import time so the error is obvious in logs */
+if (!process.env.SESSION_SECRET) {
+  throw new Error(
+    '[Lima Trade] SESSION_SECRET is not set. ' +
+    'Generate one at https://generate-secret.vercel.app/32 and add it to your environment variables.'
+  )
+}
+if (process.env.SESSION_SECRET.length < 32) {
+  throw new Error('[Lima Trade] SESSION_SECRET must be at least 32 characters long.')
+}
+
 const sessionOptions = {
-  password:   process.env.SESSION_SECRET as string,
+  password:   process.env.SESSION_SECRET,
   cookieName: 'lt_session',
   cookieOptions: {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: 'lax' as const,
-    maxAge:   60 * 60 * 8, // 8 hours
+    maxAge:   60 * 60 * 8, // 8 hours — users need to re-auth after this
+    path:     '/',
   },
 }
 

@@ -75,10 +75,13 @@ export default function TradePanel({ market = 'R_10' }: { market?: string }) {
   const [buying,       setBuying]       = useState<'rise' | 'fall' | null>(null)
   const [result,       setResult]       = useState<TradeResult | null>(null)
 
-  const wsRef      = useRef<WebSocket | null>(null)
-  const marketRef  = useRef(market)
-  const stakeRef   = useRef('10')
-  const durationRef = useRef(DURATIONS[1])
+  const wsRef           = useRef<WebSocket | null>(null)
+  const marketRef       = useRef(market)
+  const stakeRef        = useRef('10')
+  const durationRef     = useRef(DURATIONS[1])
+  const reconnectCount  = useRef(0)
+  const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const intentionalClose = useRef(false)
 
   // Keep refs in sync
   useEffect(() => { marketRef.current   = market   }, [market])
@@ -106,10 +109,22 @@ export default function TradePanel({ market = 'R_10' }: { market?: string }) {
     ws.send(JSON.stringify({ ...base, contract_type: 'PUT',  req_id: REQ_PUT  }))
   }, [currency])
 
-  /* ── Bot WebSocket lifecycle ── */
+  /* ── TradePanel WebSocket lifecycle with auto-reconnect ── */
   useEffect(() => {
     let ws: WebSocket | null = null
     let ping: ReturnType<typeof setInterval> | null = null
+    intentionalClose.current = false
+
+    function backoffDelay(attempt: number) {
+      return Math.min(2000 * Math.pow(2, attempt), 30_000)
+    }
+
+    function scheduleReconnect(delay = 2000) {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = setTimeout(() => {
+        if (!intentionalClose.current) connect()
+      }, delay)
+    }
 
     async function connect() {
       setWsError(null)
@@ -119,12 +134,19 @@ export default function TradePanel({ market = 'R_10' }: { market?: string }) {
       try {
         const res = await fetch('/api/user/token')
         if (!res.ok) {
-          setWsError(res.status === 401 ? 'Log in to place trades' : 'Failed to connect')
+          if (res.status === 401) {
+            intentionalClose.current = true
+            setWsError('Session expired — please log in again')
+            return
+          }
+          setWsError('Failed to connect')
+          scheduleReconnect()
           return
         }
         ;({ token, appId } = await res.json() as { token: string; appId: string })
       } catch {
-        setWsError('Network error')
+        setWsError('Network error — retrying…')
+        scheduleReconnect()
         return
       }
 
@@ -132,7 +154,8 @@ export default function TradePanel({ market = 'R_10' }: { market?: string }) {
       wsRef.current = ws
 
       ws.onopen = () => {
-        // Step 1: Authorize
+        reconnectCount.current = 0
+        setWsError(null)
         ws!.send(JSON.stringify({ authorize: token }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
@@ -144,74 +167,81 @@ export default function TradePanel({ market = 'R_10' }: { market?: string }) {
         try { msg = JSON.parse(ev.data as string) } catch { return }
 
         if (msg.error) {
-          const err = (msg.error as { message: string }).message
-          // If the buy failed, surface it to the user
+          const err = msg.error as { message: string; code?: string }
+          if (err.code === 'AuthorizationRequired' || err.code === 'InvalidToken') {
+            intentionalClose.current = true
+            setWsError('Session expired — please log in again')
+            ws?.close()
+            return
+          }
           if ((msg.req_id as number) === REQ_BUY) {
             setBuying(null)
-            setResult({ ok: false, direction: 'rise', error: err })
+            setResult({ ok: false, direction: 'rise', error: err.message })
           } else {
-            setWsError(err)
+            setWsError(err.message)
           }
           return
         }
 
         /* authorize */
         if (msg.msg_type === 'authorize') {
-          const auth = msg.authorize as { currency: string }
+          const auth = msg.authorize as { currency: string; scopes?: string[] }
+
+          /* Scope check */
+          const scopes = auth.scopes ?? []
+          if (scopes.length > 0 && !scopes.includes('trade')) {
+            intentionalClose.current = true
+            setWsError('No trading permission. Log out and log in again to grant trade access.')
+            ws?.close()
+            return
+          }
+
           setCurrency(auth.currency)
           setWsReady(true)
-          // Request initial proposals
           requestProposals(ws!)
         }
 
-        /* proposal — matches req_id to know CALL vs PUT */
+        /* proposal */
         if (msg.msg_type === 'proposal') {
           const p = msg.proposal as {
             id: string; ask_price: number; payout: number; longcode: string; spot: number
           }
-          const proposal: Proposal = {
-            id:        p.id,
-            ask_price: p.ask_price,
-            payout:    p.payout,
-            longcode:  p.longcode,
-            spot:      p.spot,
-          }
+          const proposal: Proposal = { id: p.id, ask_price: p.ask_price, payout: p.payout, longcode: p.longcode, spot: p.spot }
           if ((msg.req_id as number) === REQ_CALL) setCallProposal(proposal)
           if ((msg.req_id as number) === REQ_PUT)  setPutProposal(proposal)
         }
 
         /* buy response */
         if (msg.msg_type === 'buy') {
-          const b = msg.buy as {
-            contract_id:   number
-            buy_price:     number
-            payout:        number
-            longcode:      string
-          }
+          const b = msg.buy as { contract_id: number; buy_price: number; payout: number; longcode: string }
           const dir = buying ?? 'rise'
           setBuying(null)
-          setResult({
-            ok:          true,
-            direction:   dir,
-            contract_id: b.contract_id,
-            buy_price:   b.buy_price,
-            payout:      b.payout,
-          })
-          // Refresh proposals after buying
+          setResult({ ok: true, direction: dir, contract_id: b.contract_id, buy_price: b.buy_price, payout: b.payout })
           setTimeout(() => requestProposals(ws!), 500)
         }
       }
 
-      ws.onerror = () => setWsError('WebSocket error — check your connection')
+      ws.onerror = () => { /* onclose handles reconnect */ }
       ws.onclose = () => {
         setWsReady(false)
+        setCallProposal(null)
+        setPutProposal(null)
         wsRef.current = null
         if (ping) { clearInterval(ping); ping = null }
+
+        if (!intentionalClose.current) {
+          const attempt = reconnectCount.current++
+          const delay   = backoffDelay(attempt)
+          setWsError(`Disconnected — reconnecting in ${Math.round(delay / 1000)}s…`)
+          scheduleReconnect(delay)
+        }
       }
     }
 
     connect()
     return () => {
+      intentionalClose.current = true
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (ping) clearInterval(ping)
       ws?.close()
       wsRef.current = null

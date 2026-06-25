@@ -199,24 +199,31 @@ interface TxEntry {
 /* ─── Run Panel ─────────────────────────────────────────── */
 type RunTab = 'summary' | 'transactions' | 'journal'
 
+function EmptyBoxIcon() {
+  return (
+    <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+      <path d="M10 20L28 11L46 20V36L28 45L10 36V20Z" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
+      <path d="M10 20L28 29L46 20" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
+      <path d="M28 29V45" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
+    </svg>
+  )
+}
+
 function RunPanel({
   open,
   onToggle,
   running,
   stats,
   onReset,
-  /* bot config */
   contractType,
   setContractType,
   stake,
   setStake,
   barrier,
   setBarrier,
-  /* status */
   botReady,
   botError,
   currency,
-  /* tx log */
   txLog,
 }: {
   open: boolean
@@ -236,109 +243,93 @@ function RunPanel({
   txLog: TxEntry[]
 }) {
   const [tab, setTab] = useState<RunTab>('summary')
-
   const TABS: RunTab[] = ['summary', 'transactions', 'journal']
 
-  const statTiles = [
-    { label: 'Total stake',      value: `${stats.totalStake.toFixed(2)} ${currency}` },
-    { label: 'Total payout',     value: `${stats.totalPayout.toFixed(2)} ${currency}` },
-    { label: 'No. of runs',      value: String(stats.runs) },
-    { label: 'Contracts lost',   value: String(stats.lost) },
-    { label: 'Contracts won',    value: String(stats.won) },
-    { label: 'Total profit/loss',value: `${stats.profit >= 0 ? '+' : ''}${stats.profit.toFixed(2)} ${currency}` },
-  ]
-
-  /* ── Input style helper ── */
   const inputStyle: React.CSSProperties = {
-    background: '#050505',
-    border: '1px solid var(--border)',
-    borderRadius: '8px',
-    color: '#fff',
-    fontSize: '0.78rem',
-    padding: '0.35rem 0.6rem',
-    width: '100%',
-    outline: 'none',
+    background: '#0a0f1a', border: '1px solid var(--border)',
+    borderRadius: '8px', color: '#fff', fontSize: '0.78rem',
+    padding: '0.35rem 0.6rem', width: '100%', outline: 'none',
   }
+
+  function downloadCSV() {
+    if (!txLog.length) return
+    const rows = [
+      ['Contract ID','Time','Type','Symbol','Stake','Payout','P/L','Result'],
+      ...txLog.map(tx => [
+        tx.id, new Date(tx.time).toISOString(), tx.contractType, tx.symbol,
+        tx.stake.toFixed(2), tx.payout.toFixed(2), (tx.payout - tx.stake).toFixed(2),
+        tx.won ? 'Won' : 'Lost',
+      ]),
+    ]
+    const url = URL.createObjectURL(new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' }))
+    const a = document.createElement('a'); a.href = url; a.download = 'lima-trade-log.csv'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  /* Stats always shown pinned to bottom — 3×2 grid */
+  const statRows = [
+    [
+      { label: 'Total stake',   value: `${stats.totalStake.toFixed(2)} ${currency}`,  color: '#fff' },
+      { label: 'Total payout',  value: `${stats.totalPayout.toFixed(2)} ${currency}`, color: '#fff' },
+      { label: 'No. of runs',   value: String(stats.runs), color: '#fff' },
+    ],
+    [
+      { label: 'Contracts lost',     value: String(stats.lost), color: stats.lost  > 0 ? '#ef4444' : '#fff' },
+      { label: 'Contracts won',      value: String(stats.won),  color: stats.won   > 0 ? '#22c55e' : '#fff' },
+      {
+        label: 'Total profit/loss',
+        value: `${stats.profit.toFixed(2)} ${currency}`,
+        color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff',
+      },
+    ],
+  ]
 
   return (
     <div style={{
-      position: 'fixed',
-      right: 0,
-      top: '88px',
-      bottom: '48px',
-      width: '350px',
-      transform: open ? 'translateX(0)' : 'translateX(350px)',
+      position: 'fixed', right: 0, top: '56px', bottom: '48px',
+      width: '340px',
+      transform: open ? 'translateX(0)' : 'translateX(340px)',
       transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',
       zIndex: 60,
-      background: '#0a0a0a',
-      borderLeft: '1px solid var(--border)',
-      display: 'flex',
-      flexDirection: 'column',
-      boxShadow: open ? '-8px 0 32px rgba(0,0,0,0.55)' : 'none',
+      background: '#07111e',
+      borderLeft: '1px solid rgba(255,255,255,0.08)',
+      display: 'flex', flexDirection: 'column',
+      boxShadow: open ? '-12px 0 40px rgba(0,0,0,0.7)' : 'none',
     }}>
 
-      {/* ── Toggle handle ── */}
+      {/* Toggle handle */}
       <button
         onClick={onToggle}
         aria-label={open ? 'Close run panel' : 'Open run panel'}
         style={{
-          position: 'absolute',
-          left: '-22px',
-          top: '50%',
-          transform: 'translateY(-50%)',
-          width: '22px',
-          height: '52px',
-          background: '#0a0a0a',
-          border: '1px solid var(--border)',
-          borderRight: 'none',
-          borderRadius: '8px 0 0 8px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'rgba(229,229,229,0.45)',
-          padding: 0,
+          position: 'absolute', left: '-22px', top: '50%', transform: 'translateY(-50%)',
+          width: '22px', height: '52px', background: '#07111e',
+          border: '1px solid rgba(255,255,255,0.08)', borderRight: 'none',
+          borderRadius: '8px 0 0 8px', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: 'rgba(229,229,229,0.45)', padding: 0,
         }}
       >
         <svg width="12" height="18" viewBox="0 0 12 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          {open ? (
-            <>
-              <polyline points="7,4 11,9 7,14"/>
-              <polyline points="2,4  6,9 2,14"/>
-            </>
-          ) : (
-            <>
-              <polyline points="5,4  1,9  5,14"/>
-              <polyline points="10,4 6,9 10,14"/>
-            </>
-          )}
+          {open
+            ? <><polyline points="7,4 11,9 7,14"/><polyline points="2,4 6,9 2,14"/></>
+            : <><polyline points="5,4 1,9 5,14"/><polyline points="10,4 6,9 10,14"/></>}
         </svg>
       </button>
 
-      {/* ── Tab bar ── */}
-      <div style={{
-        display: 'flex',
-        borderBottom: '1px solid var(--border)',
-        background: '#050505',
-        flexShrink: 0,
-      }}>
+      {/* Tab bar */}
+      <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
         {TABS.map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
             style={{
-              flex: 1,
-              padding: '0.65rem 0',
-              fontSize: '0.78rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-              border: 'none',
-              background: 'transparent',
-              color: tab === t ? 'var(--gold)' : 'rgba(229,229,229,0.38)',
-              borderBottom: tab === t ? '2px solid var(--gold)' : '2px solid transparent',
-              textTransform: 'capitalize',
-              transition: 'color 0.15s, border-color 0.15s',
-              letterSpacing: '0.03em',
+              flex: 1, padding: '0.8rem 0',
+              fontSize: '0.8rem', fontWeight: tab === t ? 700 : 500,
+              cursor: 'pointer', border: 'none', background: 'transparent',
+              color: tab === t ? '#fff' : 'rgba(229,229,229,0.4)',
+              borderBottom: tab === t ? '2px solid #fff' : '2px solid transparent',
+              textTransform: 'capitalize', transition: 'color 0.15s',
             }}
           >
             {t.charAt(0).toUpperCase() + t.slice(1)}
@@ -346,291 +337,291 @@ function RunPanel({
         ))}
       </div>
 
-      {/* ── Content ── */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0.85rem' }}>
+      {/* Scrollable content */}
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
 
-        {/* ═══ SUMMARY TAB ═══ */}
+        {/* ═══ SUMMARY ═══ */}
         {tab === 'summary' && (
-          <>
-            {/* Connection status badge */}
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, padding: '1rem' }}>
+
+            {/* Connection badge */}
             <div style={{
-              display: 'flex', alignItems: 'center', gap: '0.4rem',
-              marginBottom: '0.85rem',
-              padding: '0.4rem 0.6rem',
-              borderRadius: '8px',
-              background: botError
-                ? 'rgba(239,68,68,0.1)'
-                : botReady
-                ? 'rgba(34,197,94,0.08)'
-                : 'rgba(252,163,17,0.08)',
-              border: `1px solid ${botError ? 'rgba(239,68,68,0.25)' : botReady ? 'rgba(34,197,94,0.2)' : 'rgba(252,163,17,0.2)'}`,
+              display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '1rem',
+              padding: '0.4rem 0.65rem', borderRadius: '8px',
+              background: botError ? 'rgba(239,68,68,0.1)' : botReady ? 'rgba(34,197,94,0.07)' : 'rgba(252,163,17,0.07)',
+              border: `1px solid ${botError ? 'rgba(239,68,68,0.2)' : botReady ? 'rgba(34,197,94,0.18)' : 'rgba(252,163,17,0.18)'}`,
             }}>
               <span style={{
                 width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
                 background: botError ? '#ef4444' : botReady ? '#22c55e' : '#FCA311',
-                boxShadow: botReady && !botError ? '0 0 6px #22c55e' : 'none',
+                boxShadow: botReady && !botError ? '0 0 6px #22c55e66' : 'none',
               }}/>
-              <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.6)' }}>
-                {botError ? botError : botReady ? 'Connected to Deriv' : 'Connecting…'}
+              <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
+                {botError ?? (botReady ? `Connected · ${currency}` : 'Connecting to Deriv…')}
               </span>
             </div>
 
-            {/* ── Bot config ── */}
+            {/* Bot config */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', marginBottom: '1rem' }}>
-              {/* Contract type */}
               <div>
-                <label style={{
-                  display: 'block', fontSize: '0.6rem', fontWeight: 600,
-                  color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
-                  letterSpacing: '0.06em', marginBottom: '0.3rem',
-                }}>
+                <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                   Contract Type
                 </label>
-                <select
-                  value={contractType}
-                  onChange={e => setContractType(e.target.value)}
-                  disabled={running}
-                  style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}
-                >
-                  {CONTRACT_TYPES.map(c => (
-                    <option key={c.value} value={c.value}>{c.label}</option>
-                  ))}
+                <select value={contractType} onChange={e => setContractType(e.target.value)} disabled={running}
+                  style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}>
+                  {CONTRACT_TYPES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
               </div>
-
-              {/* Stake + barrier row */}
               <div style={{ display: 'flex', gap: '0.5rem' }}>
                 <div style={{ flex: 1 }}>
-                  <label style={{
-                    display: 'block', fontSize: '0.6rem', fontWeight: 600,
-                    color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
-                    letterSpacing: '0.06em', marginBottom: '0.3rem',
-                  }}>
+                  <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                     Stake ({currency})
                   </label>
-                  <input
-                    type="number"
-                    min="0.35"
-                    step="0.01"
-                    value={stake}
-                    onChange={e => setStake(e.target.value)}
-                    disabled={running}
-                    style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'text' }}
-                  />
+                  <input type="number" min="0.35" step="0.01" value={stake} onChange={e => setStake(e.target.value)}
+                    disabled={running} style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'text' }} />
                 </div>
                 {needsBarrier(contractType) && (
                   <div style={{ width: '70px' }}>
-                    <label style={{
-                      display: 'block', fontSize: '0.6rem', fontWeight: 600,
-                      color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
-                      letterSpacing: '0.06em', marginBottom: '0.3rem',
-                    }}>
+                    <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                       Digit
                     </label>
-                    <select
-                      value={barrier}
-                      onChange={e => setBarrier(e.target.value)}
-                      disabled={running}
-                      style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}
-                    >
-                      {DIGITS.map(d => (
-                        <option key={d} value={String(d)}>{d}</option>
-                      ))}
+                    <select value={barrier} onChange={e => setBarrier(e.target.value)} disabled={running}
+                      style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}>
+                      {DIGITS.map(d => <option key={d} value={String(d)}>{d}</option>)}
                     </select>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* ── Idle hint ── */}
-            {!running && stats.runs === 0 && (
-              <div style={{
-                textAlign: 'center',
-                color: 'rgba(229,229,229,0.35)',
-                fontSize: '0.78rem',
-                lineHeight: 1.7,
-                padding: '0.5rem 0.5rem 0.75rem',
-              }}>
-                Configure your bot above, then hit{' '}
-                <strong style={{ color: 'rgba(229,229,229,0.55)' }}>Run</strong>.
-                {' '}Stats will appear here.
+            {/* Empty state */}
+            {stats.runs === 0 && (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
+                <p style={{ color: 'rgba(229,229,229,0.6)', fontSize: '0.85rem', lineHeight: 1.65, textAlign: 'center', margin: 0 }}>
+                  When you&apos;re ready to trade, hit <strong style={{ color: '#fff' }}>Run</strong>.<br/>
+                  You&apos;ll be able to track your bot&apos;s performance here.
+                </p>
               </div>
             )}
 
-            {/* ── Stats tiles ── */}
-            {stats.runs > 0 && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.55rem' }}>
-                {statTiles.map(s => (
-                  <div
-                    key={s.label}
-                    style={{
-                      background: '#050505',
-                      border: '1px solid var(--border)',
-                      borderRadius: '10px',
-                      padding: '0.65rem 0.7rem',
-                    }}
-                  >
-                    <div style={{
-                      fontSize: '0.58rem',
-                      fontWeight: 600,
-                      color: 'rgba(229,229,229,0.32)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.06em',
-                      marginBottom: '0.28rem',
-                    }}>
-                      {s.label}
-                    </div>
-                    <div style={{
-                      fontSize: '0.82rem',
-                      fontWeight: 700,
-                      fontVariantNumeric: 'tabular-nums',
-                      color:
-                        s.label === 'Total profit/loss'
-                          ? stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff'
-                          : s.label === 'Contracts won' && stats.won > 0 ? '#22c55e'
-                          : s.label === 'Contracts lost' && stats.lost > 0 ? '#ef4444'
-                          : '#fff',
-                    }}>
-                      {s.value}
-                    </div>
+            {/* Running indicator */}
+            {running && stats.runs > 0 && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '0.5rem',
+                padding: '0.5rem 0.75rem', borderRadius: '8px',
+                background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.15)',
+              }}>
+                <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#22c55e', flexShrink: 0, animation: 'pulse 1.5s infinite' }}/>
+                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.55)' }}>
+                  Bot running · {stats.runs} contract{stats.runs !== 1 ? 's' : ''} placed
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ TRANSACTIONS ═══ */}
+        {tab === 'transactions' && (
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+
+            {/* Action bar */}
+            <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+              {['Download', 'View Detail'].map(btn => (
+                <button
+                  key={btn}
+                  onClick={btn === 'Download' ? downloadCSV : undefined}
+                  disabled={txLog.length === 0}
+                  style={{
+                    padding: '0.4rem 0.9rem', borderRadius: '6px',
+                    border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
+                    color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                    fontSize: '0.78rem', fontWeight: 600,
+                    cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {btn}
+                </button>
+              ))}
+            </div>
+
+            {txLog.length === 0 ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem 1.5rem', textAlign: 'center' }}>
+                <EmptyBoxIcon />
+                <p style={{ color: 'rgba(229,229,229,0.7)', fontWeight: 600, fontSize: '0.88rem', margin: '1rem 0 0.4rem' }}>
+                  There are no transactions to display
+                </p>
+                <p style={{ color: 'rgba(229,229,229,0.38)', fontSize: '0.78rem', margin: '0 0 0.6rem' }}>
+                  Here are the possible reasons:
+                </p>
+                {['The bot is not running', 'The stats are cleared'].map(r => (
+                  <div key={r} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
+                    <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: 'rgba(229,229,229,0.3)', flexShrink: 0 }}/>
+                    <span style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.38)' }}>{r}</span>
                   </div>
                 ))}
               </div>
-            )}
-          </>
-        )}
-
-        {/* ═══ TRANSACTIONS TAB ═══ */}
-        {tab === 'transactions' && (
-          txLog.length === 0 ? (
-            <div style={{
-              textAlign: 'center',
-              color: 'rgba(229,229,229,0.3)',
-              fontSize: '0.78rem',
-              marginTop: '2rem',
-              lineHeight: 1.7,
-            }}>
-              No trades yet.<br/>Start the bot to see results here.
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-              {txLog.map(tx => (
-                <div
-                  key={tx.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    padding: '0.55rem 0.65rem',
-                    borderRadius: '8px',
-                    background: '#050505',
-                    border: `1px solid ${tx.won ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
-                  }}
-                >
-                  {/* W/L badge */}
-                  <span style={{
-                    fontSize: '0.62rem', fontWeight: 800,
-                    color: tx.won ? '#22c55e' : '#ef4444',
-                    background: tx.won ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-                    border: `1px solid ${tx.won ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
-                    borderRadius: '4px',
-                    padding: '0.1rem 0.35rem',
-                    flexShrink: 0,
-                    letterSpacing: '0.04em',
-                  }}>
-                    {tx.won ? 'WIN' : 'LOSS'}
-                  </span>
-
-                  {/* details */}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.7)', fontWeight: 600 }}>
-                      {CONTRACT_TYPES.find(c => c.value === tx.contractType)?.label ?? tx.contractType}
-                    </div>
-                    <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginTop: '1px' }}>
-                      {fmtTime(tx.time)} · {tx.symbol}
-                    </div>
-                  </div>
-
-                  {/* payout */}
-                  <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                    <div style={{
-                      fontSize: '0.78rem', fontWeight: 700,
-                      color: tx.won ? '#22c55e' : '#ef4444',
-                      fontVariantNumeric: 'tabular-nums',
-                    }}>
-                      {tx.won ? '+' : '-'}{Math.abs(tx.payout - tx.stake).toFixed(2)}
-                    </div>
-                    <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)' }}>
-                      stake {tx.stake.toFixed(2)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )
-        )}
-
-        {/* ═══ JOURNAL TAB ═══ */}
-        {tab === 'journal' && (
-          txLog.length === 0 ? (
-            <div style={{
-              textAlign: 'center',
-              color: 'rgba(229,229,229,0.3)',
-              fontSize: '0.78rem',
-              marginTop: '2rem',
-              lineHeight: 1.7,
-            }}>
-              No journal entries yet.<br/>Events will appear here when the bot runs.
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-              {txLog.map((tx, i) => (
-                <div key={i} style={{
-                  fontSize: '0.7rem',
-                  color: 'rgba(229,229,229,0.55)',
-                  padding: '0.3rem 0',
-                  borderBottom: '1px solid rgba(255,255,255,0.04)',
-                  fontVariantNumeric: 'tabular-nums',
+            ) : (
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                {/* Column headers */}
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+                  padding: '0.5rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  position: 'sticky', top: 0, background: '#07111e',
                 }}>
-                  <span style={{ color: 'rgba(229,229,229,0.3)' }}>{fmtTime(tx.time)}</span>
-                  {' '}Contract #{tx.id}: {tx.won ? '✓ Won' : '✗ Lost'} | stake {tx.stake.toFixed(2)} | payout {tx.payout.toFixed(2)}
+                  {['Type', 'Entry/Exit spot', 'Buy price and P/L'].map(h => (
+                    <span key={h} style={{ fontSize: '0.63rem', fontWeight: 700, color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      {h}
+                    </span>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )
+
+                {txLog.map(tx => {
+                  const pl = tx.payout - tx.stake
+                  return (
+                    <div key={tx.id}
+                      style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', alignItems: 'center', padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.1s' }}
+                      onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
+                      onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
+                    >
+                      <div>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 600, color: tx.won ? '#22c55e' : '#ef4444' }}>
+                          {tx.won ? 'Won' : 'Lost'}
+                        </div>
+                        <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px', lineHeight: 1.3 }}>
+                          {CONTRACT_TYPES.find(c => c.value === tx.contractType)?.label?.split('→')[1]?.trim() ?? tx.contractType}
+                        </div>
+                        <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.2)', marginTop: '1px' }}>
+                          {fmtTime(tx.time)}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.55)' }}>{tx.symbol}</div>
+                        <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.25)', marginTop: '2px' }}>1 tick · digit</div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
+                          {tx.stake.toFixed(2)} {currency}
+                        </div>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: pl >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums', marginTop: '2px' }}>
+                          {pl >= 0 ? '+' : ''}{pl.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         )}
 
+        {/* ═══ JOURNAL ═══ */}
+        {tab === 'journal' && (
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+
+            {/* Action bar */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+              <button
+                onClick={downloadCSV}
+                disabled={txLog.length === 0}
+                style={{
+                  padding: '0.4rem 0.9rem', borderRadius: '6px',
+                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
+                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                  fontSize: '0.78rem', fontWeight: 600,
+                  cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Download
+              </button>
+              <button style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(229,229,229,0.5)', fontSize: '0.78rem', fontWeight: 500 }}>
+                Filters
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
+                </svg>
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {/* Account info — always first */}
+              <div style={{ padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <div style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.65)' }}>
+                  You are using your {currency} account.
+                </div>
+                <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>
+                  {new Date().toISOString().slice(0, 10)} | {new Date().toISOString().slice(11, 19)} GMT
+                </div>
+              </div>
+
+              {txLog.length === 0 ? (
+                <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.3)', fontSize: '0.78rem', lineHeight: 1.6 }}>
+                  No events yet. Start the bot to see activity here.
+                </div>
+              ) : (
+                txLog.map((tx, i) => (
+                  <div key={i} style={{ padding: '0.55rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div style={{ fontSize: '0.75rem', color: tx.won ? 'rgba(34,197,94,0.85)' : 'rgba(239,68,68,0.8)', fontWeight: 600 }}>
+                      Contract #{tx.id} — {tx.won ? 'Won' : 'Lost'} {Math.abs(tx.payout - tx.stake).toFixed(2)} {currency}
+                    </div>
+                    <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)', marginTop: '2px' }}>
+                      {new Date(tx.time).toISOString().slice(0, 10)} | {new Date(tx.time).toISOString().slice(11, 19)} GMT · {tx.symbol} · Stake {tx.stake.toFixed(2)}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ── Footer: Reset ── */}
-      <div style={{ padding: '0.75rem', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          onClick={onReset}
-          style={{
-            width: '100%',
-            padding: '0.6rem',
-            borderRadius: '8px',
-            border: '1px solid var(--border)',
-            background: 'transparent',
-            color: 'rgba(229,229,229,0.5)',
-            fontSize: '0.8rem',
-            fontWeight: 700,
-            cursor: 'pointer',
-            letterSpacing: '0.04em',
-            textTransform: 'uppercase',
-            transition: 'background 0.15s, color 0.15s',
-          }}
-          onMouseEnter={e => {
-            (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.06)'
-            ;(e.currentTarget as HTMLButtonElement).style.color = 'rgba(229,229,229,0.8)'
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget as HTMLButtonElement).style.background = 'transparent'
-            ;(e.currentTarget as HTMLButtonElement).style.color = 'rgba(229,229,229,0.5)'
-          }}
-        >
-          Reset
-        </button>
+      {/* ══════════════════════════════════════
+          PINNED BOTTOM — Stats + Reset
+          Same on every tab (matches Deriv UI)
+      ══════════════════════════════════════ */}
+      <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', background: '#07111e', flexShrink: 0 }}>
+
+        {/* "What's this?" */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0.5rem 1rem 0' }}>
+          <a href="https://deriv.com/help-centre/" target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: '0.63rem', color: 'rgba(229,229,229,0.28)', textDecoration: 'underline', cursor: 'pointer' }}>
+            What&apos;s this?
+          </a>
+        </div>
+
+        {/* Stats grid — 3 × 2 */}
+        <div style={{ padding: '0.5rem 1rem 0.75rem' }}>
+          {statRows.map((row, ri) => (
+            <div key={ri} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', marginBottom: ri === 0 ? '0.75rem' : 0 }}>
+              {row.map(s => (
+                <div key={s.label}>
+                  <div style={{ fontSize: '0.63rem', fontWeight: 600, color: 'rgba(229,229,229,0.42)', marginBottom: '0.18rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {s.label}
+                  </div>
+                  <div style={{ fontSize: '0.78rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>
+                    {s.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {/* Reset */}
+        <div style={{ padding: '0 0.75rem 0.75rem' }}>
+          <button
+            onClick={onReset}
+            style={{
+              width: '100%', padding: '0.72rem',
+              borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)',
+              background: 'transparent', color: 'rgba(229,229,229,0.65)',
+              fontSize: '0.88rem', fontWeight: 700, cursor: 'pointer',
+              letterSpacing: '0.03em', transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+            }}
+            onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff'; b.style.borderColor = 'rgba(255,255,255,0.35)' }}
+            onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = 'rgba(229,229,229,0.65)'; b.style.borderColor = 'rgba(255,255,255,0.2)' }}
+          >
+            Reset
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -781,17 +772,22 @@ export default function AnalysisPage() {
   const [txLog,        setTxLog]        = useState<TxEntry[]>([])
 
   /* ── Refs (avoid stale closures in WS callbacks) ── */
-  const runningRef     = useRef(false)
+  const runningRef      = useRef(false)
   const contractTypeRef = useRef('DIGITEVEN')
-  const stakeRef       = useRef('1.00')
-  const barrierRef     = useRef('5')
-  const symbolRef      = useRef('1HZ100V')
-  const execSpeedRef   = useRef<ExecSpeed>('normal')
-  const currencyRef    = useRef('USD')
-  const botWsRef       = useRef<WebSocket | null>(null)
+  const stakeRef        = useRef('1.00')
+  const barrierRef      = useRef('5')
+  const symbolRef       = useRef('1HZ100V')
+  const execSpeedRef    = useRef<ExecSpeed>('normal')
+  const currencyRef     = useRef('USD')
+  const botWsRef        = useRef<WebSocket | null>(null)
   /** Maps contract_id → buy_price for bot trades we initiated */
-  const pendingBuysRef = useRef<Map<number, number>>(new Map())
-  const reqIdRef       = useRef(200)
+  const pendingBuysRef  = useRef<Map<number, number>>(new Map())
+  const reqIdRef        = useRef(200)
+  /** Auto-reconnect: attempt count + backoff timer */
+  const reconnectCount  = useRef(0)
+  const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Set to true when user explicitly closes (logout/unmount) — skip reconnect */
+  const intentionalClose = useRef(false)
 
   /* ── Keep refs in sync with state ── */
   useEffect(() => { symbolRef.current      = symbol      }, [symbol])
@@ -836,10 +832,16 @@ export default function AnalysisPage() {
     }))
   }, [])
 
-  /* ── Bot WebSocket lifecycle ── */
+  /* ── Bot WebSocket lifecycle with auto-reconnect ── */
   useEffect(() => {
     let ws: WebSocket | null = null
     let ping: ReturnType<typeof setInterval> | null = null
+    intentionalClose.current = false
+
+    /* Backoff schedule: 2s, 4s, 8s, 16s, 30s (capped) */
+    function backoffDelay(attempt: number) {
+      return Math.min(2000 * Math.pow(2, attempt), 30_000)
+    }
 
     async function connect() {
       setBotError(null)
@@ -849,12 +851,19 @@ export default function AnalysisPage() {
       try {
         const res = await fetch('/api/user/token')
         if (!res.ok) {
-          setBotError(res.status === 401 ? 'Log in to enable the bot' : 'Failed to fetch token')
+          if (res.status === 401) {
+            /* Session expired — redirect to login */
+            intentionalClose.current = true
+            window.location.href = '/'
+            return
+          }
+          setBotError('Failed to fetch token')
           return
         }
         ;({ token, appId } = await res.json() as { token: string; appId: string })
       } catch {
-        setBotError('Network error')
+        setBotError('Network error — retrying…')
+        scheduleReconnect()
         return
       }
 
@@ -862,10 +871,9 @@ export default function AnalysisPage() {
       botWsRef.current = ws
 
       ws.onopen = () => {
-        // Step 1: authorize with the user's OAuth access token
+        reconnectCount.current = 0  // reset on successful connect
+        setBotError(null)
         ws!.send(JSON.stringify({ authorize: token }))
-
-        // Keep-alive ping every 30 s
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
@@ -876,38 +884,52 @@ export default function AnalysisPage() {
         try { msg = JSON.parse(ev.data as string) } catch { return }
 
         if (msg.error) {
-          const errMsg = (msg.error as { message: string }).message
-          setBotError(errMsg)
-          // Stop bot on API error
+          const err = msg.error as { message: string; code?: string }
+          /* Token expired — hard stop, don't retry */
+          if (err.code === 'AuthorizationRequired' || err.code === 'InvalidToken') {
+            intentionalClose.current = true
+            setBotError('Session expired. Please log in again.')
+            setRunning(false)
+            runningRef.current = false
+            return
+          }
+          setBotError(err.message)
           setRunning(false)
           runningRef.current = false
           return
         }
 
-        /* ── authorize response ──
-         * Deriv returns account info including currency.
-         * Once authorized, subscribe to the transaction stream so we
-         * can track every buy/sell event in real time.
-         */
+        /* ── authorize ── */
         if (msg.msg_type === 'authorize') {
-          const auth = msg.authorize as { currency: string; loginid: string }
+          const auth = msg.authorize as {
+            currency: string
+            loginid: string
+            scopes?: string[]
+          }
+
+          /* Scope check: token must have 'trade' permission */
+          const scopes = auth.scopes ?? []
+          if (scopes.length > 0 && !scopes.includes('trade')) {
+            intentionalClose.current = true
+            setBotError('No trading permission on this token. Log out and log in again to grant trade access.')
+            setRunning(false)
+            runningRef.current = false
+            ws?.close()
+            return
+          }
+
           setCurrency(auth.currency)
           currencyRef.current = auth.currency
 
-          // Step 2: subscribe to real-time transaction stream
+          /* Subscribe to real-time transaction stream */
           ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }))
 
           setBotReady(true)
-          // If user clicked Run before WS finished connecting, start now
           if (runningRef.current) executeTrade(ws!)
         }
 
-        /* ── buy response ──
-         * Sent immediately after a buy request is accepted.
-         * We record contract_id → buy_price so we can match the sell later.
-         */
+        /* ── buy response ── */
         if (msg.msg_type === 'buy') {
-          if (msg.error) return // already handled above
           const buy = msg.buy as { contract_id: number; buy_price: number }
           pendingBuysRef.current.set(buy.contract_id, buy.buy_price)
           setRunStats(prev => ({
@@ -917,13 +939,7 @@ export default function AnalysisPage() {
           }))
         }
 
-        /* ── transaction stream ──
-         * action: "buy"  → money deducted (amount is negative)
-         * action: "sell" → payout credited (amount is positive; 0 if contract lost)
-         *
-         * We only process sell events for contracts we initiated (via pendingBuysRef).
-         * On settle: update stats, log the trade, schedule next trade if still running.
-         */
+        /* ── transaction stream ── */
         if (msg.msg_type === 'transaction') {
           const tx = msg.transaction as {
             action: string
@@ -934,10 +950,10 @@ export default function AnalysisPage() {
 
           if (tx.action === 'sell' && tx.contract_id != null) {
             const buyPrice = pendingBuysRef.current.get(tx.contract_id)
-            if (buyPrice === undefined) return // not our contract
+            if (buyPrice === undefined) return
 
             pendingBuysRef.current.delete(tx.contract_id)
-            const sellAmount = Math.max(0, tx.amount) // 0 on full loss
+            const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
             setRunStats(prev => {
@@ -945,13 +961,12 @@ export default function AnalysisPage() {
               return {
                 ...prev,
                 totalPayout: newPayout,
-                won:    won ? prev.won + 1  : prev.won,
-                lost:   won ? prev.lost     : prev.lost + 1,
+                won:    won ? prev.won + 1 : prev.won,
+                lost:   won ? prev.lost    : prev.lost + 1,
                 profit: newPayout - prev.totalStake,
               }
             })
 
-            // Add to transaction log (capped at 100 entries)
             setTxLog(prev => [{
               id:           tx.contract_id!,
               time:         Date.now(),
@@ -962,32 +977,55 @@ export default function AnalysisPage() {
               symbol:       symbolRef.current,
             }, ...prev].slice(0, 100))
 
-            // Schedule next trade based on execution speed
             if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
               const delay =
-                execSpeedRef.current === 'turbo'  ? 500  :
-                execSpeedRef.current === 'fast'   ? 1500 : 3000
+                execSpeedRef.current === 'turbo' ? 500 :
+                execSpeedRef.current === 'fast'  ? 1500 : 3000
               setTimeout(() => {
-                if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
-                  executeTrade(ws!)
-                }
+                if (runningRef.current && ws?.readyState === WebSocket.OPEN) executeTrade(ws!)
               }, delay)
             }
           }
         }
       }
 
-      ws.onerror = () => setBotError('WebSocket connection error')
-      ws.onclose = () => {
+      ws.onerror = () => {
+        /* onerror is always followed by onclose — handle reconnect there */
+      }
+
+      ws.onclose = (ev) => {
         setBotReady(false)
         botWsRef.current = null
         if (ping) { clearInterval(ping); ping = null }
+
+        /* Stop bot so it doesn't try to trade on a dead socket */
+        if (runningRef.current) {
+          setRunning(false)
+          runningRef.current = false
+        }
+
+        if (!intentionalClose.current) {
+          /* Abnormal close — reconnect with backoff */
+          const attempt = reconnectCount.current++
+          const delay   = backoffDelay(attempt)
+          setBotError(`Disconnected — reconnecting in ${Math.round(delay / 1000)}s… (attempt ${attempt + 1})`)
+          scheduleReconnect(delay)
+        }
       }
+    }
+
+    function scheduleReconnect(delay = 2000) {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = setTimeout(() => {
+        if (!intentionalClose.current) connect()
+      }, delay)
     }
 
     connect()
 
     return () => {
+      intentionalClose.current = true
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (ping) clearInterval(ping)
       ws?.close()
       botWsRef.current = null
@@ -1344,6 +1382,10 @@ export default function AnalysisPage() {
         @keyframes priceFlash {
           0%   { opacity: 0.5; transform: scale(1.06); }
           100% { opacity: 1;   transform: scale(1); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.35; }
         }
       `}</style>
     </div>
