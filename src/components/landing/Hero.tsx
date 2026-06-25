@@ -335,6 +335,19 @@ export default function Hero() {
               ))}
             </div>
 
+            {/* New user affiliate CTA */}
+            <p style={{ fontSize: '0.82rem', color: 'rgba(229,229,229,0.45)', margin: 0 }}>
+              No Deriv account?{' '}
+              <a
+                href="https://deriv.partners/rx?sidc=6D203A32-6635-4783-BB11-1296C141843C&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU83616"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: 'var(--gold)', textDecoration: 'underline', fontWeight: 600 }}
+              >
+                Create a free account on Deriv →
+              </a>
+            </p>
+
             {/* Deriv powered note */}
             <p style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.3)', margin: 0 }}>
               Powered by Deriv API · Your funds remain in your Deriv account at all times

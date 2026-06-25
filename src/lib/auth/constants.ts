@@ -28,3 +28,9 @@ export const DERIV_SCOPE = 'trade account_manage'
  * Does NOT require auth for public endpoints.
  */
 export const DERIV_LEGACY_WS_URL = 'wss://ws.binaryws.com/websockets/v3'
+
+/**
+ * Affiliate signup link — earns commission when users create a Deriv account via Lima Trade.
+ * Use this wherever a "Create account" / "Sign up" CTA appears.
+ */
+export const DERIV_AFFILIATE_URL = 'https://deriv.partners/rx?sidc=6D203A32-6635-4783-BB11-1296C141843C&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU83616'
