@@ -86,8 +86,14 @@ interface TxRow {
 }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
-function lastDigit(price: number): number {
-  const s = price.toFixed(2)
+/**
+ * Extract the last digit of a price using the market's pip_size.
+ * pip_size is a required field in every tick and history response
+ * (verified: ticks_response.schema.json, ticks_history_response.schema.json).
+ * Defaults to 2 which covers all current synthetic indices.
+ */
+function lastDigit(price: number, pipSize = 2): number {
+  const s = price.toFixed(pipSize)
   return parseInt(s[s.length - 1], 10)
 }
 
@@ -154,6 +160,8 @@ export default function SpeedbotPage() {
   const currencyRef     = useRef('USD')
 
   /* ── Bot WS infra refs ── */
+  /** pip_size from Deriv — required field in every tick/history response */
+  const pipSizeRef        = useRef<number>(2)
   const botWsRef          = useRef<WebSocket | null>(null)
   const livePriceRef      = useRef<number | null>(null)
   const currentStakeRef   = useRef(1.00)    // escalates with martingale, resets on win
@@ -210,17 +218,24 @@ export default function SpeedbotPage() {
       try { msg = JSON.parse(ev.data as string) } catch { return }
 
       if (msg.msg_type === 'history') {
-        const hist = (msg as { history: { prices: (string | number)[] } }).history.prices
-        const digits = hist.map(p => lastDigit(Number(p)))
+        // Capture pip_size (top-level field per ticks_history_response.schema.json)
+        const ps = (msg as { pip_size?: number }).pip_size
+        if (ps != null) pipSizeRef.current = ps
+        // prices are numbers per schema (not strings)
+        const hist = (msg as { history: { prices: number[] } }).history.prices
+        const digits = hist.map(p => lastDigit(Number(p), pipSizeRef.current))
         setRecentDigits(digits.slice(-30))
         setTicksTotal(hist.length)
       }
 
       if (msg.msg_type === 'tick') {
-        const q = (msg as { tick: { quote: number } }).tick.quote
+        // pip_size is REQUIRED on every tick per ticks_response.schema.json
+        const tickData = (msg as { tick: { quote: number; pip_size: number } }).tick
+        if (tickData.pip_size != null) pipSizeRef.current = tickData.pip_size
+        const q = tickData.quote
         livePriceRef.current = q      // sync immediately — critical for entry spot accuracy
         setLivePrice(q)
-        setRecentDigits(prev => [...prev.slice(-29), lastDigit(q)])
+        setRecentDigits(prev => [...prev.slice(-29), lastDigit(q, pipSizeRef.current)])
         setTicksTotal(t => t + 1)
       }
     }
@@ -707,7 +722,10 @@ export default function SpeedbotPage() {
                   disabled={running}
                   style={{
                     padding: '0.6rem',
-                    borderRadius: '8px', border: 'none',
+                    borderRadius: '8px',
+                    border: `1px solid ${strategy === s
+                      ? (s === 'martingale' ? 'rgba(239,68,68,0.35)' : 'rgba(252,163,17,0.35)')
+                      : 'rgba(255,255,255,0.08)'}`,
                     background: strategy === s
                       ? (s === 'martingale' ? 'rgba(239,68,68,0.18)' : 'rgba(252,163,17,0.18)')
                       : 'rgba(255,255,255,0.04)',
@@ -716,9 +734,6 @@ export default function SpeedbotPage() {
                       : 'rgba(229,229,229,0.45)',
                     fontWeight: 700, fontSize: '0.82rem',
                     cursor: running ? 'not-allowed' : 'pointer',
-                    border: `1px solid ${strategy === s
-                      ? (s === 'martingale' ? 'rgba(239,68,68,0.35)' : 'rgba(252,163,17,0.35)')
-                      : 'rgba(255,255,255,0.08)'}`,
                     transition: 'all 0.15s', textTransform: 'capitalize',
                   }}
                 >
@@ -790,12 +805,12 @@ export default function SpeedbotPage() {
                   disabled={running}
                   style={{
                     padding: '0.5rem',
-                    borderRadius: '8px', border: 'none',
+                    borderRadius: '8px',
+                    border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.08)'}`,
                     background: execSpeed === sp ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
                     color: execSpeed === sp ? '#FCA311' : 'rgba(229,229,229,0.45)',
                     fontWeight: 600, fontSize: '0.78rem',
                     cursor: running ? 'not-allowed' : 'pointer',
-                    border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.08)'}`,
                   }}
                 >
                   {sp === 'fast' ? '⚡ Fast (0.4s)' : '◎ Normal (1.5s)'}

@@ -64,8 +64,14 @@ const SYMBOL_LABEL: Record<string, string> = Object.fromEntries(
 function symLabel(s: string) { return SYMBOL_LABEL[s] ?? s }
 
 /* ─── Helpers ───────────────────────────────────────────── */
-function getLastDigit(price: number): number {
-  const s = price.toFixed(2)
+/**
+ * Extract the last digit of a price using the market's pip_size.
+ * pip_size is returned in every tick and history response by Deriv
+ * (ticks_response.schema.json marks it as required).
+ * Defaults to 2 which covers all current synthetic indices.
+ */
+function getLastDigit(price: number, pipSize = 2): number {
+  const s = price.toFixed(pipSize)
   return parseInt(s[s.length - 1], 10)
 }
 
@@ -1063,7 +1069,9 @@ export default function AnalysisPage() {
   const [ouBarrier, setOuBarrier] = useState(5)
   const [mdDigit,   setMdDigit]   = useState(5)
 
-  const wsRef = useRef<WebSocket | null>(null)
+  const wsRef     = useRef<WebSocket | null>(null)
+  /** pip_size from Deriv tick/history responses — determines decimal places for last-digit calc */
+  const pipSizeRef = useRef<number>(2)
 
   /* ── Run panel UI state ── */
   const [runOpen,   setRunOpen]   = useState(false)
@@ -1521,14 +1529,22 @@ export default function AnalysisPage() {
       if (msg.error) { setLoading(false); return }
 
       if (msg.msg_type === 'history') {
-        const hist = (msg as { history: { prices: string[] } }).history.prices
-          .map((p: string) => parseFloat(p))
+        // pip_size is at the top level of the history response (not inside history{})
+        // schema: ticks_history_response.schema.json — used for correct last-digit extraction
+        const ps = (msg as { pip_size?: number }).pip_size
+        if (ps != null) pipSizeRef.current = ps
+        // prices are numbers per schema (ticks_history_response.schema.json)
+        const hist = (msg as { history: { prices: number[] } }).history.prices
+          .map((p: number) => Number(p))
         setPrices(hist)
         setLoading(false)
       }
 
       if (msg.msg_type === 'tick') {
-        const q = (msg as { tick: { quote: number } }).tick.quote
+        const tickData = (msg as { tick: { quote: number; pip_size: number } }).tick
+        const q = tickData.quote
+        // pip_size is required on every tick per ticks_response.schema.json
+        if (tickData.pip_size != null) pipSizeRef.current = tickData.pip_size
         // Update ref IMMEDIATELY (synchronously) so executeTrade always sees the
         // latest tick as entry spot — state update is async and would be 1 tick stale
         livePriceRef.current = q
@@ -1556,7 +1572,7 @@ export default function AnalysisPage() {
 
   /* ── Derived digit data ── */
   const digits = useMemo(
-    () => prices.slice(-tickCount).map(getLastDigit),
+    () => prices.slice(-tickCount).map(p => getLastDigit(p, pipSizeRef.current)),
     [prices, tickCount],
   )
   const total = digits.length
