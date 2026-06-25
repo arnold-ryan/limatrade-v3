@@ -44,7 +44,7 @@ const sessionOptions = {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: 'lax' as const,
-    maxAge:   60 * 60 * 8, // 8 hours
+    maxAge:   60 * 60 * 1, // 1 hour — matches Bearer token expiry (expires_in: 3600)
     path:     '/',
   },
 }

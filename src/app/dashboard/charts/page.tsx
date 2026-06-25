@@ -23,7 +23,7 @@ export default function ChartsPage() {
 
       {/* Trade panel — fixed width */}
       <div style={{ width: '300px', flexShrink: 0, overflowY: 'auto' }}>
-        <TradePanel market={market} />
+        <TradePanel />
       </div>
     </div>
   )

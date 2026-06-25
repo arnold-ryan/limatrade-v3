@@ -95,7 +95,7 @@ export default function TradePanel() {
           currency: 'USD',
           duration: DURATION,
           duration_unit: DUR_UNIT,
-          symbol: SYMBOL,
+          underlying_symbol: SYMBOL,
         }))
         ws.send(JSON.stringify({
           proposal: 1, subscribe: 1, req_id: 2,
@@ -105,7 +105,7 @@ export default function TradePanel() {
           currency: 'USD',
           duration: DURATION,
           duration_unit: DUR_UNIT,
-          symbol: SYMBOL,
+          underlying_symbol: SYMBOL,
         }))
       }
 
@@ -200,8 +200,8 @@ export default function TradePanel() {
     if (!wsReady || !wsRef.current) return
     const ws = wsRef.current
     const s = parseFloat(stake) || 1
-    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 1, amount: s, basis: 'stake', contract_type: 'CALL', currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, symbol: SYMBOL }))
-    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 2, amount: s, basis: 'stake', contract_type: 'PUT',  currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, symbol: SYMBOL }))
+    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 1, amount: s, basis: 'stake', contract_type: 'CALL', currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, underlying_symbol: SYMBOL }))
+    ws.send(JSON.stringify({ proposal: 1, subscribe: 1, req_id: 2, amount: s, basis: 'stake', contract_type: 'PUT',  currency: 'USD', duration: DURATION, duration_unit: DUR_UNIT, underlying_symbol: SYMBOL }))
   }, [stake, wsReady])
 
   /* ── Buy ───────────────────────────────────────────────────────────────── */
