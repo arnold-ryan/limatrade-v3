@@ -77,6 +77,35 @@ export default function AppHeader() {
 
   useEffect(() => { fetchBalance() }, [fetchBalance])
 
+  // Real-time balance: listen for CustomEvents dispatched by bot WebSockets
+  // (both speedbot and analysis subscribe to balance: 1 on their authenticated WS)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { balance, currency } = (e as CustomEvent<{ balance: number; currency: string }>).detail
+      setData(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          accounts: prev.accounts.map(a =>
+            a.accountId === prev.activeAccountId
+              ? { ...a, balance, currency }
+              : a
+          ),
+        }
+      })
+    }
+    window.addEventListener('deriv-balance', handler)
+    return () => window.removeEventListener('deriv-balance', handler)
+  }, [])
+
+  // Fallback REST poll every 30 s (covers pages with no bot WS)
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') fetchBalance()
+    }, 30_000)
+    return () => clearInterval(id)
+  }, [fetchBalance])
+
   // Close dropdown on outside click
   useEffect(() => {
     const h = (e: MouseEvent) => {

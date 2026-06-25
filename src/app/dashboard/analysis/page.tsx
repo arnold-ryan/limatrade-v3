@@ -1253,6 +1253,9 @@ export default function AnalysisPage() {
            Subscribe to transaction stream immediately.
            req_id: 100 reserved for transaction subscription */
         ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+        // Subscribe to balance updates — server pushes on every balance change
+        // Source: balance_request.schema.json — subscribe: 1, auth_required
+        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
@@ -1307,6 +1310,14 @@ export default function AnalysisPage() {
           setRunning(false)
           runningRef.current = false
           return
+        }
+
+        /* ── Balance subscription push ── */
+        if (msg.msg_type === 'balance') {
+          const b = (msg as { balance: { balance: number; currency: string } }).balance
+          window.dispatchEvent(new CustomEvent('deriv-balance', {
+            detail: { balance: b.balance, currency: b.currency },
+          }))
         }
 
         /* ── buy response ── */

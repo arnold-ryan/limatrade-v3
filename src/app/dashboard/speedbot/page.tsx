@@ -129,6 +129,7 @@ export default function SpeedbotPage() {
   const [running,     setRunning]    = useState(false)
   const [botReady,    setBotReady]   = useState(false)
   const [botError,    setBotError]   = useState<string | null>(null)
+  const [stopReason,  setStopReason] = useState<string | null>(null)
   const [currency,    setCurrency]   = useState('USD')
   const [accountLabel,setAccountLabel] = useState('')
   const [stats,       setStats]      = useState<SpeedStats>({
@@ -257,11 +258,24 @@ export default function SpeedbotPage() {
     const sl   = parseFloat(stopLossRef.current)
     const maxC = parseInt(maxConsecRef.current, 10)
     const maxN = parseInt(maxContractsRef.current, 10)
+    const cur  = currencyRef.current
 
-    if (Number.isFinite(tp) && tp > 0 && updatedStats.profit >= tp)          return true
-    if (Number.isFinite(sl) && sl > 0 && updatedStats.profit <= -sl)         return true
-    if (Number.isFinite(maxC) && maxC > 0 && updatedStats.consecLosses >= maxC) return true
-    if (Number.isFinite(maxN) && maxN > 0 && updatedStats.runs >= maxN)      return true
+    if (Number.isFinite(tp) && tp > 0 && updatedStats.profit >= tp) {
+      setStopReason(`✅ Take Profit reached: +${fmt2(updatedStats.profit)} ${cur}`)
+      return true
+    }
+    if (Number.isFinite(sl) && sl > 0 && updatedStats.profit <= -sl) {
+      setStopReason(`🛑 Stop Loss triggered: ${fmt2(updatedStats.profit)} ${cur} (limit: -${fmt2(sl)} ${cur})`)
+      return true
+    }
+    if (Number.isFinite(maxC) && maxC > 0 && updatedStats.consecLosses >= maxC) {
+      setStopReason(`⚠️ Max consecutive losses (${maxC}) reached`)
+      return true
+    }
+    if (Number.isFinite(maxN) && maxN > 0 && updatedStats.runs >= maxN) {
+      setStopReason(`📊 Max contracts (${maxN}) reached`)
+      return true
+    }
     return false
   }, [])
 
@@ -370,6 +384,9 @@ export default function SpeedbotPage() {
         setBotReady(true)
         // Subscribe to transaction stream (req_id 100 reserved)
         ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+        // Subscribe to balance updates — server pushes on every balance change
+        // Source: balance_request.schema.json — subscribe: 1, auth_required
+        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
@@ -406,6 +423,14 @@ export default function SpeedbotPage() {
           setRunning(false); runningRef.current = false
           inTradeRef.current = false
           return
+        }
+
+        /* ── Balance subscription push ── */
+        if (msg.msg_type === 'balance') {
+          const b = (msg as { balance: { balance: number; currency: string } }).balance
+          window.dispatchEvent(new CustomEvent('deriv-balance', {
+            detail: { balance: b.balance, currency: b.currency },
+          }))
         }
 
         /* ── Buy response ── */
@@ -595,6 +620,7 @@ export default function SpeedbotPage() {
     const s = parseFloat(stake)
     if (isNaN(s) || s < 0.35) { setBotError('Stake must be at least 0.35 USD'); return }
     setBotError(null)
+    setStopReason(null)
     setStats({ runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 })
     setTxLog([])
     setRunning(true)
@@ -611,6 +637,7 @@ export default function SpeedbotPage() {
     setStats({ runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 })
     setTxLog([])
     setBotError(null)
+    setStopReason(null)
   }
 
   /* ── Styles ── */
@@ -690,6 +717,26 @@ export default function SpeedbotPage() {
           color: '#fca5a5', fontSize: '0.78rem', flexShrink: 0,
         }}>
           ⚠ {botError}
+        </div>
+      )}
+
+      {/* ── Stop reason banner ── */}
+      {!running && stopReason && (
+        <div style={{
+          padding: '0.55rem 1.5rem',
+          background: stopReason.startsWith('✅')
+            ? 'rgba(34,197,94,0.08)'
+            : 'rgba(252,163,17,0.08)',
+          borderBottom: `1px solid ${stopReason.startsWith('✅') ? 'rgba(34,197,94,0.2)' : 'rgba(252,163,17,0.2)'}`,
+          color: stopReason.startsWith('✅') ? '#86efac' : '#fcd34d',
+          fontSize: '0.78rem', fontWeight: 600, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span>Bot stopped — {stopReason}</span>
+          <button
+            onClick={() => setStopReason(null)}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '0.9rem', opacity: 0.6, padding: '0 0.25rem' }}
+          >×</button>
         </div>
       )}
 
