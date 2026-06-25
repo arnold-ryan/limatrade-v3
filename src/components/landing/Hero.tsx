@@ -178,7 +178,7 @@ export default function Hero() {
           <div key={i} className="flex flex-col items-center py-8"
             style={{ borderRight: i < 3 ? '1px solid var(--border)' : 'none' }}>
             <div className="font-black" style={{ fontSize: 'clamp(2.4rem, 3.5vw, 3.5rem)', color: 'var(--gold)', letterSpacing: '-0.03em', lineHeight: 1 }}>
-              {s.prefix ?? ''}{s.value <= 10 ? counts[i].toFixed(1) : Math.round(counts[i]).toLocaleString()}{s.suffix}
+              {s.prefix ?? ''}{Number.isInteger(s.value) ? Math.round(counts[i]).toLocaleString() : counts[i].toFixed(1)}{s.suffix}
             </div>
             <div className="text-sm mt-1.5" style={{ color: 'var(--silver)' }}>{s.label}</div>
           </div>
