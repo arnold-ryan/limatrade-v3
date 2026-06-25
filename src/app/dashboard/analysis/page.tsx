@@ -158,18 +158,21 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
   )
 }
 
-/* ─── Scanner placeholder ───────────────────────────────── */
+/* ─── Scanner iframe ────────────────────────────────────── */
 function ScannerView() {
   return (
-    <div style={{ padding: '3rem 1.25rem', textAlign: 'center', color: 'rgba(229,229,229,0.35)' }}>
-      <div style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>🔍</div>
-      <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'rgba(229,229,229,0.5)', marginBottom: '0.35rem' }}>
-        Scanner Coming Soon
-      </div>
-      <div style={{ fontSize: '0.78rem' }}>
-        Automated pattern scanning across multiple markets.
-      </div>
-    </div>
+    <iframe
+      src="https://signals-scanner.vercel.app/"
+      title="Signal Scanner"
+      style={{
+        width: '100%',
+        flex: 1,
+        border: 'none',
+        display: 'block',
+        minHeight: 'calc(100vh - 160px)',
+      }}
+      allow="autoplay"
+    />
   )
 }
 
