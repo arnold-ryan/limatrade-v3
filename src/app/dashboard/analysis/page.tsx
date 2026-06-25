@@ -3,8 +3,10 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
 /* ─── Constants ─────────────────────────────────────────── */
-const WS_URL      = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
-// Bot WS URL is now fetched via /api/user/ws-url (OTP-authenticated)
+// New Deriv API public WebSocket — no auth/OTP needed for market data
+// Source: https://developers.deriv.com/docs/options/websocket/
+const WS_URL      = 'wss://api.derivws.com/trading/v1/options/ws/public'
+// Bot WS URL is fetched via /api/user/ws-url (OTP-authenticated for trading)
 const MAX_HISTORY = 5000
 
 const MARKETS = [
@@ -1114,6 +1116,8 @@ export default function AnalysisPage() {
   const connectedAccountRef = useRef<string | null>(null)
 
   /* ── Keep refs in sync with state ── */
+  // NOTE: livePriceRef is also updated DIRECTLY in the tick WS handler (faster path)
+  // This effect keeps the ref in sync if livePrice is set from elsewhere
   useEffect(() => { livePriceRef.current   = livePrice   }, [livePrice])
   useEffect(() => { symbolRef.current      = symbol      }, [symbol])
   useEffect(() => { contractTypeRef.current = contractType }, [contractType])
@@ -1129,6 +1133,15 @@ export default function AnalysisPage() {
     const ct         = contractTypeRef.current
     const hasBar     = needsBarrier(ct)
     const amount     = parseFloat(stakeRef.current) || 1.00
+
+    // Deriv minimum stake is 0.35 USD — reject before sending to avoid API error
+    if (amount < 0.35) {
+      setBotError('Stake must be at least 0.35 USD')
+      setRunning(false)
+      runningRef.current = false
+      return
+    }
+
     const reqId      = ++reqIdRef.current
     // Capture current tick as entry spot and map it to this reqId
     // When the buy response arrives (with the same req_id), we look this up
@@ -1229,8 +1242,9 @@ export default function AnalysisPage() {
         reconnectCount.current = 0
         setBotError(null)
         /* New Deriv API: connection is already authenticated via OTP in URL.
-           Subscribe to transaction stream immediately. */
-        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }))
+           Subscribe to transaction stream immediately.
+           req_id: 100 reserved for transaction subscription */
+        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
@@ -1244,15 +1258,44 @@ export default function AnalysisPage() {
 
         if (msg.error) {
           const err = msg.error as { message: string; code?: string }
-          /* Token expired — hard stop, don't retry */
-          if (err.code === 'AuthorizationRequired' || err.code === 'InvalidToken') {
+
+          /* ── Fatal errors: stop bot, don't reconnect ──────────────────── */
+          const fatalCodes = ['AuthorizationRequired', 'InvalidToken', 'InvalidAppID']
+          if (err.code && fatalCodes.includes(err.code)) {
             intentionalClose.current = true
-            setBotError('Session expired. Please log in again.')
+            setBotError('Session expired — please log in again.')
             setRunning(false)
             runningRef.current = false
             return
           }
-          setBotError(err.message)
+
+          /* ── Trade-level errors: stop bot but keep WS alive ───────────── */
+          // These are errors on a specific buy request — bad params, market closed, etc.
+          // We stop trading but do NOT close the socket (user can fix and restart).
+          const tradeErrorCodes = [
+            'InputValidationError',    // stake below minimum, bad barrier, etc.
+            'ContractCreationFailure', // e.g. market closed, invalid contract
+            'MarketIsClosed',          // market is not open for trading
+            'OfferingNotFound',        // contract type not available for this symbol
+            'ContractBuyValidationError',
+          ]
+          if (err.code && tradeErrorCodes.includes(err.code)) {
+            setBotError(`Trade error: ${err.message}`)
+            setRunning(false)
+            runningRef.current = false
+            return
+          }
+
+          /* ── Transient errors: surface but keep bot running ───────────── */
+          // RateLimit — server is throttling, will recover
+          if (err.code === 'RateLimit') {
+            setBotError('Rate limited — pausing briefly…')
+            // Don't stop — next executeTrade will retry after the normal delay
+            return
+          }
+
+          /* ── All other errors: stop bot ───────────────────────────────── */
+          setBotError(err.message ?? 'Unknown error')
           setRunning(false)
           runningRef.current = false
           return
@@ -1381,6 +1424,10 @@ export default function AnalysisPage() {
       intentionalClose.current = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (ping) clearInterval(ping)
+      // Send forget for the transaction subscription before closing
+      if (ws?.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ forget_all: 'transaction', req_id: 9998 })) } catch { /* ignore */ }
+      }
       ws?.close()
       botWsRef.current = null
     }
@@ -1482,6 +1529,9 @@ export default function AnalysisPage() {
 
       if (msg.msg_type === 'tick') {
         const q = (msg as { tick: { quote: number } }).tick.quote
+        // Update ref IMMEDIATELY (synchronously) so executeTrade always sees the
+        // latest tick as entry spot — state update is async and would be 1 tick stale
+        livePriceRef.current = q
         setLivePrice(q)
         setPrices(prev => {
           const next = [...prev, q]
@@ -1493,7 +1543,15 @@ export default function AnalysisPage() {
     ws.onerror  = () => setLoading(false)
     ws.onclose  = () => {}
 
-    return () => { ws.close(); wsRef.current = null }
+    return () => {
+      // Send forget_all before closing so the server cleans up subscriptions
+      // immediately rather than waiting for the TCP connection timeout
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 9999 })) } catch { /* ignore */ }
+      }
+      ws.close()
+      wsRef.current = null
+    }
   }, [symbol])
 
   /* ── Derived digit data ── */
