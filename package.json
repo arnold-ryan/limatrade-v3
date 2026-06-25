@@ -13,6 +13,8 @@
     "react": "^18",
     "react-dom": "^18",
     "iron-session": "^8.0.4",
+    "lightweight-charts": "^4.2.0",
+    "ws": "^8.17.1",
     "zustand": "^4.5.4"
   },
   "devDependencies": {
@@ -20,6 +22,7 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/ws": "^8.5.12",
     "tailwindcss": "^3.4.1",
     "postcss": "^8",
     "autoprefixer": "^10.0.1",

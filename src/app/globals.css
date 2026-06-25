@@ -50,3 +50,24 @@ body {
   box-shadow: 0 0 52px rgba(252, 163, 17, 0.55), 0 8px 30px rgba(0,0,0,0.4);
   transform: translateY(-2px);
 }
+
+/* Dashboard utilities */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+.skeleton-pulse {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+/* Thin custom scrollbar for dark UI */
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(252,163,17,0.25); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(252,163,17,0.45); }
