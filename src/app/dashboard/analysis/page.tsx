@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
 /* ─── Constants ─────────────────────────────────────────── */
 const WS_URL      = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
-const MAX_HISTORY = 5000   // always request this much; tickCount just filters analysis
+const BOT_WS_BASE = 'wss://ws.binaryws.com/websockets/v3?app_id='
+const MAX_HISTORY = 5000
 
 const MARKETS = [
   { symbol: '1HZ100V',  label: 'Volatility 100 (1s) Index' },
@@ -41,6 +42,19 @@ const MARKETS = [
 
 const DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
+/* Contract types that need a digit barrier */
+const BARRIER_TYPES = ['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER']
+function needsBarrier(ct: string) { return BARRIER_TYPES.includes(ct) }
+
+const CONTRACT_TYPES = [
+  { value: 'DIGITEVEN',  label: 'Even/Odd → Even' },
+  { value: 'DIGITODD',   label: 'Even/Odd → Odd' },
+  { value: 'DIGITMATCH', label: 'Match/Differ → Match' },
+  { value: 'DIGITDIFF',  label: 'Match/Differ → Differ' },
+  { value: 'DIGITOVER',  label: 'Over/Under → Over' },
+  { value: 'DIGITUNDER', label: 'Over/Under → Under' },
+]
+
 /* ─── Helpers ───────────────────────────────────────────── */
 function getLastDigit(price: number): number {
   const s = price.toFixed(2)
@@ -53,6 +67,10 @@ function trailingStreak(arr: string[]): { count: number; val: string } {
   let count = 0
   for (let i = arr.length - 1; i >= 0 && arr[i] === val; i--) count++
   return { count, val }
+}
+
+function fmtTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 /* ─── Sub-components ────────────────────────────────────── */
@@ -158,6 +176,561 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
   )
 }
 
+/* ─── Types ─────────────────────────────────────────────── */
+interface RunStats {
+  totalStake: number
+  totalPayout: number
+  runs: number
+  lost: number
+  won: number
+  profit: number
+}
+
+interface TxEntry {
+  id: number         // contract_id
+  time: number       // epoch ms
+  contractType: string
+  stake: number
+  payout: number
+  won: boolean
+  symbol: string
+}
+
+/* ─── Run Panel ─────────────────────────────────────────── */
+type RunTab = 'summary' | 'transactions' | 'journal'
+
+function RunPanel({
+  open,
+  onToggle,
+  running,
+  stats,
+  onReset,
+  /* bot config */
+  contractType,
+  setContractType,
+  stake,
+  setStake,
+  barrier,
+  setBarrier,
+  /* status */
+  botReady,
+  botError,
+  currency,
+  /* tx log */
+  txLog,
+}: {
+  open: boolean
+  onToggle: () => void
+  running: boolean
+  stats: RunStats
+  onReset: () => void
+  contractType: string
+  setContractType: (v: string) => void
+  stake: string
+  setStake: (v: string) => void
+  barrier: string
+  setBarrier: (v: string) => void
+  botReady: boolean
+  botError: string | null
+  currency: string
+  txLog: TxEntry[]
+}) {
+  const [tab, setTab] = useState<RunTab>('summary')
+
+  const TABS: RunTab[] = ['summary', 'transactions', 'journal']
+
+  const statTiles = [
+    { label: 'Total stake',      value: `${stats.totalStake.toFixed(2)} ${currency}` },
+    { label: 'Total payout',     value: `${stats.totalPayout.toFixed(2)} ${currency}` },
+    { label: 'No. of runs',      value: String(stats.runs) },
+    { label: 'Contracts lost',   value: String(stats.lost) },
+    { label: 'Contracts won',    value: String(stats.won) },
+    { label: 'Total profit/loss',value: `${stats.profit >= 0 ? '+' : ''}${stats.profit.toFixed(2)} ${currency}` },
+  ]
+
+  /* ── Input style helper ── */
+  const inputStyle: React.CSSProperties = {
+    background: '#050505',
+    border: '1px solid var(--border)',
+    borderRadius: '8px',
+    color: '#fff',
+    fontSize: '0.78rem',
+    padding: '0.35rem 0.6rem',
+    width: '100%',
+    outline: 'none',
+  }
+
+  return (
+    <div style={{
+      position: 'fixed',
+      right: 0,
+      top: '88px',
+      bottom: '48px',
+      width: '350px',
+      transform: open ? 'translateX(0)' : 'translateX(350px)',
+      transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',
+      zIndex: 60,
+      background: '#0a0a0a',
+      borderLeft: '1px solid var(--border)',
+      display: 'flex',
+      flexDirection: 'column',
+      boxShadow: open ? '-8px 0 32px rgba(0,0,0,0.55)' : 'none',
+    }}>
+
+      {/* ── Toggle handle ── */}
+      <button
+        onClick={onToggle}
+        aria-label={open ? 'Close run panel' : 'Open run panel'}
+        style={{
+          position: 'absolute',
+          left: '-22px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: '22px',
+          height: '52px',
+          background: '#0a0a0a',
+          border: '1px solid var(--border)',
+          borderRight: 'none',
+          borderRadius: '8px 0 0 8px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'rgba(229,229,229,0.45)',
+          padding: 0,
+        }}
+      >
+        <svg width="12" height="18" viewBox="0 0 12 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          {open ? (
+            <>
+              <polyline points="7,4 11,9 7,14"/>
+              <polyline points="2,4  6,9 2,14"/>
+            </>
+          ) : (
+            <>
+              <polyline points="5,4  1,9  5,14"/>
+              <polyline points="10,4 6,9 10,14"/>
+            </>
+          )}
+        </svg>
+      </button>
+
+      {/* ── Tab bar ── */}
+      <div style={{
+        display: 'flex',
+        borderBottom: '1px solid var(--border)',
+        background: '#050505',
+        flexShrink: 0,
+      }}>
+        {TABS.map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              flex: 1,
+              padding: '0.65rem 0',
+              fontSize: '0.78rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+              border: 'none',
+              background: 'transparent',
+              color: tab === t ? 'var(--gold)' : 'rgba(229,229,229,0.38)',
+              borderBottom: tab === t ? '2px solid var(--gold)' : '2px solid transparent',
+              textTransform: 'capitalize',
+              transition: 'color 0.15s, border-color 0.15s',
+              letterSpacing: '0.03em',
+            }}
+          >
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Content ── */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0.85rem' }}>
+
+        {/* ═══ SUMMARY TAB ═══ */}
+        {tab === 'summary' && (
+          <>
+            {/* Connection status badge */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '0.4rem',
+              marginBottom: '0.85rem',
+              padding: '0.4rem 0.6rem',
+              borderRadius: '8px',
+              background: botError
+                ? 'rgba(239,68,68,0.1)'
+                : botReady
+                ? 'rgba(34,197,94,0.08)'
+                : 'rgba(252,163,17,0.08)',
+              border: `1px solid ${botError ? 'rgba(239,68,68,0.25)' : botReady ? 'rgba(34,197,94,0.2)' : 'rgba(252,163,17,0.2)'}`,
+            }}>
+              <span style={{
+                width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
+                background: botError ? '#ef4444' : botReady ? '#22c55e' : '#FCA311',
+                boxShadow: botReady && !botError ? '0 0 6px #22c55e' : 'none',
+              }}/>
+              <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.6)' }}>
+                {botError ? botError : botReady ? 'Connected to Deriv' : 'Connecting…'}
+              </span>
+            </div>
+
+            {/* ── Bot config ── */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', marginBottom: '1rem' }}>
+              {/* Contract type */}
+              <div>
+                <label style={{
+                  display: 'block', fontSize: '0.6rem', fontWeight: 600,
+                  color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
+                  letterSpacing: '0.06em', marginBottom: '0.3rem',
+                }}>
+                  Contract Type
+                </label>
+                <select
+                  value={contractType}
+                  onChange={e => setContractType(e.target.value)}
+                  disabled={running}
+                  style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}
+                >
+                  {CONTRACT_TYPES.map(c => (
+                    <option key={c.value} value={c.value}>{c.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Stake + barrier row */}
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{
+                    display: 'block', fontSize: '0.6rem', fontWeight: 600,
+                    color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
+                    letterSpacing: '0.06em', marginBottom: '0.3rem',
+                  }}>
+                    Stake ({currency})
+                  </label>
+                  <input
+                    type="number"
+                    min="0.35"
+                    step="0.01"
+                    value={stake}
+                    onChange={e => setStake(e.target.value)}
+                    disabled={running}
+                    style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'text' }}
+                  />
+                </div>
+                {needsBarrier(contractType) && (
+                  <div style={{ width: '70px' }}>
+                    <label style={{
+                      display: 'block', fontSize: '0.6rem', fontWeight: 600,
+                      color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase',
+                      letterSpacing: '0.06em', marginBottom: '0.3rem',
+                    }}>
+                      Digit
+                    </label>
+                    <select
+                      value={barrier}
+                      onChange={e => setBarrier(e.target.value)}
+                      disabled={running}
+                      style={{ ...inputStyle, cursor: running ? 'not-allowed' : 'pointer' }}
+                    >
+                      {DIGITS.map(d => (
+                        <option key={d} value={String(d)}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Idle hint ── */}
+            {!running && stats.runs === 0 && (
+              <div style={{
+                textAlign: 'center',
+                color: 'rgba(229,229,229,0.35)',
+                fontSize: '0.78rem',
+                lineHeight: 1.7,
+                padding: '0.5rem 0.5rem 0.75rem',
+              }}>
+                Configure your bot above, then hit{' '}
+                <strong style={{ color: 'rgba(229,229,229,0.55)' }}>Run</strong>.
+                {' '}Stats will appear here.
+              </div>
+            )}
+
+            {/* ── Stats tiles ── */}
+            {stats.runs > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.55rem' }}>
+                {statTiles.map(s => (
+                  <div
+                    key={s.label}
+                    style={{
+                      background: '#050505',
+                      border: '1px solid var(--border)',
+                      borderRadius: '10px',
+                      padding: '0.65rem 0.7rem',
+                    }}
+                  >
+                    <div style={{
+                      fontSize: '0.58rem',
+                      fontWeight: 600,
+                      color: 'rgba(229,229,229,0.32)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.06em',
+                      marginBottom: '0.28rem',
+                    }}>
+                      {s.label}
+                    </div>
+                    <div style={{
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      fontVariantNumeric: 'tabular-nums',
+                      color:
+                        s.label === 'Total profit/loss'
+                          ? stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff'
+                          : s.label === 'Contracts won' && stats.won > 0 ? '#22c55e'
+                          : s.label === 'Contracts lost' && stats.lost > 0 ? '#ef4444'
+                          : '#fff',
+                    }}>
+                      {s.value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ═══ TRANSACTIONS TAB ═══ */}
+        {tab === 'transactions' && (
+          txLog.length === 0 ? (
+            <div style={{
+              textAlign: 'center',
+              color: 'rgba(229,229,229,0.3)',
+              fontSize: '0.78rem',
+              marginTop: '2rem',
+              lineHeight: 1.7,
+            }}>
+              No trades yet.<br/>Start the bot to see results here.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+              {txLog.map(tx => (
+                <div
+                  key={tx.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    padding: '0.55rem 0.65rem',
+                    borderRadius: '8px',
+                    background: '#050505',
+                    border: `1px solid ${tx.won ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
+                  }}
+                >
+                  {/* W/L badge */}
+                  <span style={{
+                    fontSize: '0.62rem', fontWeight: 800,
+                    color: tx.won ? '#22c55e' : '#ef4444',
+                    background: tx.won ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                    border: `1px solid ${tx.won ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+                    borderRadius: '4px',
+                    padding: '0.1rem 0.35rem',
+                    flexShrink: 0,
+                    letterSpacing: '0.04em',
+                  }}>
+                    {tx.won ? 'WIN' : 'LOSS'}
+                  </span>
+
+                  {/* details */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.7)', fontWeight: 600 }}>
+                      {CONTRACT_TYPES.find(c => c.value === tx.contractType)?.label ?? tx.contractType}
+                    </div>
+                    <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginTop: '1px' }}>
+                      {fmtTime(tx.time)} · {tx.symbol}
+                    </div>
+                  </div>
+
+                  {/* payout */}
+                  <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                    <div style={{
+                      fontSize: '0.78rem', fontWeight: 700,
+                      color: tx.won ? '#22c55e' : '#ef4444',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}>
+                      {tx.won ? '+' : '-'}{Math.abs(tx.payout - tx.stake).toFixed(2)}
+                    </div>
+                    <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)' }}>
+                      stake {tx.stake.toFixed(2)}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        {/* ═══ JOURNAL TAB ═══ */}
+        {tab === 'journal' && (
+          txLog.length === 0 ? (
+            <div style={{
+              textAlign: 'center',
+              color: 'rgba(229,229,229,0.3)',
+              fontSize: '0.78rem',
+              marginTop: '2rem',
+              lineHeight: 1.7,
+            }}>
+              No journal entries yet.<br/>Events will appear here when the bot runs.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+              {txLog.map((tx, i) => (
+                <div key={i} style={{
+                  fontSize: '0.7rem',
+                  color: 'rgba(229,229,229,0.55)',
+                  padding: '0.3rem 0',
+                  borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  fontVariantNumeric: 'tabular-nums',
+                }}>
+                  <span style={{ color: 'rgba(229,229,229,0.3)' }}>{fmtTime(tx.time)}</span>
+                  {' '}Contract #{tx.id}: {tx.won ? '✓ Won' : '✗ Lost'} | stake {tx.stake.toFixed(2)} | payout {tx.payout.toFixed(2)}
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+      </div>
+
+      {/* ── Footer: Reset ── */}
+      <div style={{ padding: '0.75rem', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          onClick={onReset}
+          style={{
+            width: '100%',
+            padding: '0.6rem',
+            borderRadius: '8px',
+            border: '1px solid var(--border)',
+            background: 'transparent',
+            color: 'rgba(229,229,229,0.5)',
+            fontSize: '0.8rem',
+            fontWeight: 700,
+            cursor: 'pointer',
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            transition: 'background 0.15s, color 0.15s',
+          }}
+          onMouseEnter={e => {
+            (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.06)'
+            ;(e.currentTarget as HTMLButtonElement).style.color = 'rgba(229,229,229,0.8)'
+          }}
+          onMouseLeave={e => {
+            (e.currentTarget as HTMLButtonElement).style.background = 'transparent'
+            ;(e.currentTarget as HTMLButtonElement).style.color = 'rgba(229,229,229,0.5)'
+          }}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Run Bar ────────────────────────────────────────────── */
+type ExecSpeed = 'normal' | 'fast' | 'turbo'
+const SPEED_LABELS: Record<ExecSpeed, string> = {
+  normal: 'Normal Speed',
+  fast:   'Fast Speed',
+  turbo:  'Turbo Speed',
+}
+
+function RunBar({
+  running,
+  onToggleRun,
+  speed,
+  onCycleSpeed,
+  disabled,
+}: {
+  running: boolean
+  onToggleRun: () => void
+  speed: ExecSpeed
+  onCycleSpeed: () => void
+  disabled: boolean
+}) {
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      height: '48px',
+      background: '#050505',
+      borderTop: '1px solid var(--border)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '1rem',
+      padding: '0 1.25rem',
+      zIndex: 50,
+    }}>
+      <button
+        onClick={onToggleRun}
+        disabled={disabled}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.45rem',
+          padding: '0.4rem 1.2rem',
+          borderRadius: '8px',
+          border: 'none',
+          background: disabled ? '#333' : running ? '#ef4444' : '#22c55e',
+          color: disabled ? '#666' : '#fff',
+          fontWeight: 700,
+          fontSize: '0.82rem',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          letterSpacing: '0.04em',
+          transition: 'background 0.2s',
+        }}
+        title={disabled ? 'Connecting to Deriv…' : undefined}
+      >
+        {running ? (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <rect x="1" y="1" width="10" height="10" rx="2"/>
+          </svg>
+        ) : (
+          <svg width="11" height="13" viewBox="0 0 11 13" fill="currentColor">
+            <polygon points="0,0 11,6.5 0,13"/>
+          </svg>
+        )}
+        {running ? 'Stop' : 'Run'}
+      </button>
+
+      <button
+        onClick={onCycleSpeed}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+          padding: '0.35rem 0.75rem',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.4rem',
+        }}
+      >
+        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Speed
+        </span>
+        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'rgba(229,229,229,0.7)' }}>
+          {SPEED_LABELS[speed]}
+        </span>
+        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="rgba(229,229,229,0.35)" strokeWidth="1.5" strokeLinecap="round">
+          <polyline points="1,1 5,5 9,1"/>
+        </svg>
+      </button>
+    </div>
+  )
+}
+
 /* ─── Scanner iframe ────────────────────────────────────── */
 function ScannerView() {
   return (
@@ -178,6 +751,7 @@ function ScannerView() {
 
 /* ─── Main Page ─────────────────────────────────────────── */
 export default function AnalysisPage() {
+  /* ── Ticks / analysis state ── */
   const [activeTab, setActiveTab] = useState<'circles' | 'scanner'>('circles')
   const [symbol,    setSymbol]    = useState('1HZ100V')
   const [tickCount, setTickCount] = useState(1000)
@@ -189,7 +763,259 @@ export default function AnalysisPage() {
 
   const wsRef = useRef<WebSocket | null>(null)
 
-  /* ── WebSocket: re-init on symbol change ── */
+  /* ── Run panel UI state ── */
+  const [runOpen,   setRunOpen]   = useState(false)
+  const [running,   setRunning]   = useState(false)
+  const [execSpeed, setExecSpeed] = useState<ExecSpeed>('normal')
+  const [runStats,  setRunStats]  = useState<RunStats>({
+    totalStake: 0, totalPayout: 0, runs: 0, lost: 0, won: 0, profit: 0,
+  })
+
+  /* ── Bot config state ── */
+  const [contractType, setContractType] = useState('DIGITEVEN')
+  const [stake,        setStake]        = useState('1.00')
+  const [barrier,      setBarrier]      = useState('5')
+  const [currency,     setCurrency]     = useState('USD')
+  const [botReady,     setBotReady]     = useState(false)
+  const [botError,     setBotError]     = useState<string | null>(null)
+  const [txLog,        setTxLog]        = useState<TxEntry[]>([])
+
+  /* ── Refs (avoid stale closures in WS callbacks) ── */
+  const runningRef     = useRef(false)
+  const contractTypeRef = useRef('DIGITEVEN')
+  const stakeRef       = useRef('1.00')
+  const barrierRef     = useRef('5')
+  const symbolRef      = useRef('1HZ100V')
+  const execSpeedRef   = useRef<ExecSpeed>('normal')
+  const currencyRef    = useRef('USD')
+  const botWsRef       = useRef<WebSocket | null>(null)
+  /** Maps contract_id → buy_price for bot trades we initiated */
+  const pendingBuysRef = useRef<Map<number, number>>(new Map())
+  const reqIdRef       = useRef(200)
+
+  /* ── Keep refs in sync with state ── */
+  useEffect(() => { symbolRef.current      = symbol      }, [symbol])
+  useEffect(() => { contractTypeRef.current = contractType }, [contractType])
+  useEffect(() => { stakeRef.current       = stake       }, [stake])
+  useEffect(() => { barrierRef.current     = barrier     }, [barrier])
+  useEffect(() => { execSpeedRef.current   = execSpeed   }, [execSpeed])
+  useEffect(() => { currencyRef.current    = currency    }, [currency])
+
+  /* ── Execute one trade via the authorized bot WS ── */
+  const executeTrade = useCallback((ws: WebSocket) => {
+    if (!runningRef.current || ws.readyState !== WebSocket.OPEN) return
+
+    const ct      = contractTypeRef.current
+    const hasBar  = needsBarrier(ct)
+    const amount  = parseFloat(stakeRef.current) || 1.00
+    const reqId   = ++reqIdRef.current
+
+    /*
+     * Deriv WebSocket API — buy (without prior proposal)
+     * buy: "1"   → use inline parameters instead of a proposal id
+     * price: 1000 → max price we'll pay (always fills at actual ask_price)
+     *
+     * contract_type: one of DIGITEVEN | DIGITODD | DIGITMATCH | DIGITDIFF | DIGITOVER | DIGITUNDER
+     * duration: 1, duration_unit: "t" → 1-tick digit contract
+     * barrier (optional): the digit prediction for MATCH/DIFF/OVER/UNDER
+     */
+    ws.send(JSON.stringify({
+      buy: '1',
+      price: 1000,
+      req_id: reqId,
+      parameters: {
+        contract_type: ct,
+        symbol:        symbolRef.current,
+        duration:      1,
+        duration_unit: 't',
+        amount,
+        basis:    'stake',
+        currency: currencyRef.current,
+        ...(hasBar ? { barrier: barrierRef.current } : {}),
+      },
+    }))
+  }, [])
+
+  /* ── Bot WebSocket lifecycle ── */
+  useEffect(() => {
+    let ws: WebSocket | null = null
+    let ping: ReturnType<typeof setInterval> | null = null
+
+    async function connect() {
+      setBotError(null)
+      setBotReady(false)
+
+      let token = '', appId = ''
+      try {
+        const res = await fetch('/api/user/token')
+        if (!res.ok) {
+          setBotError(res.status === 401 ? 'Log in to enable the bot' : 'Failed to fetch token')
+          return
+        }
+        ;({ token, appId } = await res.json() as { token: string; appId: string })
+      } catch {
+        setBotError('Network error')
+        return
+      }
+
+      ws = new WebSocket(`${BOT_WS_BASE}${appId}`)
+      botWsRef.current = ws
+
+      ws.onopen = () => {
+        // Step 1: authorize with the user's OAuth access token
+        ws!.send(JSON.stringify({ authorize: token }))
+
+        // Keep-alive ping every 30 s
+        ping = setInterval(() => {
+          if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
+        }, 30_000)
+      }
+
+      ws.onmessage = (ev) => {
+        let msg: Record<string, unknown>
+        try { msg = JSON.parse(ev.data as string) } catch { return }
+
+        if (msg.error) {
+          const errMsg = (msg.error as { message: string }).message
+          setBotError(errMsg)
+          // Stop bot on API error
+          setRunning(false)
+          runningRef.current = false
+          return
+        }
+
+        /* ── authorize response ──
+         * Deriv returns account info including currency.
+         * Once authorized, subscribe to the transaction stream so we
+         * can track every buy/sell event in real time.
+         */
+        if (msg.msg_type === 'authorize') {
+          const auth = msg.authorize as { currency: string; loginid: string }
+          setCurrency(auth.currency)
+          currencyRef.current = auth.currency
+
+          // Step 2: subscribe to real-time transaction stream
+          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }))
+
+          setBotReady(true)
+          // If user clicked Run before WS finished connecting, start now
+          if (runningRef.current) executeTrade(ws!)
+        }
+
+        /* ── buy response ──
+         * Sent immediately after a buy request is accepted.
+         * We record contract_id → buy_price so we can match the sell later.
+         */
+        if (msg.msg_type === 'buy') {
+          if (msg.error) return // already handled above
+          const buy = msg.buy as { contract_id: number; buy_price: number }
+          pendingBuysRef.current.set(buy.contract_id, buy.buy_price)
+          setRunStats(prev => ({
+            ...prev,
+            totalStake: prev.totalStake + buy.buy_price,
+            runs: prev.runs + 1,
+          }))
+        }
+
+        /* ── transaction stream ──
+         * action: "buy"  → money deducted (amount is negative)
+         * action: "sell" → payout credited (amount is positive; 0 if contract lost)
+         *
+         * We only process sell events for contracts we initiated (via pendingBuysRef).
+         * On settle: update stats, log the trade, schedule next trade if still running.
+         */
+        if (msg.msg_type === 'transaction') {
+          const tx = msg.transaction as {
+            action: string
+            amount: number
+            contract_id?: number
+            currency: string
+          }
+
+          if (tx.action === 'sell' && tx.contract_id != null) {
+            const buyPrice = pendingBuysRef.current.get(tx.contract_id)
+            if (buyPrice === undefined) return // not our contract
+
+            pendingBuysRef.current.delete(tx.contract_id)
+            const sellAmount = Math.max(0, tx.amount) // 0 on full loss
+            const won = sellAmount > 0
+
+            setRunStats(prev => {
+              const newPayout = prev.totalPayout + sellAmount
+              return {
+                ...prev,
+                totalPayout: newPayout,
+                won:    won ? prev.won + 1  : prev.won,
+                lost:   won ? prev.lost     : prev.lost + 1,
+                profit: newPayout - prev.totalStake,
+              }
+            })
+
+            // Add to transaction log (capped at 100 entries)
+            setTxLog(prev => [{
+              id:           tx.contract_id!,
+              time:         Date.now(),
+              contractType: contractTypeRef.current,
+              stake:        buyPrice,
+              payout:       sellAmount,
+              won,
+              symbol:       symbolRef.current,
+            }, ...prev].slice(0, 100))
+
+            // Schedule next trade based on execution speed
+            if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
+              const delay =
+                execSpeedRef.current === 'turbo'  ? 500  :
+                execSpeedRef.current === 'fast'   ? 1500 : 3000
+              setTimeout(() => {
+                if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
+                  executeTrade(ws!)
+                }
+              }, delay)
+            }
+          }
+        }
+      }
+
+      ws.onerror = () => setBotError('WebSocket connection error')
+      ws.onclose = () => {
+        setBotReady(false)
+        botWsRef.current = null
+        if (ping) { clearInterval(ping); ping = null }
+      }
+    }
+
+    connect()
+
+    return () => {
+      if (ping) clearInterval(ping)
+      ws?.close()
+      botWsRef.current = null
+    }
+  }, [executeTrade])
+
+  /* ── Sync running ref + trigger first trade ── */
+  useEffect(() => {
+    runningRef.current = running
+    if (running && botWsRef.current?.readyState === WebSocket.OPEN) {
+      executeTrade(botWsRef.current)
+    }
+  }, [running, executeTrade])
+
+  /* ── Reset handler ── */
+  function handleReset() {
+    setRunning(false)
+    runningRef.current = false
+    pendingBuysRef.current.clear()
+    setRunStats({ totalStake: 0, totalPayout: 0, runs: 0, lost: 0, won: 0, profit: 0 })
+    setTxLog([])
+  }
+
+  function cycleSpeed() {
+    setExecSpeed(s => s === 'normal' ? 'fast' : s === 'fast' ? 'turbo' : 'normal')
+  }
+
+  /* ── Ticks WebSocket: re-init on symbol change ── */
   useEffect(() => {
     setLoading(true)
     setPrices([])
@@ -238,7 +1064,7 @@ export default function AnalysisPage() {
     return () => { ws.close(); wsRef.current = null }
   }, [symbol])
 
-  /* ── Derived data ── */
+  /* ── Derived digit data ── */
   const digits = useMemo(
     () => prices.slice(-tickCount).map(getLastDigit),
     [prices, tickCount],
@@ -330,8 +1156,9 @@ export default function AnalysisPage() {
     F: { bg: 'rgba(239,68,68,0.15)',    border: '#ef4444',  text: '#ef4444' },
   }
 
+  /* ── Render ── */
   return (
-    <div style={{ background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column', paddingBottom: '48px' }}>
 
       {/* ── Circles / Scanner toggle ── */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
@@ -455,7 +1282,6 @@ export default function AnalysisPage() {
               background: 'var(--border)',
               flex: 1,
             }}>
-              {/* Over / Under */}
               <Card title="Over / Under" streak={ouData.streak} streakLabel={ouData.streakLabel}>
                 <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
@@ -463,7 +1289,6 @@ export default function AnalysisPage() {
                 <Sequence seq={ouData.seq.slice(-10)} colorMap={ouColors} />
               </Card>
 
-              {/* Match / Differ */}
               <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}>
                 <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
@@ -471,14 +1296,12 @@ export default function AnalysisPage() {
                 <Sequence seq={mdData.seq.slice(-10)} colorMap={mdColors} />
               </Card>
 
-              {/* Even / Odd */}
               <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
                 <Sequence seq={eoData.seq.slice(-10)} colorMap={eoColors} />
               </Card>
 
-              {/* Rise / Fall */}
               <Card title="Rise / Fall" streak={rfData.streak} streakLabel={rfData.streakLabel}>
                 <Bar label="Rise" color="#22c55e" count={rfData.rise} total={rfData.total} />
                 <Bar label="Fall" color="#ef4444" count={rfData.fall} total={rfData.total} />
@@ -488,6 +1311,34 @@ export default function AnalysisPage() {
           )}
         </>
       )}
+
+      {/* ── Run Panel (right-side drawer) ── */}
+      <RunPanel
+        open={runOpen}
+        onToggle={() => setRunOpen(o => !o)}
+        running={running}
+        stats={runStats}
+        onReset={handleReset}
+        contractType={contractType}
+        setContractType={setContractType}
+        stake={stake}
+        setStake={setStake}
+        barrier={barrier}
+        setBarrier={setBarrier}
+        botReady={botReady}
+        botError={botError}
+        currency={currency}
+        txLog={txLog}
+      />
+
+      {/* ── Run Bar (sticky bottom) ── */}
+      <RunBar
+        running={running}
+        onToggleRun={() => setRunning(r => !r)}
+        speed={execSpeed}
+        onCycleSpeed={cycleSpeed}
+        disabled={!botReady}
+      />
 
       <style>{`
         @keyframes priceFlash {
