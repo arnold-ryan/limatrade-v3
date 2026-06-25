@@ -371,7 +371,7 @@ function RunPanel({
                 {/* Market + direction */}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
                   <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#fff' }}>
-                    {lastContractSummary.symbol}
+                    {symLabel(lastContractSummary.symbol)}
                   </span>
                   <span style={{
                     display: 'flex', alignItems: 'center', gap: '4px',
