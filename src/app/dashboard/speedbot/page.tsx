@@ -1444,12 +1444,11 @@ export default function SpeedbotPage() {
             />
           </div>
 
-          {/* Middle row: Analysis card + Run Statistics side by side */}
+          {/* Middle row: Analysis card + Run Statistics stacked */}
           <div style={{
-            display: 'grid', gridTemplateColumns: '1fr 1fr',
+            display: 'flex', flexDirection: 'column',
             gap: '0.75rem', padding: '0.75rem 1.25rem 0',
-            flexShrink: 0,
-            alignItems: 'start',
+            overflowY: 'auto', flex: 1, minHeight: 0,
           }}>
 
           {/* ── Analysis card — updates with tradeType ── */}
