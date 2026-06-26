@@ -583,18 +583,21 @@ export default function SpeedbotPage() {
     }
   }, [executeTrade, checkStops])
 
-  /* ── Sync running state → ref + fire first trade ── */
+  /* ── Sync running ref ─────────────────────────────────────────────────────
+   * The first trade is fired synchronously in handleToggleRun (above) before
+   * React re-renders. This effect only syncs the ref and handles the reconnect
+   * case where onopen fires executeTrade (inTradeRef.current = false at that point).
+   * ── */
   useEffect(() => {
     runningRef.current = running
-    if (running) {
-      // Reset accumulator refs on new run
-      currentStakeRef.current = parseFloat(stake) || 1.00
-      accumLossRef.current    = 0
+    if (running && botWsRef.current?.readyState === WebSocket.OPEN
+        && !inTradeRef.current) {
+      // Reconnect case: WS was re-established while already running.
+      // Re-initialize accumulators since the WS state was lost.
+      currentStakeRef.current  = parseFloat(stake) || 1.00
+      accumLossRef.current     = 0
       effectiveTypeRef.current = tradeType
-      inTradeRef.current      = false
-      if (botWsRef.current?.readyState === WebSocket.OPEN) {
-        executeTrade(botWsRef.current)
-      }
+      executeTrade(botWsRef.current)
     }
   }, [running, executeTrade, stake, tradeType])
 
@@ -637,7 +640,24 @@ export default function SpeedbotPage() {
     statsRef.current = emptyStats
     setStats(emptyStats)
     setTxLog([])
+
+    // Initialize accumulator refs SYNCHRONOUSLY so the first trade uses correct values
+    // even before the useEffect runs (which happens after the React render cycle).
+    runningRef.current        = true
+    currentStakeRef.current   = s
+    accumLossRef.current      = 0
+    effectiveTypeRef.current  = tradeType
+    inTradeRef.current        = false
+
     setRunning(true)
+
+    // Fire the first buy immediately — skip the ~16ms browser-frame delay
+    // that would occur if we waited for useEffect.
+    // inTradeRef.current is false so executeTrade will proceed.
+    if (botWsRef.current?.readyState === WebSocket.OPEN) {
+      executeTrade(botWsRef.current)
+    }
+    // If WS not yet open, onopen will call executeTrade because runningRef.current = true
   }
 
   function handleReset() {

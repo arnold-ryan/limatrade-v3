@@ -1231,8 +1231,15 @@ export default function AnalysisPage() {
    */
   const pendingFlashWonRef  = useRef<boolean | null>(null)
   /**
+   * Length of pricesRef at the moment SELL fires.
+   * The exit tick for a 1-tick contract is at or just before this position,
+   * so POC uses it as a search anchor instead of scanning the full array.
+   * This prevents false matches from repeated prices elsewhere in the window.
+   */
+  const pendingFlashSellIdxRef = useRef<number>(0)
+  /**
    * Set in the POC handler when exit_spot arrives before the matching public tick.
-   * The tick handler watches for this price and triggers the flash when it lands.
+   * The tick handler watches for this price (with epsilon) and triggers the flash.
    */
   const pendingExitSpotRef  = useRef<number | null>(null)
 
@@ -1461,25 +1468,39 @@ export default function AnalysisPage() {
                 t.id === poc.contract_id ? { ...t, exitSpot: exitSpotNum } : t
               ))
 
-              // Trigger glow flash on the exact exit tick
+              // Trigger glow flash pinned to the exact exit tick
               if (pendingFlashWonRef.current !== null) {
-                const won = pendingFlashWonRef.current
+                const won    = pendingFlashWonRef.current
                 const prices = pricesRef.current
-                // Search backwards — exit tick is always the most recent occurrence
-                const exitIdx = prices.lastIndexOf(exitSpotNum)
+                const EPSILON = 1e-6  // guards against float precision diff between
+                                      // tick.quote (JSON number) and parseFloat(exit_spot string)
+
+                // The exit tick for a 1-tick contract arrived just before SELL fired.
+                // pendingFlashSellIdxRef.current holds pricesRef.length at SELL time.
+                // We search a tight ±4 window around that bookmark so a repeated price
+                // elsewhere in the visible window can never produce a false match.
+                const sellLen  = pendingFlashSellIdxRef.current || prices.length
+                const lo = Math.max(0, sellLen - 4)
+                const hi = Math.min(prices.length - 1, sellLen)  // exit tick ≤ sellLen
+
+                let exitIdx = -1
+                // Search from hi downward — prefer the most recent match within window
+                for (let i = hi; i >= lo; i--) {
+                  if (Math.abs(prices[i] - exitSpotNum) < EPSILON) { exitIdx = i; break }
+                }
 
                 if (exitIdx >= 0) {
-                  // Exit tick already received on public WS — compute exact atTickN
-                  // ticksAgo = 0 means last box, 1 = second-to-last, etc.
+                  // Found — compute exactly how many ticks ago the exit tick was
                   const ticksAgo = prices.length - 1 - exitIdx
                   const atTickN  = tickNRef.current - ticksAgo
                   if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
                   setTradeFlash({ won, atTickN })
                   flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
-                  pendingFlashWonRef.current = null
+                  pendingFlashWonRef.current     = null
+                  pendingFlashSellIdxRef.current = 0
                 } else {
-                  // Exit tick not yet on public WS — tick handler will fire the flash
-                  // when this exact price arrives
+                  // Exit tick not yet received on public WS (POC arrived first).
+                  // Store exit_spot for the tick handler to match on arrival.
                   pendingExitSpotRef.current = exitSpotNum
                   // pendingFlashWonRef stays set so the tick handler can read it
                 }
@@ -1492,8 +1513,9 @@ export default function AnalysisPage() {
         if (msg.msg_type === 'buy') {
           // Clear any leftover pending flash from the previous trade so it doesn't
           // accidentally fire mid-next-contract (edge case: lost POC + immediate re-run)
-          pendingFlashWonRef.current = null
-          pendingExitSpotRef.current = null
+          pendingFlashWonRef.current     = null
+          pendingExitSpotRef.current     = null
+          pendingFlashSellIdxRef.current = 0
 
           const buy = msg.buy as {
             contract_id: number; buy_price: number
@@ -1566,13 +1588,14 @@ export default function AnalysisPage() {
             const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
-            /* ── Flash: store won here; POC handler will pin the exact exit tick ──
-             * We do NOT use tickNRef here because the exit tick on the public WS
-             * may arrive slightly before OR after SELL on the private WS. Instead,
-             * proposal_open_contract gives us exit_spot which we match precisely
-             * against pricesRef to find the exact tick index.
+            /* ── Flash: store won + prices bookmark; POC handler pins the exit tick ──
+             * We record pricesRef.current.length as a bookmark of where the exit tick
+             * should be. For a 1-tick contract, exit tick arrived just before SELL, so
+             * it's at or near pricesRef[sellIdx-1]. POC uses this bookmark to search
+             * only a tight window — avoiding false matches from repeated prices.
              */
-            pendingFlashWonRef.current = won
+            pendingFlashWonRef.current   = won
+            pendingFlashSellIdxRef.current = pricesRef.current.length
 
             setRunStats(prev => {
               const newPayout = prev.totalPayout + sellAmount
@@ -1677,10 +1700,19 @@ export default function AnalysisPage() {
     }
   }, [executeTrade])
 
-  /* ── Sync running ref + trigger first trade ── */
+  /* ── Sync running ref ──────────────────────────────────────────────────────
+   * The first trade is now fired SYNCHRONOUSLY in the Start button click handler
+   * (see onToggleRun below) — before React even re-renders — so the buy message
+   * leaves the socket immediately with zero frame-delay.
+   *
+   * This effect only syncs runningRef for WS callbacks that check it.
+   * Guard: only trigger executeTrade here if no buy is already in flight,
+   * preventing a double-buy if the click handler already sent one.
+   * ── */
   useEffect(() => {
     runningRef.current = running
-    if (running && botWsRef.current?.readyState === WebSocket.OPEN) {
+    if (running && botWsRef.current?.readyState === WebSocket.OPEN
+        && pendingBuysRef.current.size === 0) {
       executeTrade(botWsRef.current)
     }
   }, [running, executeTrade])
@@ -1799,15 +1831,16 @@ export default function AnalysisPage() {
         setTickN(tickNRef.current)
 
         // If POC arrived before this tick, check if this IS the exit tick.
-        // When the price matches the pending exit spot, capture atTickN right now —
-        // before any further ticks can shift it — and fire the flash.
-        if (pendingExitSpotRef.current !== null && q === pendingExitSpotRef.current) {
+        // Use epsilon instead of === to handle float precision diff between
+        // tick.quote (JSON number) and parseFloat(exit_spot string from POC).
+        if (pendingExitSpotRef.current !== null && Math.abs(q - pendingExitSpotRef.current) < 1e-6) {
           const won = pendingFlashWonRef.current!
           if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
           setTradeFlash({ won, atTickN: tickNRef.current })
           flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
-          pendingExitSpotRef.current = null
-          pendingFlashWonRef.current = null
+          pendingExitSpotRef.current     = null
+          pendingFlashWonRef.current     = null
+          pendingFlashSellIdxRef.current = 0
         }
       }
     }
@@ -2141,7 +2174,18 @@ export default function AnalysisPage() {
             runningRef.current = false   // sync immediately — prevents race
             setRunning(false)
           } else {
+            // Set ref synchronously BEFORE state update so any concurrent WS
+            // callback sees running=true immediately.
+            runningRef.current = true
             setRunning(true)
+            // Fire the first buy RIGHT NOW — before React re-renders.
+            // This eliminates the ~16ms browser-frame gap that would otherwise
+            // occur if we waited for the useEffect to trigger executeTrade.
+            if (botWsRef.current?.readyState === WebSocket.OPEN) {
+              executeTrade(botWsRef.current)
+            }
+            // If WS not open yet (still connecting), onopen will fire executeTrade
+            // automatically because runningRef.current is already true.
           }
         }}
         speed={execSpeed}
