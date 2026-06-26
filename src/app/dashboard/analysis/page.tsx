@@ -120,17 +120,39 @@ function Bar({ label, color, count, total }: {
 }
 
 interface SeqColor { bg: string; border: string; text: string }
-function Sequence({ seq, colorMap }: { seq: string[]; colorMap: Record<string, SeqColor> }) {
+function Sequence({ seq, colorMap, flash }: {
+  seq: string[]
+  colorMap: Record<string, SeqColor>
+  flash?: { won: boolean } | null
+}) {
   return (
     <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
       {seq.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
+        const isLast = i === seq.length - 1
+        const isFlashing = isLast && flash != null
+        const flashWon   = isFlashing && flash!.won
         return (
           <div key={i} style={{
             width: '26px', height: '26px', borderRadius: '6px',
             fontSize: '0.7rem', fontWeight: 700,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: c.bg, border: `1.5px solid ${c.border}`, color: c.text,
+            background: isFlashing
+              ? (flashWon ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)')
+              : c.bg,
+            border: isFlashing
+              ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
+              : `1.5px solid ${c.border}`,
+            color: isFlashing ? '#fff' : c.text,
+            transform: isFlashing ? 'scale(1.22)' : 'scale(1)',
+            boxShadow: isFlashing
+              ? (flashWon
+                  ? '0 0 12px 4px rgba(34,197,94,0.55)'
+                  : '0 0 12px 4px rgba(239,68,68,0.55)')
+              : 'none',
+            transition: 'all 0.2s ease',
+            position: 'relative',
+            zIndex: isFlashing ? 2 : undefined,
           }}>
             {s}
           </div>
@@ -140,23 +162,11 @@ function Sequence({ seq, colorMap }: { seq: string[]; colorMap: Record<string, S
   )
 }
 
-function Card({ title, streak, streakLabel, flash, children }: {
-  title: string; streak: number; streakLabel: string
-  flash?: { won: boolean } | null
-  children: React.ReactNode
+function Card({ title, streak, streakLabel, children }: {
+  title: string; streak: number; streakLabel: string; children: React.ReactNode
 }) {
-  const isFlashing = flash != null
-  const flashWon   = isFlashing && flash!.won
   return (
-    <div style={{
-      background: '#050505', padding: '1rem 1.25rem',
-      transition: 'box-shadow 0.25s ease',
-      boxShadow: isFlashing
-        ? (flashWon
-            ? 'inset 0 0 0 2px rgba(34,197,94,0.6), 0 0 24px 4px rgba(34,197,94,0.18)'
-            : 'inset 0 0 0 2px rgba(239,68,68,0.6), 0 0 24px 4px rgba(239,68,68,0.18)')
-        : 'none',
-    }}>
+    <div style={{ background: '#050505', padding: '1rem 1.25rem' }}>
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         marginBottom: '0.9rem',
@@ -179,46 +189,25 @@ function Card({ title, streak, streakLabel, flash, children }: {
   )
 }
 
-function DigitPicker({ selected, onSelect, flash }: {
-  selected: number
-  onSelect: (d: number) => void
-  flash?: { won: boolean } | null
-}) {
+function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: number) => void }) {
   return (
     <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.85rem', justifyContent: 'center' }}>
-      {DIGITS.map(d => {
-        const isSelected = selected === d
-        const isFlashing = isSelected && flash != null
-        const flashWon   = isFlashing && flash!.won
-        return (
-          <button
-            key={d}
-            onClick={() => onSelect(d)}
-            style={{
-              width: '27px', height: '27px', borderRadius: '50%',
-              fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-              border: isFlashing
-                ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
-                : `1.5px solid ${isSelected ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
-              background: isFlashing
-                ? (flashWon ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)')
-                : isSelected ? 'rgba(252,163,17,0.18)' : 'transparent',
-              color: isFlashing ? '#fff' : isSelected ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
-              transform: isFlashing ? 'scale(1.22)' : 'scale(1)',
-              boxShadow: isFlashing
-                ? (flashWon
-                    ? '0 0 14px 5px rgba(34,197,94,0.55)'
-                    : '0 0 14px 5px rgba(239,68,68,0.55)')
-                : 'none',
-              transition: 'all 0.18s ease',
-              zIndex: isFlashing ? 2 : 'auto',
-              position: 'relative',
-            }}
-          >
-            {d}
-          </button>
-        )
-      })}
+      {DIGITS.map(d => (
+        <button
+          key={d}
+          onClick={() => onSelect(d)}
+          style={{
+            width: '27px', height: '27px', borderRadius: '50%',
+            fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
+            border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
+            background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
+            color: selected === d ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
+            transition: 'all 0.15s',
+          }}
+        >
+          {d}
+        </button>
+      ))}
     </div>
   )
 }
@@ -1393,6 +1382,32 @@ export default function AnalysisPage() {
           }))
         }
 
+        /* ── proposal_open_contract — real exit spot when contract settles ──
+           Deriv delivers `exit_spot` (string) and `is_sold: 1` when settled.
+           We use this to replace the stale livePriceRef approximation so the
+           exit spot shown in the transactions list matches the actual tick the
+           contract was evaluated against.
+           Source: proposal_open_contract_response.schema.json
+        ── */
+        if (msg.msg_type === 'proposal_open_contract') {
+          const poc = (msg as {
+            proposal_open_contract: {
+              contract_id: number
+              is_sold?: number
+              exit_spot?: string | null
+              entry_spot?: string | null
+            }
+          }).proposal_open_contract
+          if (poc.is_sold && poc.exit_spot) {
+            const exitSpotNum = parseFloat(poc.exit_spot)
+            if (Number.isFinite(exitSpotNum)) {
+              setTxLog(prev => prev.map(t =>
+                t.id === poc.contract_id ? { ...t, exitSpot: exitSpotNum } : t
+              ))
+            }
+          }
+        }
+
         /* ── buy response ── */
         if (msg.msg_type === 'buy') {
           const buy = msg.buy as {
@@ -1435,6 +1450,15 @@ export default function AnalysisPage() {
             longcode:        buy.longcode,
             pending:         true,
           }, ...prev].slice(0, 100))
+          // Subscribe to proposal_open_contract so we get the REAL exit spot
+          // when the contract settles — NOT livePriceRef (which is a later tick).
+          // Source: proposal_open_contract_request.schema.json + response.schema.json
+          ws!.send(JSON.stringify({
+            proposal_open_contract: 1,
+            contract_id: buy.contract_id,
+            subscribe: 1,
+            req_id: ++reqIdRef.current,
+          }))
         }
 
         /* ── transaction stream ── */
@@ -1550,9 +1574,12 @@ export default function AnalysisPage() {
       intentionalClose.current = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (ping) clearInterval(ping)
-      // Send forget for the transaction subscription before closing
+      // Forget all subscriptions before closing
       if (ws?.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ forget_all: 'transaction', req_id: 9998 })) } catch { /* ignore */ }
+        try {
+          ws.send(JSON.stringify({ forget_all: 'transaction', req_id: 9998 }))
+          ws.send(JSON.stringify({ forget_all: 'proposal_open_contracts', req_id: 9997 }))
+        } catch { /* ignore */ }
       }
       ws?.close()
       botWsRef.current = null
@@ -1915,30 +1942,28 @@ export default function AnalysisPage() {
               background: 'var(--border)',
               flex: 1,
             }}>
-              {/* flash is scoped to the card matching the active contract type */}
-              <Card title="Over / Under" streak={ouData.streak} streakLabel={ouData.streakLabel}
-                flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null}>
-                <DigitPicker selected={ouBarrier} onSelect={setOuBarrier}
-                  flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null} />
+              {/* flash fires on the last Sequence box of the active contract type's card only */}
+              <Card title="Over / Under" streak={ouData.streak} streakLabel={ouData.streakLabel}>
+                <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
                 <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
-                <Sequence seq={ouData.seq.slice(-20)} colorMap={ouColors} />
+                <Sequence seq={ouData.seq.slice(-20)} colorMap={ouColors}
+                  flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null} />
               </Card>
 
-              <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}
-                flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null}>
-                <DigitPicker selected={mdDigit} onSelect={setMdDigit}
-                  flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null} />
+              <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}>
+                <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
                 <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
-                <Sequence seq={mdData.seq.slice(-20)} colorMap={mdColors} />
+                <Sequence seq={mdData.seq.slice(-20)} colorMap={mdColors}
+                  flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null} />
               </Card>
 
-              <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}
-                flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null}>
+              <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
-                <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors} />
+                <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors}
+                  flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null} />
               </Card>
 
               <Card title="Rise / Fall" streak={rfData.streak} streakLabel={rfData.streakLabel}>
