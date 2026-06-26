@@ -148,7 +148,7 @@ function SbSequence({ seq, colorMap, rawDigits, flashWon, ticksTotal }: {
 }) {
   const last = seq.length - 1
   return (
-    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem', justifyContent: 'center' }}>
       {seq.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
         const isLast    = i === last
@@ -338,6 +338,7 @@ export default function SpeedbotPage() {
   const [symbol,      setSymbol]     = useState('1HZ100V')
   const [tradeType,   setTradeType]  = useState('DIGITEVEN')
   const [prediction,  setPrediction] = useState(5)       // barrier digit for OVER/UNDER/MATCH/DIFF
+  const [analysisDigit, setAnalysisDigit] = useState(5)  // analysis card digit — independent of trade barrier
   const [ticksDur,    setTicksDur]   = useState(1)        // contract duration in ticks (1-9)
   const [stake,       setStake]      = useState('1.00')
   const [execSpeed,   setExecSpeed]  = useState<ExecSpeed>('turbo')
@@ -943,7 +944,7 @@ export default function SpeedbotPage() {
   const sbCard = useMemo(() => {
     const slice = sbDigits.slice(-50)
     const type  = tradeType
-    const pred  = prediction
+    const pred  = analysisDigit
 
     if (type === 'DIGITEVEN' || type === 'DIGITODD') {
       const even = sbDigits.filter(d => d % 2 === 0).length
@@ -1003,16 +1004,17 @@ export default function SpeedbotPage() {
       }
     }
     return null
-  }, [sbDigits, tradeType, prediction])
+  }, [sbDigits, tradeType, analysisDigit])
 
   const flashWonForCard: boolean | null = tradeFlash ? tradeFlash.won : null
 
 
   return (
     <div style={{
-      background: '#000', minHeight: '100%',
+      background: '#000',
+      height: '100dvh',
       display: 'flex', flexDirection: 'column',
-      paddingBottom: '80px',
+      overflow: 'hidden',
     }}>
 
       {/* ── Page header ── */}
@@ -1361,11 +1363,16 @@ export default function SpeedbotPage() {
 
         {/* ════ RIGHT: Live Panel ════ */}
         <div style={{
-          overflowY: 'auto',
-          padding: '1.25rem',
-          display: 'flex', flexDirection: 'column', gap: '1.25rem',
+          display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
           background: '#000',
         }}>
+          {/* Scrollable inner — everything except transactions */}
+          <div style={{
+            padding: '1rem 1.25rem 0',
+            display: 'flex', flexDirection: 'column', gap: '1rem',
+            flexShrink: 0,
+          }}>
 
           {/* ── Price chart (uses existing ticks_history WS data) ── */}
           <PriceChart
@@ -1396,7 +1403,7 @@ export default function SpeedbotPage() {
 
               {/* Digit picker (Over/Under, Match/Differ) */}
               {sbCard.picker && (
-                <SbDigitPicker selected={prediction} onSelect={setPrediction} disabled={running} />
+                <SbDigitPicker selected={analysisDigit} onSelect={setAnalysisDigit} disabled={false} />
               )}
 
               {/* Bars */}
@@ -1500,9 +1507,16 @@ export default function SpeedbotPage() {
             )}
           </div>
 
-          {/* Transaction log */}
-          <div style={sectionSt}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem' }}>
+          </div>{/* end scrollable inner */}
+
+          {/* Transaction log — scrollable card, fills remaining space */}
+          <div style={{
+            ...sectionSt,
+            margin: '0 1.25rem 1rem',
+            display: 'flex', flexDirection: 'column',
+            flex: 1, minHeight: 0, overflow: 'hidden',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem', flexShrink: 0 }}>
               <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>
                 Transactions
               </span>
@@ -1516,7 +1530,7 @@ export default function SpeedbotPage() {
                 No trades yet. Press START to begin.
               </div>
             ) : (
-              <div>
+              <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
                 {/* Header */}
                 <div style={{
                   display: 'grid', gridTemplateColumns: '1fr 80px 80px 70px',
