@@ -1012,7 +1012,7 @@ export default function SpeedbotPage() {
   return (
     <div style={{
       background: '#000',
-      height: '100dvh',
+      height: '100%',
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
     }}>
@@ -1366,8 +1366,9 @@ export default function SpeedbotPage() {
           display: 'flex', flexDirection: 'column',
           overflow: 'hidden',
           background: '#000',
+          paddingBottom: '64px', // clear sticky START bar
         }}>
-          {/* Scrollable inner — everything except transactions */}
+          {/* Upper section — chart + analysis card + run statistics (fixed, no scroll) */}
           <div style={{
             padding: '1rem 1.25rem 0',
             display: 'flex', flexDirection: 'column', gap: '1rem',
@@ -1507,12 +1508,12 @@ export default function SpeedbotPage() {
             )}
           </div>
 
-          </div>{/* end scrollable inner */}
+          </div>{/* end upper section */}
 
-          {/* Transaction log — scrollable card, fills remaining space */}
+          {/* Transaction log — scrollable card, fills remaining vertical space */}
           <div style={{
             ...sectionSt,
-            margin: '0 1.25rem 1rem',
+            margin: '0.75rem 1.25rem 0',
             display: 'flex', flexDirection: 'column',
             flex: 1, minHeight: 0, overflow: 'hidden',
           }}>
