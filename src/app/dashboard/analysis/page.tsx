@@ -140,11 +140,23 @@ function Sequence({ seq, colorMap }: { seq: string[]; colorMap: Record<string, S
   )
 }
 
-function Card({ title, streak, streakLabel, children }: {
-  title: string; streak: number; streakLabel: string; children: React.ReactNode
+function Card({ title, streak, streakLabel, flash, children }: {
+  title: string; streak: number; streakLabel: string
+  flash?: { won: boolean } | null
+  children: React.ReactNode
 }) {
+  const isFlashing = flash != null
+  const flashWon   = isFlashing && flash!.won
   return (
-    <div style={{ background: '#050505', padding: '1rem 1.25rem' }}>
+    <div style={{
+      background: '#050505', padding: '1rem 1.25rem',
+      transition: 'box-shadow 0.25s ease',
+      boxShadow: isFlashing
+        ? (flashWon
+            ? 'inset 0 0 0 2px rgba(34,197,94,0.6), 0 0 24px 4px rgba(34,197,94,0.18)'
+            : 'inset 0 0 0 2px rgba(239,68,68,0.6), 0 0 24px 4px rgba(239,68,68,0.18)')
+        : 'none',
+    }}>
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         marginBottom: '0.9rem',
@@ -167,25 +179,46 @@ function Card({ title, streak, streakLabel, children }: {
   )
 }
 
-function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: number) => void }) {
+function DigitPicker({ selected, onSelect, flash }: {
+  selected: number
+  onSelect: (d: number) => void
+  flash?: { won: boolean } | null
+}) {
   return (
     <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.85rem', justifyContent: 'center' }}>
-      {DIGITS.map(d => (
-        <button
-          key={d}
-          onClick={() => onSelect(d)}
-          style={{
-            width: '27px', height: '27px', borderRadius: '50%',
-            fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-            border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
-            background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
-            color: selected === d ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
-            transition: 'all 0.15s',
-          }}
-        >
-          {d}
-        </button>
-      ))}
+      {DIGITS.map(d => {
+        const isSelected = selected === d
+        const isFlashing = isSelected && flash != null
+        const flashWon   = isFlashing && flash!.won
+        return (
+          <button
+            key={d}
+            onClick={() => onSelect(d)}
+            style={{
+              width: '27px', height: '27px', borderRadius: '50%',
+              fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
+              border: isFlashing
+                ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
+                : `1.5px solid ${isSelected ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
+              background: isFlashing
+                ? (flashWon ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)')
+                : isSelected ? 'rgba(252,163,17,0.18)' : 'transparent',
+              color: isFlashing ? '#fff' : isSelected ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
+              transform: isFlashing ? 'scale(1.22)' : 'scale(1)',
+              boxShadow: isFlashing
+                ? (flashWon
+                    ? '0 0 14px 5px rgba(34,197,94,0.55)'
+                    : '0 0 14px 5px rgba(239,68,68,0.55)')
+                : 'none',
+              transition: 'all 0.18s ease',
+              zIndex: isFlashing ? 2 : 'auto',
+              position: 'relative',
+            }}
+          >
+            {d}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -212,6 +245,7 @@ interface TxEntry {
   entrySpot?: number   // live price at moment of trade entry
   exitSpot?:  number   // live price approximated at sell time
   longcode?:  string   // human-readable contract description from Deriv
+  pending?:   boolean  // true while contract is still in-flight (buy sent, sell not yet received)
 }
 
 /* ─── Run Panel ─────────────────────────────────────────── */
@@ -567,6 +601,7 @@ function RunPanel({
 
                 {txLog.map(tx => {
                   const pl = tx.payout - tx.stake
+                  const potentialPL = tx.potentialPayout - tx.stake
                   return (
                     <div key={tx.id}
                       style={{ display: 'grid', gridTemplateColumns: '56px 1fr 90px', alignItems: 'center', padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.1s' }}
@@ -582,9 +617,9 @@ function RunPanel({
                           <rect x="0" y="8" width="6" height="6" rx="1"/>
                           <rect x="8" y="8" width="6" height="6" rx="1"/>
                         </svg>
-                        {/* Diagonal arrow */}
+                        {/* Diagonal arrow — orange while pending, won/lost color after */}
                         <svg width="14" height="14" viewBox="0 0 16 16" fill="none"
-                          style={{ color: tx.won ? '#f97316' : '#f97316' }}
+                          style={{ color: '#f97316' }}
                         >
                           <path d="M3 13L13 3M13 3H7M13 3V9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                         </svg>
@@ -602,12 +637,20 @@ function RunPanel({
                             {tx.entrySpot?.toFixed(2) ?? '—'}
                           </span>
                         </div>
-                        {/* Exit spot — empty circle */}
+                        {/* Exit spot — empty circle, or spinner while pending */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '3px' }}>
-                          <span style={{
-                            width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-                            background: 'transparent', border: '1.5px solid rgba(229,229,229,0.35)',
-                          }}/>
+                          {tx.pending ? (
+                            <span style={{
+                              width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                              border: '1.5px solid rgba(252,163,17,0.5)', borderTopColor: '#FCA311',
+                              animation: 'spin 0.7s linear infinite', display: 'inline-block',
+                            }}/>
+                          ) : (
+                            <span style={{
+                              width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                              background: 'transparent', border: '1.5px solid rgba(229,229,229,0.35)',
+                            }}/>
+                          )}
                           <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.55)' }}>
                             {tx.exitSpot?.toFixed(2) ?? ''}
                           </span>
@@ -619,9 +662,23 @@ function RunPanel({
                         <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
                           {tx.stake.toFixed(2)} {currency}
                         </div>
-                        <div style={{ fontSize: '0.72rem', fontWeight: 700, color: pl >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums', marginTop: '3px' }}>
-                          {pl >= 0 ? '+' : ''}{pl.toFixed(2)} {currency}
-                        </div>
+                        {tx.pending ? (
+                          /* Blurred potential P/L while trade is in-flight */
+                          <div style={{
+                            fontSize: '0.72rem', fontWeight: 700,
+                            color: '#22c55e',
+                            fontVariantNumeric: 'tabular-nums', marginTop: '3px',
+                            filter: 'blur(4px)',
+                            animation: 'pendingPulse 1.4s ease-in-out infinite',
+                            userSelect: 'none',
+                          }}>
+                            +{potentialPL.toFixed(2)} {currency}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: pl >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums', marginTop: '3px' }}>
+                            {pl >= 0 ? '+' : ''}{pl.toFixed(2)} {currency}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )
@@ -1362,6 +1419,22 @@ export default function AnalysisPage() {
             totalStake: prev.totalStake + buy.buy_price,
             runs: prev.runs + 1,
           }))
+          // Add a pending entry to the transaction log immediately —
+          // P/L will be blurred until the sell response arrives
+          setTxLog(prev => [{
+            id:              buy.contract_id,
+            time:            Date.now(),
+            contractType:    contractTypeRef.current,
+            stake:           buy.buy_price,
+            payout:          0,
+            potentialPayout: buy.payout ?? 0,
+            won:             false,
+            symbol:          symbolRef.current,
+            entrySpot:       entrySpot ?? undefined,
+            exitSpot:        undefined,
+            longcode:        buy.longcode,
+            pending:         true,
+          }, ...prev].slice(0, 100))
         }
 
         /* ── transaction stream ── */
@@ -1399,19 +1472,29 @@ export default function AnalysisPage() {
               }
             })
 
-            setTxLog(prev => [{
-              id:              tx.contract_id!,
-              time:            Date.now(),
-              contractType:    contractTypeRef.current,
-              stake:           buyPrice,
-              payout:          sellAmount,
-              potentialPayout: potentialPayout ?? 0,
-              won,
-              symbol:          symbolRef.current,
-              entrySpot:       entrySpot ?? undefined,
-              exitSpot,
-              longcode,
-            }, ...prev].slice(0, 100))
+            // Update the pending entry with the actual result (reveals the blurred P/L)
+            setTxLog(prev => {
+              const idx = prev.findIndex(t => t.id === tx.contract_id && t.pending)
+              if (idx >= 0) {
+                const next = [...prev]
+                next[idx] = { ...next[idx], payout: sellAmount, won, exitSpot, pending: false }
+                return next
+              }
+              // Fallback: add new entry (in case pending was missed)
+              return [{
+                id:              tx.contract_id!,
+                time:            Date.now(),
+                contractType:    contractTypeRef.current,
+                stake:           buyPrice,
+                payout:          sellAmount,
+                potentialPayout: potentialPayout ?? 0,
+                won,
+                symbol:          symbolRef.current,
+                entrySpot:       entrySpot ?? undefined,
+                exitSpot,
+                longcode,
+              }, ...prev].slice(0, 100)
+            })
 
             if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
               const delay =
@@ -1677,12 +1760,6 @@ export default function AnalysisPage() {
     else if (digit === lowest)     { bg = 'rgba(239,68,68,0.22)'; border = '2px solid #ef4444'; color = '#ef4444' }
     else if (digit === secondLow)  { bg = 'rgba(239,68,68,0.1)'; border = '2px solid rgba(239,68,68,0.4)'; color = 'rgba(239,68,68,0.85)' }
     if (digit === lastDigit)       { border = '3px solid #fff' }
-    // Trade result flash — overrides everything on the result digit
-    if (digit === lastDigit && tradeFlash) {
-      bg     = tradeFlash.won ? 'rgba(34,197,94,0.35)'  : 'rgba(239,68,68,0.35)'
-      border = tradeFlash.won ? '3px solid #22c55e'     : '3px solid #ef4444'
-      color  = '#fff'
-    }
     return { background: bg, border, color } as React.CSSProperties
   }
 
@@ -1806,8 +1883,6 @@ export default function AnalysisPage() {
                 {DIGITS.map(d => {
                   const cs = circleStyle(d)
                   const pctVal = total ? ((digitCounts[d] / total) * 100).toFixed(1) : '0.0'
-                  const isFlash = d === lastDigit && tradeFlash
-                  const flashWon = isFlash && tradeFlash!.won
                   return (
                     <div key={d} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px' }}>
                       <div style={{
@@ -1815,12 +1890,6 @@ export default function AnalysisPage() {
                         display: 'flex', flexDirection: 'column',
                         alignItems: 'center', justifyContent: 'center',
                         transition: 'all 0.35s ease',
-                        ...(isFlash && {
-                          transform: 'scale(1.18)',
-                          boxShadow: flashWon
-                            ? '0 0 18px 6px rgba(34,197,94,0.55)'
-                            : '0 0 18px 6px rgba(239,68,68,0.55)',
-                        }),
                         ...cs,
                       }}>
                         <span style={{ fontSize: '1.05rem', fontWeight: 800, lineHeight: 1 }}>{d}</span>
@@ -1846,21 +1915,27 @@ export default function AnalysisPage() {
               background: 'var(--border)',
               flex: 1,
             }}>
-              <Card title="Over / Under" streak={ouData.streak} streakLabel={ouData.streakLabel}>
-                <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
+              {/* flash is scoped to the card matching the active contract type */}
+              <Card title="Over / Under" streak={ouData.streak} streakLabel={ouData.streakLabel}
+                flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null}>
+                <DigitPicker selected={ouBarrier} onSelect={setOuBarrier}
+                  flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null} />
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
                 <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
                 <Sequence seq={ouData.seq.slice(-20)} colorMap={ouColors} />
               </Card>
 
-              <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}>
-                <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
+              <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}
+                flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null}>
+                <DigitPicker selected={mdDigit} onSelect={setMdDigit}
+                  flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null} />
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
                 <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
                 <Sequence seq={mdData.seq.slice(-20)} colorMap={mdColors} />
               </Card>
 
-              <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
+              <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}
+                flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
                 <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors} />
@@ -1933,6 +2008,13 @@ export default function AnalysisPage() {
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50%       { opacity: 0.35; }
+        }
+        @keyframes pendingPulse {
+          0%, 100% { opacity: 0.55; }
+          50%       { opacity: 1; }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </div>
