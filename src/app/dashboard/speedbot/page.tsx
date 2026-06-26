@@ -141,20 +141,35 @@ function SbBar({ label, color, count, total }: {
   )
 }
 
-function SbSequence({ seq, colorMap, rawDigits, flashWon, ticksTotal }: {
+function SbSequence({ seq, colorMap, rawDigits, flashWon, flashExitDigit, ticksTotal }: {
   seq: string[]
   colorMap: Record<string, SeqColor>
   rawDigits?: number[]
   flashWon?: boolean | null   // null = no flash, true = won, false = lost
+  flashExitDigit?: number     // actual last digit of the exit tick — flash this position, not just the last box
   ticksTotal?: number         // drives re-render on each tick so last box flashes
 }) {
   const last = seq.length - 1
+
+  // Find which box to flash:
+  //  • If we know the exit digit, find the most-recent position in rawDigits that shows it.
+  //    This corrects for the async sell notification arriving 1-3 ticks after contract exits.
+  //  • Fall back to the last box if exit digit is unavailable.
+  let flashIdx = last
+  if (flashExitDigit !== undefined && rawDigits) {
+    for (let i = rawDigits.length - 1; i >= 0; i--) {
+      if (rawDigits[i] === flashExitDigit) {
+        flashIdx = i
+        break
+      }
+    }
+  }
+
   return (
     <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem', justifyContent: 'center' }}>
       {seq.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
-        const isLast    = i === last
-        const isFlashing = isLast && flashWon != null
+        const isFlashing = (i === flashIdx) && flashWon != null
         const display   = rawDigits != null ? String(rawDigits[i] ?? s) : s
         return (
           <div key={i} style={{
@@ -357,8 +372,13 @@ export default function SpeedbotPage() {
   const [botReady,    setBotReady]   = useState(false)
   const [botError,    setBotError]   = useState<string | null>(null)
   const [stopReason,  setStopReason] = useState<string | null>(null)
-  /** Flashes the last digit bubble with win/loss color when a trade settles */
-  const [tradeFlash,  setTradeFlash] = useState<{ won: boolean } | null>(null)
+  /**
+   * Flashes the correct digit bubble when a trade settles.
+   * exitDigit = last digit of exit tick (from proposal_open_contract exit_tick_display_value).
+   * Without this, the flash lands on whatever tick arrived last — which is 1-3 ticks
+   * ahead of the actual contract exit tick due to async sell notification delay.
+   */
+  const [tradeFlash,  setTradeFlash] = useState<{ won: boolean; exitDigit?: number } | null>(null)
   const [currency,    setCurrency]   = useState('USD')
   const [accountLabel,setAccountLabel] = useState('')
   const [stats,       setStats]      = useState<SpeedStats>({
@@ -405,6 +425,12 @@ export default function SpeedbotPage() {
   const connectedAccountRef = useRef<string | null>(null)
   const inTradeRef        = useRef(false)   // prevent concurrent trades
   const pocSubsRef        = useRef<Map<number, string>>(new Map()) // contract_id → subscription_id
+  const pocExitDigitsRef  = useRef<Map<number, number>>(new Map()) // contract_id → exit tick last digit
+  /* ── Tick-gate: fire next trade on tick count, not on Deriv's async sell notification ── */
+  const ticksCountRef        = useRef(0)              // sync tick counter (ref copy of ticksTotal)
+  const ticksAtBuyRef        = useRef<number | null>(null)   // ticksCount when buy response arrived
+  const openContractIdRef    = useRef<number | null>(null)   // contract_id currently in flight
+  const tickGateFiredIdRef   = useRef<number | null>(null)   // contract_id released by tick gate (not sell)
   /** Tracks current effective trade type (may zigzag or alternate) */
   const effectiveTypeRef  = useRef('DIGITEVEN')
   /** Accumulated loss stake for martingale recovery calculation */
@@ -433,6 +459,9 @@ export default function SpeedbotPage() {
   useEffect(() => { currencyRef.current    = currency    }, [currency])
   // keep effectiveTypeRef in sync when trade type changes manually (reset zigzag state)
   useEffect(() => { effectiveTypeRef.current = tradeType }, [tradeType])
+  // Sync analysis card digit with the trade barrier so the card always reflects
+  // what you're actually trading. The user can still override it in the card picker.
+  useEffect(() => { if (!running) setAnalysisDigit(prediction) }, [prediction, running])
 
   /* ── Tick WebSocket (public — no auth) ── */
   useEffect(() => {
@@ -471,10 +500,37 @@ export default function SpeedbotPage() {
         if (tickData.pip_size != null) pipSizeRef.current = tickData.pip_size
         const q = tickData.quote
         livePriceRef.current = q      // sync immediately — critical for entry spot accuracy
+        ticksCountRef.current += 1    // sync counter — never stale, used by tick gate below
         setLivePrice(q)
         setRecentDigits(prev => [...prev.slice(-29), lastDigit(q, pipSizeRef.current)])
         setTicksTotal(t => t + 1)
         setPrices(prev => [...prev.slice(-499), q])
+
+        /* ── Tick gate: fire next trade exactly ticksDur+1 ticks after buy confirms ──
+         * Only active for Standard strategy — Martingale needs the sell result first
+         * to calculate the next stake, so it keeps sell-based firing.
+         * This removes dependence on Deriv's async sell notification timing.
+         */
+        if (
+          strategyRef.current !== 'martingale' &&
+          runningRef.current &&
+          inTradeRef.current &&
+          ticksAtBuyRef.current !== null &&
+          tickGateFiredIdRef.current === null &&
+          ticksCountRef.current - ticksAtBuyRef.current >= ticksDurRef.current + 1
+        ) {
+          tickGateFiredIdRef.current = openContractIdRef.current  // mark this contract as tick-released
+          ticksAtBuyRef.current      = null
+          openContractIdRef.current  = null
+          inTradeRef.current         = false
+          // setTimeout(0) yields to event loop — allows a queued STOP click to cancel before buy fires
+          const _ws = botWsRef.current
+          setTimeout(() => {
+            if (runningRef.current && _ws?.readyState === WebSocket.OPEN) {
+              executeTrade(_ws)
+            }
+          }, 0)
+        }
       }
     }
 
@@ -679,6 +735,11 @@ export default function SpeedbotPage() {
           if (reqId != null) pendingSpotsByReq.current.delete(reqId)
           pendingBuysRef.current.set(buy.contract_id, { buyPrice: buy.buy_price })
 
+          // Arm the tick gate for this contract
+          ticksAtBuyRef.current      = ticksCountRef.current
+          openContractIdRef.current  = buy.contract_id
+          tickGateFiredIdRef.current = null   // clear any stale gate from previous contract
+
           // Update statsRef synchronously, then mirror to state for rendering
           statsRef.current = {
             ...statsRef.current,
@@ -711,12 +772,25 @@ export default function SpeedbotPage() {
         /* ── Live contract P/L (proposal_open_contract subscription) ── */
         if (msg.msg_type === 'proposal_open_contract') {
           const poc = msg.proposal_open_contract as {
-            contract_id: number
-            profit:      number
-            subscription?: { id: string }
+            contract_id:             number
+            profit:                  number
+            exit_tick_display_value?: string  // present when contract has settled
+            subscription?:           { id: string }
           }
           if (poc.subscription?.id) {
             pocSubsRef.current.set(poc.contract_id, poc.subscription.id)
+          }
+          // Capture exit tick digit the moment Deriv reports it — this is the
+          // ACTUAL digit the contract was decided on, not whatever the tick stream
+          // happens to be showing at the time the sell event arrives.
+          if (poc.exit_tick_display_value) {
+            const exitPrice = parseFloat(poc.exit_tick_display_value)
+            if (!isNaN(exitPrice)) {
+              pocExitDigitsRef.current.set(
+                poc.contract_id,
+                lastDigit(exitPrice, pipSizeRef.current)
+              )
+            }
           }
           setTxLog(prev => prev.map(tx =>
             tx.id === poc.contract_id && !tx.settled
@@ -748,8 +822,12 @@ export default function SpeedbotPage() {
             const payout = Math.max(0, tx.amount)
             const won    = payout > 0
 
-            /* ── Flash last digit bubble with result color ── */
-            setTradeFlash({ won })
+            /* ── Flash the correct digit bubble with result color ──
+             * Prefer exit digit from proposal_open_contract (captured above).
+             * Falls back to undefined — SbSequence will flash the last box. */
+            const exitDigit = pocExitDigitsRef.current.get(tx.contract_id)
+            pocExitDigitsRef.current.delete(tx.contract_id)
+            setTradeFlash({ won, exitDigit })
             setTimeout(() => setTradeFlash(null), 900)
 
             /* ── Compute updated stats from ref (synchronous, no React batching) ── */
@@ -824,20 +902,23 @@ export default function SpeedbotPage() {
               effectiveTypeRef.current = PAIR_MAP[effectiveTypeRef.current] ?? effectiveTypeRef.current
             }
 
-            /* ── Schedule next trade if still running ── */
-            if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
+            /* ── Schedule next trade if still running ──
+             * Standard strategy: tick gate fires the next trade — skip here to avoid double-buy.
+             * Martingale: must wait for sell result to set correct stake, fire here as usual.
+             */
+            const wasTickGated = tx.contract_id === tickGateFiredIdRef.current
+            if (runningRef.current && ws?.readyState === WebSocket.OPEN && !wasTickGated) {
               const delay = execSpeedRef.current === 'turbo' ? 0
                           : execSpeedRef.current === 'fast'  ? 400
                           : 1500
-              if (delay === 0) {
-                executeTrade(ws!)   // fire instantly — no setTimeout overhead
-              } else {
-                setTimeout(() => {
-                  if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
-                    executeTrade(ws!)
-                  }
-                }, delay)
-              }
+              // Always use setTimeout (even 0ms) so a queued STOP click can process
+              // before the next buy fires. Without this, turbo fires synchronously and
+              // the stop button can't interrupt between the sell event and the next buy.
+              setTimeout(() => {
+                if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
+                  executeTrade(ws!)
+                }
+              }, delay)
             }
           }
         }
@@ -883,6 +964,7 @@ export default function SpeedbotPage() {
         } catch { /**/ }
       }
       pocSubsRef.current.clear()
+      pocExitDigitsRef.current.clear()
       ws?.close()
       botWsRef.current = null
     }
@@ -930,6 +1012,7 @@ export default function SpeedbotPage() {
   function handleToggleRun() {
     if (running) {
       runningRef.current = false   // sync immediately — prevents race where sell fires before useEffect runs
+      ticksAtBuyRef.current = null  // disarm tick gate — prevents a queued tick from firing a new buy
       setRunning(false)
       return
     }
@@ -1074,7 +1157,8 @@ export default function SpeedbotPage() {
     return null
   }, [sbDigits, tradeType, analysisDigit])
 
-  const flashWonForCard: boolean | null = tradeFlash ? tradeFlash.won : null
+  const flashWonForCard: boolean | null  = tradeFlash ? tradeFlash.won : null
+  const flashExitDigit: number | undefined = tradeFlash?.exitDigit
 
 
   return (
@@ -1487,6 +1571,7 @@ export default function SpeedbotPage() {
                 rawDigits={sbCard.raw.slice(-20)}
                 colorMap={sbCard.colorMap}
                 flashWon={flashWonForCard}
+                flashExitDigit={flashExitDigit}
                 ticksTotal={ticksTotal}
               />
             </div>
