@@ -11,7 +11,7 @@ const TABS = [
   { label: 'AI Software',   href: '/dashboard/ai-software',  icon: '✦' },
   { label: 'Auto Trader',   href: '/dashboard/auto-trader',  icon: '↺' },
   { label: 'Analysis Tool', href: '/dashboard/analysis',     icon: '📊' },
-  { label: 'Manual Trader', href: '/dashboard/charts',       icon: '✎' },
+  { label: 'Manual Trader', href: '/dashboard/manual-trader', icon: '✎' },
   { label: 'Bulk Trader',   href: '/dashboard/bulk-trader',  icon: '⣿' },
   { label: 'Charts',        href: '/dashboard/charts',       icon: '▲' },
   { label: 'Copy Trader',   href: '/dashboard/copy-trader',  icon: '⊕' },
