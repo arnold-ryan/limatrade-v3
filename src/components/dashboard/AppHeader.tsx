@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 
 /**
- * AppHeader — sticky top bar with real-time balance + account switcher
+ * AppHeader — sticky top bar with real-time balance + Deriv-style account switcher
  *
  * Balance API (/api/user/balance) returns:
  *   { accounts: AccountRow[], activeAccountId: string }
@@ -36,13 +36,43 @@ function CurrencyFlag({ currency }: { currency: string }) {
   }
   return (
     <span style={{
-      width: '28px', height: '28px', borderRadius: '50%',
+      width: '32px', height: '32px', borderRadius: '50%',
       background: 'rgba(255,255,255,0.08)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: '0.85rem', flexShrink: 0,
+      fontSize: '1rem', flexShrink: 0,
     }}>
       {flags[currency] ?? '🌐'}
     </span>
+  )
+}
+
+/** Teal coin/D icon — matches Deriv account-switcher button */
+function DerivCoinIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="12" fill="#00D2D3" />
+      <path d="M8 7h4.5C14.985 7 17 9.015 17 12s-2.015 5-4.5 5H8V7z" fill="#fff" />
+      <path d="M10 9.5v5h2.2c1.49 0 2.3-1.12 2.3-2.5S13.69 9.5 12.2 9.5H10z" fill="#00D2D3" />
+    </svg>
+  )
+}
+
+/** Arrow right icon for logout row */
+function ArrowRightIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/** Chevron icon */
+function ChevronIcon({ up }: { up: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg"
+      style={{ transform: up ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+      <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }
 
@@ -50,12 +80,13 @@ export default function AppHeader() {
   const router  = useRouter()
   const dropRef = useRef<HTMLDivElement>(null)
 
-  const [data,       setData]       = useState<BalanceData | null>(null)
-  const [loading,    setLoading]    = useState(true)
-  const [spinning,   setSpinning]   = useState(false)
-  const [switching,  setSwitching]  = useState(false)
-  const [open,       setOpen]       = useState(false)
-  const [tab,        setTab]        = useState<'real' | 'demo'>('real')
+  const [data,          setData]          = useState<BalanceData | null>(null)
+  const [loading,       setLoading]       = useState(true)
+  const [spinning,      setSpinning]      = useState(false)
+  const [switching,     setSwitching]     = useState(false)
+  const [open,          setOpen]          = useState(false)
+  const [tab,           setTab]           = useState<'real' | 'demo'>('real')
+  const [accordionOpen, setAccordionOpen] = useState(true)
 
   /* ── Fetch balance ── */
   const fetchBalance = useCallback(async (showSpin = false) => {
@@ -98,11 +129,24 @@ export default function AppHeader() {
     return () => window.removeEventListener('deriv-balance', handler)
   }, [])
 
-  // Fallback REST poll every 30 s (covers pages with no bot WS)
+  // Refresh immediately when user returns to this tab (e.g. after resetting demo
+  // balance on Deriv's site in another tab) — covers the most common reload case.
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchBalance() }
+    const onFocus   = () => fetchBalance()
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [fetchBalance])
+
+  // Fallback REST poll every 15 s (covers pages with no bot WS open)
   useEffect(() => {
     const id = setInterval(() => {
       if (document.visibilityState === 'visible') fetchBalance()
-    }, 30_000)
+    }, 15_000)
     return () => clearInterval(id)
   }, [fetchBalance])
 
@@ -150,7 +194,6 @@ export default function AppHeader() {
   const displayedAccounts = tab === 'real' ? realAccounts : demoAccounts
   const displayBalance  = activeAccount?.balance ?? 0
   const displayCurrency = activeAccount?.currency ?? 'USD'
-  const displayId       = activeAccount?.accountId ?? ''
 
   /* ── Logout ── */
   async function handleLogout() {
@@ -161,7 +204,7 @@ export default function AppHeader() {
   return (
     <header style={{
       position: 'sticky', top: 0, zIndex: 200,
-      background: 'rgba(7,17,30,0.95)', backdropFilter: 'blur(12px)',
+      background: 'rgba(7,17,30,0.97)', backdropFilter: 'blur(12px)',
       borderBottom: '1px solid rgba(255,255,255,0.06)',
       height: '56px',
       display: 'flex', alignItems: 'center',
@@ -185,91 +228,124 @@ export default function AppHeader() {
         </span>
       </Link>
 
-      {/* Right — Balance + Account */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      {/* Right — Account switcher */}
+      <div ref={dropRef} style={{ position: 'relative' }}>
 
-        {/* Balance display */}
+        {/* ── Trigger button — Deriv style ── */}
         {loading ? (
           <div style={{
-            width: '120px', height: '32px', borderRadius: '8px',
+            width: '160px', height: '36px', borderRadius: '8px',
             background: 'rgba(255,255,255,0.05)', animation: 'pulse 1.4s ease infinite',
           }} />
         ) : (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: '10px', padding: '6px 12px',
-          }}>
-            {spinning ? (
-              <div style={{
-                width: '14px', height: '14px', borderRadius: '50%',
-                border: '2px solid rgba(252,163,17,0.3)', borderTopColor: '#FCA311',
-                animation: 'spin 0.6s linear infinite',
-              }} />
-            ) : (
-              <div style={{
-                width: '8px', height: '8px', borderRadius: '50%',
-                background: activeAccount?.isDemo ? '#888' : '#22c55e',
-              }} />
-            )}
-            <span style={{ color: '#fff', fontSize: '0.9rem', fontWeight: 600 }}>
-              {displayCurrency} {displayBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-          </div>
-        )}
-
-        {/* Account switcher dropdown */}
-        <div ref={dropRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setOpen(v => !v)}
             style={{
               display: 'flex', alignItems: 'center', gap: '8px',
-              background: open ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '10px', padding: '6px 12px',
-              color: '#E5E5E5', fontSize: '0.85rem', cursor: 'pointer',
-              transition: 'background 0.15s',
+              background: open ? 'rgba(0,210,211,0.08)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${open ? 'rgba(0,210,211,0.35)' : 'rgba(255,255,255,0.1)'}`,
+              borderRadius: '8px', padding: '5px 12px 5px 8px',
+              color: '#E5E5E5', cursor: 'pointer',
+              transition: 'background 0.15s, border-color 0.15s',
             }}
           >
-            <CurrencyFlag currency={displayCurrency} />
-            <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {activeAccount ? (activeAccount.isDemo ? 'Demo' : 'Real') : 'Account'}
+            {/* Teal coin icon */}
+            <DerivCoinIcon />
+
+            {/* Balance + currency */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', lineHeight: 1.2 }}>
+              <span style={{ color: '#fff', fontSize: '0.9rem', fontWeight: 600 }}>
+                {spinning ? (
+                  <span style={{
+                    display: 'inline-block', width: '60px', height: '12px', borderRadius: '4px',
+                    background: 'rgba(255,255,255,0.1)', animation: 'pulse 1.4s ease infinite',
+                  }} />
+                ) : (
+                  displayBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                )}
+              </span>
+              <span style={{ color: '#7a9ab5', fontSize: '0.72rem', fontWeight: 500 }}>
+                {displayCurrency}
+                {activeAccount?.isDemo && (
+                  <span style={{ marginLeft: '4px', color: '#888', fontStyle: 'italic' }}>Demo</span>
+                )}
+              </span>
+            </div>
+
+            {/* Chevron */}
+            <span style={{ color: '#7a9ab5', marginLeft: '2px' }}>
+              <ChevronIcon up={open} />
             </span>
-            <span style={{ color: '#888', fontSize: '0.75rem' }}>{open ? '▲' : '▼'}</span>
           </button>
+        )}
 
-          {open && (
+        {/* ── Dropdown ── */}
+        {open && (
+          <div style={{
+            position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+            background: '#0d1821',
+            border: '1px solid rgba(255,255,255,0.09)',
+            borderRadius: '8px', width: '300px',
+            boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
+            overflow: 'hidden', zIndex: 300,
+            fontFamily: 'inherit',
+          }}>
+
+            {/* ── Real / Demo secondary tabs ── */}
             <div style={{
-              position: 'absolute', top: 'calc(100% + 8px)', right: 0,
-              background: '#0d1f35', border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '12px', minWidth: '280px',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-              overflow: 'hidden', zIndex: 100,
+              display: 'flex',
+              borderBottom: '1px solid rgba(255,255,255,0.06)',
+              background: '#0a131d',
             }}>
-              {/* Real / Demo tabs */}
-              <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-                {(['real', 'demo'] as const).map(t => (
-                  <button
-                    key={t}
-                    onClick={() => handleTabClick(t)}
-                    style={{
-                      flex: 1, padding: '10px',
-                      background: 'transparent', border: 'none',
-                      color: tab === t ? '#fff' : '#888',
-                      fontSize: '0.85rem', fontWeight: tab === t ? 600 : 400,
-                      cursor: 'pointer', textTransform: 'capitalize',
-                      borderBottom: tab === t ? '2px solid #FCA311' : '2px solid transparent',
-                      transition: 'all 0.15s',
-                    }}
-                  >{t}</button>
-                ))}
-              </div>
+              {(['real', 'demo'] as const).map(t => (
+                <button
+                  key={t}
+                  onClick={() => handleTabClick(t)}
+                  style={{
+                    flex: 1, padding: '11px 0',
+                    background: 'transparent', border: 'none',
+                    color: tab === t ? '#fff' : 'rgba(255,255,255,0.4)',
+                    fontSize: '0.84rem',
+                    fontWeight: tab === t ? 700 : 400,
+                    cursor: 'pointer', textTransform: 'capitalize',
+                    borderBottom: tab === t ? '2px solid #ff444f' : '2px solid transparent',
+                    transition: 'all 0.15s',
+                    letterSpacing: '0.01em',
+                  }}
+                >
+                  {t === 'real' ? 'Real' : 'Demo'}
+                </button>
+              ))}
+            </div>
 
-              {/* Account list */}
-              <div style={{ maxHeight: '240px', overflowY: 'auto' }}>
+            {/* ── "Deriv accounts" accordion header ── */}
+            <div
+              onClick={() => setAccordionOpen(v => !v)}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '12px 16px',
+                cursor: 'pointer',
+                borderBottom: accordionOpen ? '1px solid rgba(255,255,255,0.05)' : 'none',
+              }}
+            >
+              <p style={{
+                margin: 0,
+                color: 'rgba(255,255,255,0.5)',
+                fontSize: '0.78rem', fontWeight: 600,
+                textTransform: 'uppercase', letterSpacing: '0.06em',
+              }}>
+                Deriv accounts
+              </p>
+              <span style={{ color: 'rgba(255,255,255,0.35)' }}>
+                <ChevronIcon up={accordionOpen} />
+              </span>
+            </div>
+
+            {/* ── Account rows ── */}
+            {accordionOpen && (
+              <div style={{ maxHeight: '220px', overflowY: 'auto' }}>
                 {displayedAccounts.length === 0 ? (
-                  <div style={{ padding: '16px', color: '#888', fontSize: '0.85rem', textAlign: 'center' }}>
+                  <div style={{ padding: '16px', color: '#555', fontSize: '0.83rem', textAlign: 'center' }}>
                     No {tab} accounts
                   </div>
                 ) : displayedAccounts.map(acc => {
@@ -278,60 +354,99 @@ export default function AppHeader() {
                     <button
                       key={acc.accountId}
                       onClick={async () => {
-                        await switchAccount(acc.accountId)
-                        setOpen(false)
+                        if (!isActive) {
+                          await switchAccount(acc.accountId)
+                          setOpen(false)
+                        }
                       }}
                       disabled={switching || isActive}
                       style={{
                         width: '100%', display: 'flex', alignItems: 'center',
-                        gap: '12px', padding: '12px 16px',
-                        background: isActive ? 'rgba(252,163,17,0.06)' : 'transparent',
+                        gap: '12px', padding: '10px 16px',
+                        background: isActive ? 'rgba(255,68,79,0.05)' : 'transparent',
                         border: 'none', cursor: isActive ? 'default' : 'pointer',
                         borderBottom: '1px solid rgba(255,255,255,0.04)',
                         transition: 'background 0.15s',
+                        textAlign: 'left',
                       }}
+                      onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.04)' }}
+                      onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
                     >
+                      {/* Flag icon */}
                       <CurrencyFlag currency={acc.currency} />
-                      <div style={{ flex: 1, textAlign: 'left' }}>
-                        <div style={{ color: '#E5E5E5', fontSize: '0.85rem', fontWeight: 500 }}>
-                          {acc.isDemo ? 'Demo Account' : 'Real Account'}
+
+                      {/* Currency label + account ID */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: '#E5E5E5', fontSize: '0.85rem', fontWeight: 600 }}>
+                          {acc.currency}
                         </div>
-                        <div style={{ color: '#888', fontSize: '0.75rem' }}>
-                          {acc.currency} {(acc.balance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <div style={{ color: '#4a6a85', fontSize: '0.74rem', letterSpacing: '0.03em', marginTop: '1px' }}>
+                          {acc.accountId}
                         </div>
                       </div>
-                      {isActive && (
-                        <div style={{
-                          width: '8px', height: '8px', borderRadius: '50%',
-                          background: '#22c55e',
-                        }} />
-                      )}
+
+                      {/* Balance — right aligned */}
+                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                        <div style={{ color: isActive ? '#fff' : '#8aa', fontSize: '0.85rem', fontWeight: isActive ? 600 : 400 }}>
+                          {(acc.balance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {acc.currency}
+                        </div>
+                        {isActive && (
+                          <div style={{ color: '#22c55e', fontSize: '0.7rem', marginTop: '1px' }}>● Active</div>
+                        )}
+                      </div>
                     </button>
                   )
                 })}
               </div>
+            )}
 
-              {/* Footer actions */}
-              <div style={{
-                padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.06)',
-                display: 'flex', justifyContent: 'flex-end',
-              }}>
-                <button
-                  onClick={handleLogout}
-                  style={{
-                    background: 'rgba(239,68,68,0.1)',
-                    border: '1px solid rgba(239,68,68,0.3)',
-                    color: '#ef4444', borderRadius: '8px',
-                    padding: '6px 14px', fontSize: '0.8rem',
-                    cursor: 'pointer', transition: 'background 0.15s',
-                  }}
-                >
-                  Log out
-                </button>
-              </div>
+            {/* ── 4px separator ── */}
+            <div style={{ background: 'rgba(255,255,255,0.04)', height: '4px' }} />
+
+            {/* ── CFD link ── */}
+            <div style={{ padding: '12px 16px' }}>
+              <a
+                href="https://app.deriv.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  color: '#ff444f',
+                  fontSize: '0.8rem',
+                  textDecoration: 'none',
+                  display: 'block',
+                  lineHeight: 1.5,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+              >
+                Looking for CFD accounts? Go to Trader&#39;s Hub
+              </a>
             </div>
-          )}
-        </div>
+
+            {/* ── 4px separator ── */}
+            <div style={{ background: 'rgba(255,255,255,0.04)', height: '4px' }} />
+
+            {/* ── Logout row ── */}
+            <button
+              onClick={handleLogout}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '13px 16px',
+                background: 'transparent', border: 'none',
+                color: 'rgba(255,255,255,0.7)',
+                fontSize: '0.85rem', fontWeight: 500,
+                cursor: 'pointer',
+                transition: 'background 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,68,79,0.07)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <span>Logout</span>
+              <ArrowRightIcon />
+            </button>
+
+          </div>
+        )}
       </div>
 
       <style>{`

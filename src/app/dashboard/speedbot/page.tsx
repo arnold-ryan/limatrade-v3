@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 
 /**
  * Speedbot — High-speed digit trading with dual strategy
@@ -107,6 +107,230 @@ const DIGIT_COLORS = [
 ]
 
 /* ─── Page ───────────────────────────────────────────────────────────────── */
+
+
+/* ─── Analysis helpers (ported from Analysis Tool) ─────── */
+function trailingStreak(arr: string[]): { count: number; val: string } {
+  if (!arr.length) return { count: 0, val: '' }
+  const val = arr[arr.length - 1]
+  let count = 0
+  for (let i = arr.length - 1; i >= 0 && arr[i] === val; i--) count++
+  return { count, val }
+}
+
+interface SeqColor { bg: string; border: string; text: string }
+
+function SbBar({ label, color, count, total }: {
+  label: string; color: string; count: number; total: number
+}) {
+  const pct = total ? (count / total) * 100 : 0
+
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+      <span style={{ width: '44px', fontSize: '0.72rem', fontWeight: 600, color, flexShrink: 0 }}>{label}</span>
+      <div style={{ flex: 1, height: '8px', background: 'rgba(255,255,255,0.06)', borderRadius: '99px', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '99px', transition: 'width 0.5s ease' }} />
+      </div>
+      <span style={{ width: '42px', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(229,229,229,0.7)', textAlign: 'right', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
+        {pct.toFixed(1)}%
+      </span>
+    </div>
+  )
+}
+
+function SbSequence({ seq, colorMap, rawDigits, flashWon, ticksTotal }: {
+  seq: string[]
+  colorMap: Record<string, SeqColor>
+  rawDigits?: number[]
+  flashWon?: boolean | null   // null = no flash, true = won, false = lost
+  ticksTotal?: number         // drives re-render on each tick so last box flashes
+}) {
+  const last = seq.length - 1
+  return (
+    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+      {seq.map((s, i) => {
+        const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
+        const isLast    = i === last
+        const isFlashing = isLast && flashWon != null
+        const display   = rawDigits != null ? String(rawDigits[i] ?? s) : s
+        return (
+          <div key={i} style={{
+            width: '26px', height: '26px', borderRadius: '6px',
+            fontSize: '0.7rem', fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: isFlashing
+              ? (flashWon ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)')
+              : c.bg,
+            border: isFlashing
+              ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
+              : `1.5px solid ${c.border}`,
+            color: isFlashing ? '#fff' : c.text,
+            transform: isFlashing ? 'scale(1.22)' : 'scale(1)',
+            boxShadow: isFlashing
+              ? (flashWon ? '0 0 12px 4px rgba(34,197,94,0.55)' : '0 0 12px 4px rgba(239,68,68,0.55)')
+              : 'none',
+            transition: 'background 0.15s, border-color 0.15s',
+          }}>{display}</div>
+        )
+      })}
+    </div>
+  )
+}
+
+function SbDigitPicker({ selected, onSelect, disabled }: { selected: number; onSelect: (d: number) => void; disabled?: boolean }) {
+  return (
+    <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.85rem', justifyContent: 'center' }}>
+      {[0,1,2,3,4,5,6,7,8,9].map(d => (
+        <button key={d} onClick={() => !disabled && onSelect(d)} style={{
+          width: '27px', height: '27px', borderRadius: '50%',
+          fontSize: '0.72rem', fontWeight: 700, cursor: disabled ? 'default' : 'pointer',
+          border: `1.5px solid ${selected === d ? '#FCA311' : 'rgba(255,255,255,0.14)'}`,
+          background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
+          color: selected === d ? '#FCA311' : 'rgba(229,229,229,0.55)',
+          transition: 'all 0.15s',
+        }}>{d}</button>
+      ))}
+    </div>
+  )
+}
+
+/* ─── PriceChart ─────────────────────────────────────────── */
+/**
+ * Canvas-rendered line chart from tick prices.
+ * Data source: ticks_history (style:'ticks', subscribe:1) on the public WS.
+ * Docs: https://developers.deriv.com/docs/data/ticks-history/
+ * - history.prices[] — initial batch
+ * - tick.quote       — each live tick after subscribe
+ */
+function PriceChart({ prices, livePrice, label }: {
+  prices: number[]
+  livePrice: number | null
+  label: string
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const visible = prices.slice(-300)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || visible.length < 2) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const dpr = window.devicePixelRatio || 1
+    const W = canvas.offsetWidth
+    const H = canvas.offsetHeight
+    canvas.width  = W * dpr
+    canvas.height = H * dpr
+    ctx.scale(dpr, dpr)
+
+    const lo = Math.min(...visible)
+    const hi = Math.max(...visible)
+    const range = hi - lo || 1
+
+    const padL = 58, padR = 10, padT = 10, padB = 20
+    const chartW = W - padL - padR
+    const chartH = H - padT - padB
+
+    const xOf = (i: number) => padL + (i / (visible.length - 1)) * chartW
+    const yOf = (p: number) => padT + (1 - (p - lo) / range) * chartH
+
+    // bg
+    ctx.fillStyle = '#060f1c'
+    ctx.fillRect(0, 0, W, H)
+
+    // horizontal grid lines + price labels
+    const gridLines = 4
+    for (let i = 0; i <= gridLines; i++) {
+      const y = padT + (i / gridLines) * chartH
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)'
+      ctx.lineWidth = 1
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke()
+      const priceVal = hi - (i / gridLines) * range
+      ctx.fillStyle = 'rgba(255,255,255,0.28)'
+      ctx.font = `10px monospace`
+      ctx.textAlign = 'right'
+      ctx.fillText(priceVal.toFixed(2), padL - 4, y + 4)
+    }
+
+    // vertical grid lines
+    const vStep = Math.max(1, Math.floor(visible.length / 6))
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)'
+    for (let i = 0; i < visible.length; i += vStep) {
+      ctx.beginPath(); ctx.moveTo(xOf(i), padT); ctx.lineTo(xOf(i), padT + chartH); ctx.stroke()
+    }
+
+    // gradient fill
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + chartH)
+    grad.addColorStop(0, 'rgba(252,163,17,0.2)')
+    grad.addColorStop(1, 'rgba(252,163,17,0)')
+    ctx.beginPath()
+    ctx.moveTo(xOf(0), yOf(visible[0]))
+    for (let i = 1; i < visible.length; i++) ctx.lineTo(xOf(i), yOf(visible[i]))
+    ctx.lineTo(xOf(visible.length - 1), padT + chartH)
+    ctx.lineTo(xOf(0), padT + chartH)
+    ctx.closePath()
+    ctx.fillStyle = grad
+    ctx.fill()
+
+    // price line
+    ctx.beginPath()
+    ctx.moveTo(xOf(0), yOf(visible[0]))
+    for (let i = 1; i < visible.length; i++) ctx.lineTo(xOf(i), yOf(visible[i]))
+    ctx.strokeStyle = '#FCA311'
+    ctx.lineWidth = 1.5
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+
+    // live price dashed line
+    if (livePrice != null) {
+      const ly = yOf(livePrice)
+      ctx.setLineDash([4, 4])
+      ctx.strokeStyle = 'rgba(239,68,68,0.5)'
+      ctx.lineWidth = 1
+      ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke()
+      ctx.setLineDash([])
+      // price badge
+      ctx.fillStyle = '#ef4444'
+      ctx.fillRect(W - padR + 2, ly - 7, 48, 14)
+      ctx.fillStyle = '#fff'
+      ctx.font = 'bold 9px monospace'
+      ctx.textAlign = 'left'
+      ctx.fillText(livePrice.toFixed(2), W - padR + 5, ly + 3.5)
+    }
+
+    // last-tick dot
+    const lx = xOf(visible.length - 1)
+    const ly2 = yOf(visible[visible.length - 1])
+    ctx.beginPath(); ctx.arc(lx, ly2, 4, 0, Math.PI * 2)
+    ctx.fillStyle = '#FCA311'; ctx.fill()
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+
+  }, [visible, livePrice])
+
+  if (prices.length < 2) {
+    return (
+      <div style={{ height: '160px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.78rem' }}>
+        Waiting for tick data…
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ background: '#060f1c', borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.07)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 12px 5px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {label}
+        </span>
+        <span style={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.22)' }}>
+          last {Math.min(prices.length, 300)} ticks
+        </span>
+      </div>
+      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '160px' }} />
+    </div>
+  )
+}
+
 export default function SpeedbotPage() {
 
   /* ── Config state ── */
@@ -141,6 +365,7 @@ export default function SpeedbotPage() {
 
   /* ── Tick state ── */
   const [livePrice,   setLivePrice]  = useState<number | null>(null)
+  const [prices,      setPrices]      = useState<number[]>([])
   const [recentDigits,setRecentDigits] = useState<number[]>([])
   const [ticksTotal,  setTicksTotal] = useState(0)
 
@@ -233,6 +458,7 @@ export default function SpeedbotPage() {
         const digits = hist.map(p => lastDigit(Number(p), pipSizeRef.current))
         setRecentDigits(digits.slice(-30))
         setTicksTotal(hist.length)
+        setPrices(hist.map(Number))
       }
 
       if (msg.msg_type === 'tick') {
@@ -244,6 +470,7 @@ export default function SpeedbotPage() {
         setLivePrice(q)
         setRecentDigits(prev => [...prev.slice(-29), lastDigit(q, pipSizeRef.current)])
         setTicksTotal(t => t + 1)
+        setPrices(prev => [...prev.slice(-499), q])
       }
     }
 
@@ -255,6 +482,9 @@ export default function SpeedbotPage() {
         try { ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 9999 })) } catch { /**/ }
       }
       ws.close()
+      // Clear stale price data so the chart doesn't flash old market prices
+      setPrices([])
+      setLivePrice(null)
     }
   }, [symbol])
 
@@ -429,6 +659,12 @@ export default function SpeedbotPage() {
           window.dispatchEvent(new CustomEvent('deriv-balance', {
             detail: { balance: b.balance, currency: b.currency },
           }))
+          // Auto-clear "insufficient balance" error when Deriv reports a new balance.
+          setBotError(prev =>
+            (prev && (prev.toLowerCase().includes('insufficient') || prev.toLowerCase().includes('balance')))
+              ? null
+              : prev
+          )
         }
 
         /* ── Buy response ── */
@@ -584,22 +820,19 @@ export default function SpeedbotPage() {
   }, [executeTrade, checkStops])
 
   /* ── Sync running ref ─────────────────────────────────────────────────────
-   * The first trade is fired synchronously in handleToggleRun (above) before
-   * React re-renders. This effect only syncs the ref and handles the reconnect
-   * case where onopen fires executeTrade (inTradeRef.current = false at that point).
+   * executeTrade is NOT called from this effect.
+   *
+   * The two paths that fire the first trade are:
+   *  1. handleToggleRun (synchronous, zero frame-delay)
+   *  2. ws.onopen — fires executeTrade when WS reconnects while already running
+   *
+   * Calling executeTrade here would cause a double-buy: handleToggleRun sends
+   * one buy immediately, then this effect fires before the buy response arrives
+   * (inTradeRef is still false until response lands), sending a second buy.
    * ── */
   useEffect(() => {
     runningRef.current = running
-    if (running && botWsRef.current?.readyState === WebSocket.OPEN
-        && !inTradeRef.current) {
-      // Reconnect case: WS was re-established while already running.
-      // Re-initialize accumulators since the WS state was lost.
-      currentStakeRef.current  = parseFloat(stake) || 1.00
-      accumLossRef.current     = 0
-      effectiveTypeRef.current = tradeType
-      executeTrade(botWsRef.current)
-    }
-  }, [running, executeTrade, stake, tradeType])
+  }, [running])
 
   /* ── Account-change watchdog (same as analysis page) ── */
   useEffect(() => {
@@ -696,11 +929,90 @@ export default function SpeedbotPage() {
   const currentDigit = recentDigits[recentDigits.length - 1] ?? null
   const profitColor  = stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff'
 
+  /* ── Analysis card data (recomputed from prices on every tick) ── */
+  const sbDigits = useMemo(
+    () => prices.map(p => {
+      const s = p.toFixed(pipSizeRef.current)
+      return parseInt(s[s.length - 1], 10)
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [prices]
+  )
+  const sbTotal = sbDigits.length
+
+  const sbCard = useMemo(() => {
+    const slice = sbDigits.slice(-50)
+    const type  = tradeType
+    const pred  = prediction
+
+    if (type === 'DIGITEVEN' || type === 'DIGITODD') {
+      const even = sbDigits.filter(d => d % 2 === 0).length
+      const odd  = sbDigits.filter(d => d % 2 !== 0).length
+      const seq  = slice.map(d => d % 2 === 0 ? 'E' : 'O')
+      const raw  = slice
+      const { count, val } = trailingStreak(seq)
+      return { title: 'Even / Odd', seq, raw,
+        bars: [
+          { label: 'Even', color: '#FCA311', count: even },
+          { label: 'Odd',  color: '#ef4444', count: odd  },
+        ],
+        colorMap: {
+          E: { bg: 'rgba(252,163,17,0.15)', border: '#FCA311', text: '#FCA311' },
+          O: { bg: 'rgba(239,68,68,0.15)',  border: '#ef4444', text: '#ef4444' },
+        } as Record<string, SeqColor>,
+        streak: count, streakLabel: val === 'E' ? 'Even' : 'Odd',
+        picker: false,
+      }
+    }
+    if (type === 'DIGITOVER' || type === 'DIGITUNDER') {
+      const over  = sbDigits.filter(d => d > pred).length
+      const under = sbDigits.filter(d => d <= pred).length
+      const seq   = slice.map(d => d > pred ? 'O' : 'U')
+      const raw   = slice
+      const { count, val } = trailingStreak(seq)
+      return { title: `Over / Under (barrier ${pred})`, seq, raw,
+        bars: [
+          { label: 'Over',  color: '#22c55e', count: over  },
+          { label: 'Under', color: '#3b82f6', count: under },
+        ],
+        colorMap: {
+          O: { bg: 'rgba(34,197,94,0.15)',  border: '#22c55e', text: '#22c55e' },
+          U: { bg: 'rgba(59,130,246,0.15)', border: '#3b82f6', text: '#3b82f6' },
+        } as Record<string, SeqColor>,
+        streak: count, streakLabel: val === 'O' ? 'Over' : 'Under',
+        picker: true,
+      }
+    }
+    if (type === 'DIGITMATCH' || type === 'DIGITDIFF') {
+      const match  = sbDigits.filter(d => d === pred).length
+      const differ = sbDigits.filter(d => d !== pred).length
+      const seq    = slice.map(d => d === pred ? 'M' : 'D')
+      const raw    = slice
+      const { count, val } = trailingStreak(seq)
+      return { title: `Match / Differ (digit ${pred})`, seq, raw,
+        bars: [
+          { label: 'Match',  color: '#ef4444', count: match  },
+          { label: 'Differ', color: '#a855f7', count: differ },
+        ],
+        colorMap: {
+          M: { bg: 'rgba(239,68,68,0.15)',  border: '#ef4444', text: '#ef4444' },
+          D: { bg: 'rgba(168,85,247,0.15)', border: '#a855f7', text: '#a855f7' },
+        } as Record<string, SeqColor>,
+        streak: count, streakLabel: val === 'M' ? 'Match' : 'Differ',
+        picker: true,
+      }
+    }
+    return null
+  }, [sbDigits, tradeType, prediction])
+
+  const flashWonForCard: boolean | null = tradeFlash ? tradeFlash.won : null
+
+
   return (
     <div style={{
       background: '#000', minHeight: '100%',
       display: 'flex', flexDirection: 'column',
-      paddingBottom: '0',
+      paddingBottom: '80px',
     }}>
 
       {/* ── Page header ── */}
@@ -1043,59 +1355,7 @@ export default function SpeedbotPage() {
             </div>
           )}
 
-          {/* Run / Stop + Reset */}
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button
-              onClick={handleToggleRun}
-              disabled={!botReady && !running}
-              style={{
-                flex: 1, padding: '0.85rem',
-                borderRadius: '10px', border: 'none',
-                background: !botReady && !running
-                  ? '#1a1a1a'
-                  : running
-                    ? 'linear-gradient(135deg, #dc2626, #b91c1c)'
-                    : 'linear-gradient(135deg, #16a34a, #15803d)',
-                color: !botReady && !running ? '#555' : '#fff',
-                fontWeight: 800, fontSize: '0.92rem',
-                cursor: !botReady && !running ? 'not-allowed' : 'pointer',
-                letterSpacing: '0.05em',
-                transition: 'all 0.2s',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem',
-              }}
-            >
-              {running ? (
-                <>
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                    <rect x="1" y="1" width="10" height="10" rx="2"/>
-                  </svg>
-                  STOP
-                </>
-              ) : (
-                <>
-                  <svg width="11" height="13" viewBox="0 0 11 13" fill="currentColor">
-                    <polygon points="0,0 11,6.5 0,13"/>
-                  </svg>
-                  {!botReady ? 'Connecting…' : 'START'}
-                </>
-              )}
-            </button>
-            <button
-              onClick={handleReset}
-              style={{
-                padding: '0.85rem 1rem',
-                borderRadius: '10px',
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent', color: 'rgba(229,229,229,0.5)',
-                fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer',
-                transition: 'all 0.15s',
-              }}
-              onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff' }}
-              onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = 'rgba(229,229,229,0.5)' }}
-            >
-              Reset
-            </button>
-          </div>
+
 
         </div>
 
@@ -1107,67 +1367,53 @@ export default function SpeedbotPage() {
           background: '#000',
         }}>
 
-          {/* Digit visualization */}
-          <div style={sectionSt}>
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              marginBottom: '0.85rem',
-            }}>
-              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>
-                Last Digit Stream
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.35)' }}>
-                  {ticksTotal.toLocaleString()} ticks processed
-                </span>
-                {currentDigit !== null && (
-                  <div style={{
-                    width: '36px', height: '36px', borderRadius: '50%',
-                    background: DIGIT_COLORS[currentDigit],
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontWeight: 800, fontSize: '1rem', color: '#000',
-                    boxShadow: `0 0 16px ${DIGIT_COLORS[currentDigit]}66`,
-                    animation: 'digitPop 0.25s ease',
-                  }}>
-                    {currentDigit}
-                  </div>
-                )}
-              </div>
-            </div>
+          {/* ── Price chart (uses existing ticks_history WS data) ── */}
+          <PriceChart
+            prices={prices}
+            livePrice={livePrice}
+            label={MARKETS.find(m => m.symbol === symbol)?.label ?? symbol}
+          />
 
-            {/* Digit sequence bubbles */}
-            <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-              {recentDigits.map((d, i) => {
-                const isLast = i === recentDigits.length - 1
-                const flash  = isLast && tradeFlash
-                const flashWin  = flash && tradeFlash!.won
-                const flashLose = flash && !tradeFlash!.won
-                return (
-                  <div key={i} style={{
-                    width: '28px', height: '28px', borderRadius: '7px',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.72rem', fontWeight: 700,
-                    background: flashWin  ? 'rgba(34,197,94,0.35)'
-                              : flashLose ? 'rgba(239,68,68,0.35)'
-                              : isLast    ? DIGIT_COLORS[d]
-                              : `${DIGIT_COLORS[d]}22`,
-                    color:  flash   ? '#fff' : isLast ? '#000' : DIGIT_COLORS[d],
-                    border: flashWin  ? '2px solid #22c55e'
-                          : flashLose ? '2px solid #ef4444'
-                          : `1.5px solid ${DIGIT_COLORS[d]}${isLast ? '' : '55'}`,
-                    boxShadow: flashWin  ? '0 0 14px #22c55e99'
-                             : flashLose ? '0 0 14px #ef444499'
-                             : 'none',
-                    transition: flash ? 'all 0.05s' : 'all 0.15s',
-                    opacity: flash ? 1 : 0.4 + 0.6 * (i / recentDigits.length),
-                    transform: flash ? 'scale(1.18)' : 'scale(1)',
-                  }}>
-                    {d}
-                  </div>
-                )
-              })}
+          {/* ── Analysis card — updates with tradeType ── */}
+          {sbCard && (
+            <div style={sectionSt}>
+              {/* Header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.9rem' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                  {sbCard.title}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                  {sbCard.streak > 0 && (
+                    <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#FCA311', background: 'rgba(252,163,17,0.1)', padding: '0.15rem 0.55rem', borderRadius: '20px', border: '1px solid rgba(252,163,17,0.3)' }}>
+                      {sbCard.streak}x {sbCard.streakLabel}
+                    </span>
+                  )}
+                  <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>
+                    {ticksTotal.toLocaleString()} ticks
+                  </span>
+                </div>
+              </div>
+
+              {/* Digit picker (Over/Under, Match/Differ) */}
+              {sbCard.picker && (
+                <SbDigitPicker selected={prediction} onSelect={setPrediction} disabled={running} />
+              )}
+
+              {/* Bars */}
+              {sbCard.bars.map(b => (
+                <SbBar key={b.label} label={b.label} color={b.color} count={b.count} total={sbTotal} />
+              ))}
+
+              {/* Sequence */}
+              <SbSequence
+                seq={sbCard.seq.slice(-20)}
+                rawDigits={sbCard.raw.slice(-20)}
+                colorMap={sbCard.colorMap}
+                flashWon={flashWonForCard}
+                ticksTotal={ticksTotal}
+              />
             </div>
-          </div>
+          )}
 
           {/* Stats grid */}
           <div style={sectionSt}>
@@ -1322,6 +1568,67 @@ export default function SpeedbotPage() {
           </div>
 
         </div>
+      </div>
+
+      {/* ── Sticky START / STOP bar ── */}
+      <div style={{
+        position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 150,
+        background: 'rgba(5,5,5,0.96)', backdropFilter: 'blur(12px)',
+        borderTop: '1px solid rgba(255,255,255,0.07)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: '0.75rem', padding: '10px 24px', height: '64px',
+      }}>
+        <button
+          onClick={handleToggleRun}
+          disabled={!botReady && !running}
+          style={{
+            width: '220px', height: '44px',
+            borderRadius: '10px', border: 'none',
+            background: !botReady && !running
+              ? '#1a1a1a'
+              : running
+                ? 'linear-gradient(135deg, #dc2626, #b91c1c)'
+                : 'linear-gradient(135deg, #16a34a, #15803d)',
+            color: !botReady && !running ? '#555' : '#fff',
+            fontWeight: 800, fontSize: '0.95rem',
+            cursor: !botReady && !running ? 'not-allowed' : 'pointer',
+            letterSpacing: '0.06em',
+            transition: 'all 0.2s',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+            boxShadow: running ? '0 0 18px rgba(220,38,38,0.4)' : (!botReady && !running ? 'none' : '0 0 18px rgba(22,163,74,0.35)'),
+          }}
+        >
+          {running ? (
+            <>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                <rect x="1" y="1" width="10" height="10" rx="2"/>
+              </svg>
+              STOP
+            </>
+          ) : (
+            <>
+              <svg width="11" height="13" viewBox="0 0 11 13" fill="currentColor">
+                <polygon points="0,0 11,6.5 0,13"/>
+              </svg>
+              {!botReady ? 'Connecting…' : 'START'}
+            </>
+          )}
+        </button>
+        <button
+          onClick={handleReset}
+          style={{
+            height: '44px', padding: '0 1.25rem',
+            borderRadius: '10px',
+            border: '1px solid rgba(255,255,255,0.12)',
+            background: 'transparent', color: 'rgba(229,229,229,0.5)',
+            fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer',
+            transition: 'all 0.15s',
+          }}
+          onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff' }}
+          onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = 'rgba(229,229,229,0.5)' }}
+        >
+          Reset
+        </button>
       </div>
 
       <style>{`

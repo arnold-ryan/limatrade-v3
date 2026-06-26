@@ -189,6 +189,7 @@ function Sequence({ seq, colorMap, rawDigits, flash, tickN }: {
   )
 }
 
+
 function Card({ title, streak, streakLabel, children }: {
   title: string; streak: number; streakLabel: string; children: React.ReactNode
 }) {
@@ -1438,6 +1439,14 @@ export default function AnalysisPage() {
           window.dispatchEvent(new CustomEvent('deriv-balance', {
             detail: { balance: b.balance, currency: b.currency },
           }))
+          // Auto-clear "insufficient balance" error when Deriv reports a new balance.
+          // This covers demo resets and deposits — user can press Run again immediately
+          // without needing to refresh the page.
+          setBotError(prev =>
+            (prev && (prev.toLowerCase().includes('insufficient') || prev.toLowerCase().includes('balance')))
+              ? null
+              : prev
+          )
         }
 
         /* ── proposal_open_contract — real exit spot when contract settles ──
@@ -2084,7 +2093,6 @@ export default function AnalysisPage() {
               </div>
             )}
           </div>
-
           {/* ── 4 Analysis cards ── */}
           {!loading && (
             <div style={{
