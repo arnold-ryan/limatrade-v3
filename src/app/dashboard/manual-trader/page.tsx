@@ -216,7 +216,7 @@ function TradeControls({
 
         {/* Inline digit dropdown — only for OU / MD */}
         {showDigitPicker && selectedDigit !== undefined && onDigitSelect && (
-          <div style={{ flex: '0 0 68px' }}>
+          <div style={{ flex: 1 }}>
             <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
               {digitLabel ?? 'Digit'}
             </div>
@@ -330,12 +330,13 @@ function Card({ title, streakCount, streakLabel, children }: {
 /* ─── Positions Panel (slides in from right) ─────────────────────────────── */
 function PositionsPanel({
   open, onClose, openPositions, history, currency,
-  onSell, histLoading,
+  onSell, histLoading, onClearHistory,
 }: {
   open: boolean; onClose: () => void
   openPositions: Map<number, OpenPos>; history: HistRow[]
   currency: string
   onSell: (id: number) => void; histLoading: boolean
+  onClearHistory: () => void
 }) {
   const [tab, setTab] = useState<'positions' | 'history'>('positions')
   const openList = Array.from(openPositions.values())
@@ -447,16 +448,23 @@ function PositionsPanel({
               <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem' }}>No trade history yet.</div>
             ) : (
               <>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: '#070f1e', zIndex: 1 }}>
-                  {['Time','Type','Stake','P/L'].map(h => (
-                    <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
-                  ))}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: '#070f1e', zIndex: 1 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', flex: 1 }}>
+                    {['Time','Type','Stake','P/L'].map(h => (
+                      <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
+                    ))}
+                  </div>
+                  <button onClick={onClearHistory} style={{
+                    marginLeft: '0.5rem', padding: '0.18rem 0.5rem', borderRadius: '5px', flexShrink: 0,
+                    border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.07)',
+                    color: '#ef4444', fontSize: '0.6rem', fontWeight: 700, cursor: 'pointer',
+                  }}>Reset</button>
                 </div>
                 {history.map(row => {
                   const pl  = row.sell_price - row.buy_price
                   const won = pl > 0
                   return (
-                    <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', width: '100%' }}>
                       <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
                         {row.purchase_time ? fmtTime(row.purchase_time) : '—'}
                       </span>
@@ -491,6 +499,11 @@ export default function ManualTraderPage() {
   const [loading,   setLoading]   = useState(true)
 
   /* ── Barrier config ── */
+  /* ── Analysis digit (circles at card top — purely visual, does not affect trades) ── */
+  const [ouAnalysisDigit, setOuAnalysisDigit] = useState(5)
+  const [mdAnalysisDigit, setMdAnalysisDigit] = useState(5)
+
+  /* ── Trade barrier (dropdown in TradeControls — drives proposals) ── */
   const [ouBarrier, setOuBarrier] = useState(5)
   const [mdDigit,   setMdDigit]   = useState(5)
 
@@ -500,10 +513,10 @@ export default function ManualTraderPage() {
   const [stakeEO, setStakeEO] = useState('1.00')
   const [stakeRF, setStakeRF] = useState('1.00')
 
-  const [durOU, setDurOU] = useState(5)
-  const [durMD, setDurMD] = useState(5)
-  const [durEO, setDurEO] = useState(5)
-  const [durRF, setDurRF] = useState(5)
+  const [durOU, setDurOU] = useState(1)
+  const [durMD, setDurMD] = useState(1)
+  const [durEO, setDurEO] = useState(1)
+  const [durRF, setDurRF] = useState(1)
   const [durUnitRF, setDurUnitRF] = useState<'t'|'m'|'h'>('t')
 
   /* ── Auth WS state ── */
@@ -552,10 +565,10 @@ export default function ManualTraderPage() {
   const stakeMDRef    = useRef('1.00')
   const stakeEORef    = useRef('1.00')
   const stakeRFRef    = useRef('1.00')
-  const durOURef      = useRef(5)
-  const durMDRef      = useRef(5)
-  const durEORef      = useRef(5)
-  const durRFRef      = useRef(5)
+  const durOURef      = useRef(1)
+  const durMDRef      = useRef(1)
+  const durEORef      = useRef(1)
+  const durRFRef      = useRef(1)
   const durUnitRFRef  = useRef<'t'|'m'|'h'>('t')
 
   useEffect(() => { symbolRef.current    = symbol    }, [symbol])
@@ -912,21 +925,21 @@ export default function ManualTraderPage() {
 
   const ouData = useMemo(() => {
     const s50 = digits.slice(-50)
-    const over = digits.filter(d => d > ouBarrier).length
-    const under = digits.filter(d => d <= ouBarrier).length
-    const seq = s50.map(d => d > ouBarrier ? 'O' : 'U')
+    const over = digits.filter(d => d > ouAnalysisDigit).length
+    const under = digits.filter(d => d <= ouAnalysisDigit).length
+    const seq = s50.map(d => d > ouAnalysisDigit ? 'O' : 'U')
     const { count, val } = trailingStreak(seq)
     return { over, under, seq, rawDigits: s50, streak: count, streakLabel: val === 'O' ? 'Over' : 'Under' }
-  }, [digits, ouBarrier])
+  }, [digits, ouAnalysisDigit])
 
   const mdData = useMemo(() => {
     const s50 = digits.slice(-50)
-    const match = digits.filter(d => d === mdDigit).length
-    const differ = digits.filter(d => d !== mdDigit).length
-    const seq = s50.map(d => d === mdDigit ? 'M' : 'D')
+    const match = digits.filter(d => d === mdAnalysisDigit).length
+    const differ = digits.filter(d => d !== mdAnalysisDigit).length
+    const seq = s50.map(d => d === mdAnalysisDigit ? 'M' : 'D')
     const { count, val } = trailingStreak(seq)
     return { match, differ, seq, rawDigits: s50, streak: count, streakLabel: val === 'M' ? 'Match' : 'Differ' }
-  }, [digits, mdDigit])
+  }, [digits, mdAnalysisDigit])
 
   const eoData = useMemo(() => {
     const s50 = digits.slice(-50)
@@ -1073,7 +1086,7 @@ export default function ManualTraderPage() {
 
         {/* OVER / UNDER */}
         <Card title="Over / Under" streakCount={ouData.streak} streakLabel={ouData.streakLabel}>
-          <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
+          <DigitPicker selected={ouAnalysisDigit} onSelect={setOuAnalysisDigit} />
           <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
           <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
           <Sequence seq={ouData.seq} colorMap={OU_COLORS} rawDigits={ouData.rawDigits} />
@@ -1094,7 +1107,7 @@ export default function ManualTraderPage() {
         {/* MATCH / DIFFER */}
         <div style={{ borderLeft: '1px solid rgba(255,255,255,0.07)' }}>
           <Card title="Match / Differ" streakCount={mdData.streak} streakLabel={mdData.streakLabel}>
-            <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
+            <DigitPicker selected={mdAnalysisDigit} onSelect={setMdAnalysisDigit} />
             <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
             <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
             <Sequence seq={mdData.seq} colorMap={MD_COLORS} rawDigits={mdData.rawDigits} />
@@ -1154,22 +1167,12 @@ export default function ManualTraderPage() {
         </div>
       </div>
 
-      {/* ── Backdrop — click anywhere outside panel to close ── */}
-      {panelOpen && (
-        <div
-          onClick={() => setPanelOpen(false)}
-          style={{
-            position: 'fixed', top: '100px', left: 0, right: '300px', bottom: 0,
-            zIndex: 38, cursor: 'pointer',
-          }}
-        />
-      )}
-
       {/* ── Positions Panel ── */}
       <PositionsPanel
         open={panelOpen} onClose={() => setPanelOpen(false)}
         openPositions={openPositions} history={history}
         currency={currency} onSell={handleSell} histLoading={histLoading}
+        onClearHistory={() => setHistory([])}
       />
 
       {/* Edge tab — opens panel when closed, closes when open */}
