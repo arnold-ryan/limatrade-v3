@@ -124,7 +124,7 @@ interface SeqColor { bg: string; border: string; text: string }
  * Sequence — scrolling row of colored digit boxes.
  *
  * Flash tracking (v28):
- *   atTickN  = tickNRef.current captured 80ms after SELL (settlement tick already landed).
+ *   atTickN  = tickNRef.current at the exact moment the exit tick lands on the public WS.
  *   tickN    = current monotonic tick counter (incremented on every public WS tick).
  *   elapsed  = tickN - atTickN  →  how many ticks have arrived since settlement.
  *   flashIdx = seq.length - 1 - elapsed  →  the settlement digit's current position.
@@ -1219,6 +1219,22 @@ export default function AnalysisPage() {
   const tickNRef = useRef(0)
   /** Clears the trade flash after it scrolls off the visible sequence window */
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /**
+   * Mirror of the prices array — kept in sync in the tick handler so the POC
+   * handler can do a synchronous lastIndexOf() to find the exact exit tick position
+   * without relying on React state (which is async and may be stale in a callback).
+   */
+  const pricesRef = useRef<number[]>([])
+  /**
+   * Set in the SELL handler. Read by the POC handler (or tick handler) to know
+   * which flash to trigger when exit_spot is confirmed.
+   */
+  const pendingFlashWonRef  = useRef<boolean | null>(null)
+  /**
+   * Set in the POC handler when exit_spot arrives before the matching public tick.
+   * The tick handler watches for this price and triggers the flash when it lands.
+   */
+  const pendingExitSpotRef  = useRef<number | null>(null)
 
   /* ── Keep refs in sync with state ── */
   // NOTE: livePriceRef is also updated DIRECTLY in the tick WS handler (faster path)
@@ -1419,10 +1435,14 @@ export default function AnalysisPage() {
 
         /* ── proposal_open_contract — real exit spot when contract settles ──
            Deriv delivers `exit_spot` (string) and `is_sold: 1` when settled.
-           We use this to replace the stale livePriceRef approximation so the
-           exit spot shown in the transactions list matches the actual tick the
-           contract was evaluated against.
            Source: proposal_open_contract_response.schema.json
+
+           We also use exit_spot to pin the flash glow to the EXACT exit tick:
+           1. Find exit_spot in pricesRef (prices already received on public WS).
+              This gives us the tick's precise position regardless of timing.
+           2. If not found yet (POC arrived before the public WS tick), store
+              exit_spot in pendingExitSpotRef — the tick handler will fire the
+              flash the moment that price lands.
         ── */
         if (msg.msg_type === 'proposal_open_contract') {
           const poc = (msg as {
@@ -1436,15 +1456,45 @@ export default function AnalysisPage() {
           if (poc.is_sold && poc.exit_spot) {
             const exitSpotNum = parseFloat(poc.exit_spot)
             if (Number.isFinite(exitSpotNum)) {
+              // Update transaction log with real exit spot
               setTxLog(prev => prev.map(t =>
                 t.id === poc.contract_id ? { ...t, exitSpot: exitSpotNum } : t
               ))
+
+              // Trigger glow flash on the exact exit tick
+              if (pendingFlashWonRef.current !== null) {
+                const won = pendingFlashWonRef.current
+                const prices = pricesRef.current
+                // Search backwards — exit tick is always the most recent occurrence
+                const exitIdx = prices.lastIndexOf(exitSpotNum)
+
+                if (exitIdx >= 0) {
+                  // Exit tick already received on public WS — compute exact atTickN
+                  // ticksAgo = 0 means last box, 1 = second-to-last, etc.
+                  const ticksAgo = prices.length - 1 - exitIdx
+                  const atTickN  = tickNRef.current - ticksAgo
+                  if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+                  setTradeFlash({ won, atTickN })
+                  flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
+                  pendingFlashWonRef.current = null
+                } else {
+                  // Exit tick not yet on public WS — tick handler will fire the flash
+                  // when this exact price arrives
+                  pendingExitSpotRef.current = exitSpotNum
+                  // pendingFlashWonRef stays set so the tick handler can read it
+                }
+              }
             }
           }
         }
 
         /* ── buy response ── */
         if (msg.msg_type === 'buy') {
+          // Clear any leftover pending flash from the previous trade so it doesn't
+          // accidentally fire mid-next-contract (edge case: lost POC + immediate re-run)
+          pendingFlashWonRef.current = null
+          pendingExitSpotRef.current = null
+
           const buy = msg.buy as {
             contract_id: number; buy_price: number
             longcode?: string; payout?: number
@@ -1516,13 +1566,13 @@ export default function AnalysisPage() {
             const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
-            /* ── Flash: 80ms delay so settlement tick lands in tickNRef first ── */
-            setTimeout(() => {
-              if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
-              setTradeFlash({ won, atTickN: tickNRef.current })
-              // Auto-clear after ~22s — digit is long off-screen by then
-              flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
-            }, 80)
+            /* ── Flash: store won here; POC handler will pin the exact exit tick ──
+             * We do NOT use tickNRef here because the exit tick on the public WS
+             * may arrive slightly before OR after SELL on the private WS. Instead,
+             * proposal_open_contract gives us exit_spot which we match precisely
+             * against pricesRef to find the exact tick index.
+             */
+            pendingFlashWonRef.current = won
 
             setRunStats(prev => {
               const newPayout = prev.totalPayout + sellAmount
@@ -1739,10 +1789,26 @@ export default function AnalysisPage() {
           const next = [...prev, q]
           return next.length > MAX_HISTORY ? next.slice(-MAX_HISTORY) : next
         })
+
+        // Keep synchronous ref in sync — used by POC handler for exit_spot matching
+        pricesRef.current = [...pricesRef.current, q].slice(-MAX_HISTORY)
+
         // Increment monotonic tick counter — lets the flash glow follow the digit
         // left across the Sequence boxes as each new tick pushes it one position
         tickNRef.current++
         setTickN(tickNRef.current)
+
+        // If POC arrived before this tick, check if this IS the exit tick.
+        // When the price matches the pending exit spot, capture atTickN right now —
+        // before any further ticks can shift it — and fire the flash.
+        if (pendingExitSpotRef.current !== null && q === pendingExitSpotRef.current) {
+          const won = pendingFlashWonRef.current!
+          if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+          setTradeFlash({ won, atTickN: tickNRef.current })
+          flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
+          pendingExitSpotRef.current = null
+          pendingFlashWonRef.current = null
+        }
       }
     }
 
