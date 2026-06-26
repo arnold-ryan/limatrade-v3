@@ -1701,21 +1701,19 @@ export default function AnalysisPage() {
   }, [executeTrade])
 
   /* ── Sync running ref ──────────────────────────────────────────────────────
-   * The first trade is now fired SYNCHRONOUSLY in the Start button click handler
-   * (see onToggleRun below) — before React even re-renders — so the buy message
-   * leaves the socket immediately with zero frame-delay.
+   * executeTrade is NOT called from this effect.
    *
-   * This effect only syncs runningRef for WS callbacks that check it.
-   * Guard: only trigger executeTrade here if no buy is already in flight,
-   * preventing a double-buy if the click handler already sent one.
+   * The two paths that fire the first trade are:
+   *  1. Start button click handler (synchronous, zero frame-delay)
+   *  2. ws.onopen — fires executeTrade when WS reconnects while already running
+   *
+   * Calling executeTrade here would cause a double-buy: the click handler sends
+   * one buy immediately, then this effect fires before the buy response arrives
+   * (pendingBuysRef is empty until the response lands), so a second buy goes out.
    * ── */
   useEffect(() => {
     runningRef.current = running
-    if (running && botWsRef.current?.readyState === WebSocket.OPEN
-        && pendingBuysRef.current.size === 0) {
-      executeTrade(botWsRef.current)
-    }
-  }, [running, executeTrade])
+  }, [running])
 
   /**
    * ── Account-change watchdog ────────────────────────────────────────────────
