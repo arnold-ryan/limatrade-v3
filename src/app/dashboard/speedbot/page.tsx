@@ -1368,19 +1368,22 @@ export default function SpeedbotPage() {
           background: '#000',
           paddingBottom: '64px', // clear sticky START bar
         }}>
-          {/* Upper section — chart + analysis card + run statistics (fixed, no scroll) */}
-          <div style={{
-            padding: '1rem 1.25rem 0',
-            display: 'flex', flexDirection: 'column', gap: '1rem',
-            flexShrink: 0,
-          }}>
+          {/* Chart — full width, fixed height */}
+          <div style={{ padding: '1rem 1.25rem 0', flexShrink: 0 }}>
+            <PriceChart
+              prices={prices}
+              livePrice={livePrice}
+              label={MARKETS.find(m => m.symbol === symbol)?.label ?? symbol}
+            />
+          </div>
 
-          {/* ── Price chart (uses existing ticks_history WS data) ── */}
-          <PriceChart
-            prices={prices}
-            livePrice={livePrice}
-            label={MARKETS.find(m => m.symbol === symbol)?.label ?? symbol}
-          />
+          {/* Middle row: Analysis card + Run Statistics side by side */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '1fr 1fr',
+            gap: '0.75rem', padding: '0.75rem 1.25rem 0',
+            flexShrink: 0,
+            alignItems: 'start',
+          }}>
 
           {/* ── Analysis card — updates with tradeType ── */}
           {sbCard && (
@@ -1508,7 +1511,7 @@ export default function SpeedbotPage() {
             )}
           </div>
 
-          </div>{/* end upper section */}
+          </div>{/* end middle row grid */}
 
           {/* Transaction log — scrollable card, fills remaining vertical space */}
           <div style={{
