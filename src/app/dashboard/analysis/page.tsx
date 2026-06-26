@@ -120,18 +120,40 @@ function Bar({ label, color, count, total }: {
 }
 
 interface SeqColor { bg: string; border: string; text: string }
-function Sequence({ seq, colorMap, rawDigits, flash }: {
+/**
+ * Sequence — scrolling row of colored digit boxes.
+ *
+ * Flash tracking (v28):
+ *   atTickN  = tickNRef.current captured 80ms after SELL (settlement tick already landed).
+ *   tickN    = current monotonic tick counter (incremented on every public WS tick).
+ *   elapsed  = tickN - atTickN  →  how many ticks have arrived since settlement.
+ *   flashIdx = seq.length - 1 - elapsed  →  the settlement digit's current position.
+ *
+ * The glow naturally moves left one box per tick and disappears when flashIdx < 0
+ * (box has scrolled off the visible window).  No extra timers needed for movement —
+ * React re-renders on every tickN change and recomputes the position automatically.
+ */
+function Sequence({ seq, colorMap, rawDigits, flash, tickN }: {
   seq: string[]
   colorMap: Record<string, SeqColor>
   rawDigits?: number[]    // actual last digit at each position — displayed instead of the label
-  flash?: { won: boolean } | null
+  flash?: { won: boolean; atTickN: number } | null
+  tickN?: number          // current monotonic tick counter — drives glow position
 }) {
+  // Compute which box index the settlement digit is currently at.
+  // elapsed=0 → last box (just settled). elapsed=1 → second-to-last, etc.
+  const flashIdx = (flash != null && tickN != null)
+    ? (seq.length - 1 - (tickN - flash.atTickN))
+    : -1
+
   return (
     <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
       {seq.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
-        const isLast = i === seq.length - 1
-        const isFlashing = isLast && flash != null
+        const isFlashing = flash != null && i === flashIdx
+        // Fade glow slightly as it ages (1 = fresh, dims after 3 ticks but still visible)
+        const elapsed    = flash != null && tickN != null ? (tickN - flash.atTickN) : 0
+        const opacity    = isFlashing ? Math.max(0.4, 1 - elapsed * 0.15) : 1
         const flashWon   = isFlashing && flash!.won
         const display    = rawDigits != null ? String(rawDigits[i] ?? s) : s
         return (
@@ -140,7 +162,7 @@ function Sequence({ seq, colorMap, rawDigits, flash }: {
             fontSize: '0.7rem', fontWeight: 700,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: isFlashing
-              ? (flashWon ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)')
+              ? (flashWon ? `rgba(34,197,94,${0.45 * opacity})` : `rgba(239,68,68,${0.45 * opacity})`)
               : c.bg,
             border: isFlashing
               ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
@@ -149,10 +171,13 @@ function Sequence({ seq, colorMap, rawDigits, flash }: {
             transform: isFlashing ? 'scale(1.22)' : 'scale(1)',
             boxShadow: isFlashing
               ? (flashWon
-                  ? '0 0 12px 4px rgba(34,197,94,0.55)'
-                  : '0 0 12px 4px rgba(239,68,68,0.55)')
+                  ? `0 0 12px 4px rgba(34,197,94,${0.55 * opacity})`
+                  : `0 0 12px 4px rgba(239,68,68,${0.55 * opacity})`)
               : 'none',
-            transition: 'all 0.2s ease',
+            // No CSS transition on transform/boxShadow — the box itself doesn't move,
+            // only which box is highlighted changes per-tick. CSS transition would cause
+            // the old box to fade out while new box fades in, creating the shift glitch.
+            transition: 'background 0.15s ease, border-color 0.15s ease',
             position: 'relative',
             zIndex: isFlashing ? 2 : undefined,
           }}>
@@ -643,7 +668,8 @@ function RunPanel({
                             }}/>
                           )}
                           <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.55)' }}>
-                            {tx.exitSpot?.toFixed(2) ?? ''}
+                            {/* Hide exit spot while pending — POC may arrive before SELL, avoid blip */}
+                            {!tx.pending && (tx.exitSpot?.toFixed(2) ?? '')}
                           </span>
                         </div>
                       </div>
@@ -948,7 +974,7 @@ function ViewDetailModal({
                   {tx.entrySpot?.toFixed(2) ?? '—'}
                 </span>
                 <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.6)', fontVariantNumeric: 'tabular-nums' }}>
-                  {tx.exitSpot?.toFixed(2) ?? '—'}
+                  {tx.pending ? '—' : (tx.exitSpot?.toFixed(2) ?? '—')}
                 </span>
                 <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
                   {tx.stake.toFixed(2)}
@@ -1155,7 +1181,10 @@ export default function AnalysisPage() {
   const [accountLabel,    setAccountLabel]    = useState<string>('')
   const [activeAccountId, setActiveAccountId] = useState<string>('')
   const [showDetailModal, setShowDetailModal] = useState(false)
-  const [tradeFlash,      setTradeFlash]      = useState<{ won: boolean } | null>(null)
+  /** Tracks which tick the settlement occurred on — used to follow the digit as it scrolls */
+  const [tradeFlash,      setTradeFlash]      = useState<{ won: boolean; atTickN: number } | null>(null)
+  /** Monotonically increasing counter — incremented on every public tick */
+  const [tickN,           setTickN]           = useState(0)
   const [lastContractSummary, setLastContractSummary] = useState<{
     symbol: string; contractType: string; stake: number; potentialPayout: number
   } | null>(null)
@@ -1186,6 +1215,10 @@ export default function AnalysisPage() {
    * Used to detect account switches and force a reconnect.
    */
   const connectedAccountRef = useRef<string | null>(null)
+  /** Ref mirror of tickN — readable synchronously in WS callbacks without stale closures */
+  const tickNRef = useRef(0)
+  /** Clears the trade flash after it scrolls off the visible sequence window */
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /* ── Keep refs in sync with state ── */
   // NOTE: livePriceRef is also updated DIRECTLY in the tick WS handler (faster path)
@@ -1483,9 +1516,13 @@ export default function AnalysisPage() {
             const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
-            /* ── Flash the active digit circle with result color ── */
-            setTradeFlash({ won })
-            setTimeout(() => setTradeFlash(null), 900)
+            /* ── Flash: 80ms delay so settlement tick lands in tickNRef first ── */
+            setTimeout(() => {
+              if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
+              setTradeFlash({ won, atTickN: tickNRef.current })
+              // Auto-clear after ~22s — digit is long off-screen by then
+              flashTimerRef.current = setTimeout(() => setTradeFlash(null), 22_000)
+            }, 80)
 
             setRunStats(prev => {
               const newPayout = prev.totalPayout + sellAmount
@@ -1702,6 +1739,10 @@ export default function AnalysisPage() {
           const next = [...prev, q]
           return next.length > MAX_HISTORY ? next.slice(-MAX_HISTORY) : next
         })
+        // Increment monotonic tick counter — lets the flash glow follow the digit
+        // left across the Sequence boxes as each new tick pushes it one position
+        tickNRef.current++
+        setTickN(tickNRef.current)
       }
     }
 
@@ -1962,7 +2003,8 @@ export default function AnalysisPage() {
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
                 <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
                 <Sequence seq={ouData.seq.slice(-20)} rawDigits={ouData.rawDigits.slice(-20)} colorMap={ouColors}
-                  flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null} />
+                  flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null}
+                  tickN={tickN} />
               </Card>
 
               <Card title="Match / Differ" streak={mdData.streak} streakLabel={mdData.streakLabel}>
@@ -1970,20 +2012,22 @@ export default function AnalysisPage() {
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
                 <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
                 <Sequence seq={mdData.seq.slice(-20)} rawDigits={mdData.rawDigits.slice(-20)} colorMap={mdColors}
-                  flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null} />
+                  flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null}
+                  tickN={tickN} />
               </Card>
 
               <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
-                <Sequence seq={eoData.seq.slice(-20)} rawDigits={eoData.rawDigits.slice(-20)} colorMap={eoColors}
-                  flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null} />
+                <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors}
+                  flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null}
+                  tickN={tickN} />
               </Card>
 
               <Card title="Rise / Fall" streak={rfData.streak} streakLabel={rfData.streakLabel}>
                 <Bar label="Rise" color="#22c55e" count={rfData.rise} total={rfData.total} />
                 <Bar label="Fall" color="#ef4444" count={rfData.fall} total={rfData.total} />
-                <Sequence seq={rfData.seq.slice(-20)} rawDigits={rfData.rawDigits.slice(-20)} colorMap={rfColors} />
+                <Sequence seq={rfData.seq.slice(-20)} colorMap={rfColors} />
               </Card>
             </div>
           )}
