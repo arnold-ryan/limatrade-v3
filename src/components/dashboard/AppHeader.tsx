@@ -169,7 +169,11 @@ export default function AppHeader() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ accountId: targetId }),
       })
-      if (res.ok) await fetchBalance()
+      if (res.ok) {
+        await fetchBalance()
+        // Notify other components (e.g. Manual Trader) to reconnect with the new account token
+        window.dispatchEvent(new CustomEvent('deriv-account-switch'))
+      }
     } finally {
       setSwitching(false)
     }

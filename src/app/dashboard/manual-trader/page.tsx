@@ -97,8 +97,8 @@ const MD_COLORS: Record<string, SeqColor> = {
   D: { bg: 'rgba(168,85,247,0.15)', border: '#a855f7', text: '#a855f7' },
 }
 const EO_COLORS: Record<string, SeqColor> = {
-  E: { bg: 'rgba(252,163,17,0.15)', border: '#FCA311', text: '#FCA311' },
-  O: { bg: 'rgba(249,115,22,0.15)', border: '#f97316', text: '#f97316' },
+  E: { bg: 'rgba(252,163,17,0.15)', border: '#FCA311',  text: '#FCA311'  },
+  O: { bg: 'rgba(99,102,241,0.15)', border: '#6366f1',  text: '#6366f1'  },
 }
 const RF_COLORS: Record<string, SeqColor> = {
   R: { bg: 'rgba(34,197,94,0.15)',  border: '#22c55e', text: '#22c55e' },
@@ -126,15 +126,18 @@ function Bar({ label, color, count, total }: {
 function Sequence({ seq, colorMap, rawDigits }: {
   seq: string[]; colorMap: Record<string, SeqColor>; rawDigits?: number[]
 }) {
+  // Show only last 15 — single row, no wrap (matches Analysis Tool style)
+  const recent = seq.slice(-15)
+  const recentRaw = rawDigits ? rawDigits.slice(-15) : undefined
   return (
-    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
-      {seq.map((s, i) => {
+    <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.75rem', overflow: 'hidden' }}>
+      {recent.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
-        const isLast = i === seq.length - 1
-        const display = rawDigits != null ? String(rawDigits[i] ?? s) : s
+        const isLast = i === recent.length - 1
+        const display = recentRaw != null ? String(recentRaw[i] ?? s) : s
         return (
           <div key={i} style={{
-            width: '26px', height: '26px', borderRadius: '6px',
+            width: '26px', height: '26px', borderRadius: '6px', flexShrink: 0,
             fontSize: '0.7rem', fontWeight: 700,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: isLast ? c.bg.replace('0.15', '0.28') : c.bg,
@@ -175,6 +178,7 @@ function TradeControls({
   duration, onDurationChange,
   durUnit, onDurUnitChange, showDurUnit,
   onBuyA, onBuyB,
+  showDigitPicker, selectedDigit, onDigitSelect, digitLabel,
 }: {
   labelA: string; labelB: string; colorA: string; colorB: string
   propA: Prop | null; propB: Prop | null
@@ -184,6 +188,8 @@ function TradeControls({
   duration: number; onDurationChange: (v: number) => void
   durUnit: string; onDurUnitChange: (v: string) => void; showDurUnit: boolean
   onBuyA: () => void; onBuyB: () => void
+  showDigitPicker?: boolean; selectedDigit?: number
+  onDigitSelect?: (d: number) => void; digitLabel?: string
 }) {
   const inp: React.CSSProperties = {
     background: '#0a0f1a', border: '1px solid rgba(255,255,255,0.1)',
@@ -230,6 +236,27 @@ function TradeControls({
           </div>
         </div>
       </div>
+
+      {/* Digit selector (for Over/Under barrier and Match/Differ target) */}
+      {showDigitPicker && selectedDigit !== undefined && onDigitSelect && (
+        <div style={{ marginBottom: '0.65rem' }}>
+          <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '5px' }}>
+            {digitLabel ?? 'Digit'} to Trade
+          </div>
+          <div style={{ display: 'flex', gap: '0.25rem' }}>
+            {[0,1,2,3,4,5,6,7,8,9].map(d => (
+              <button key={d} onClick={() => onDigitSelect(d)} style={{
+                flex: 1, height: '28px', borderRadius: '5px',
+                fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
+                border: `1.5px solid ${selectedDigit === d ? '#FCA311' : 'rgba(255,255,255,0.1)'}`,
+                background: selectedDigit === d ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.03)',
+                color: selectedDigit === d ? '#FCA311' : 'rgba(229,229,229,0.45)',
+                transition: 'all 0.12s',
+              }}>{d}</button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Proposal quotes preview */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem', marginBottom: '0.55rem' }}>
@@ -318,10 +345,11 @@ function PositionsPanel({
 
   return (
     <div style={{
-      position: 'fixed', top: 0, right: 0, bottom: 0,
+      position: 'fixed', top: '100px', right: 0, bottom: 0,
       width: open ? '300px' : '0',
       background: '#070f1e',
       borderLeft: open ? '1px solid rgba(255,255,255,0.08)' : 'none',
+      borderTop: '1px solid rgba(255,255,255,0.08)',
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
       transition: 'width 0.28s cubic-bezier(0.4,0,0.2,1)',
@@ -498,10 +526,21 @@ export default function ManualTraderPage() {
   /* ── UI ── */
   const [panelOpen, setPanelOpen] = useState(false)
 
+  /* ── Toast notifications ── */
+  interface Toast { id: number; type: 'success' | 'error'; msg: string }
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const toastIdRef = useRef(0)
+  const addToast = useCallback((t: Omit<Toast, 'id'>) => {
+    const id = ++toastIdRef.current
+    setToasts(prev => [...prev, { ...t, id }])
+    setTimeout(() => setToasts(prev => prev.filter(x => x.id !== id)), 3500)
+  }, [])
+
   /* ── Refs ── */
   const botWsRef         = useRef<WebSocket | null>(null)
   const pipSizeRef       = useRef(2)
   const reqIdRef         = useRef(500)
+  const buyReqToCtRef    = useRef<Map<number, string>>(new Map())
   const reconnectCount   = useRef(0)
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const intentionalClose = useRef(false)
@@ -652,9 +691,19 @@ export default function ManualTraderPage() {
           if (err.code && ['AuthorizationRequired','InvalidToken','InvalidAppID'].includes(err.code)) {
             intentionalClose.current = true; setWsError('Session expired — please log in again.'); return
           }
-          const ct = REQ_TO_CT[msg.req_id as number]
-          if (ct) setProposals(prev => ({ ...prev, [ct]: { id: '', ask_price: 0, payout: 0, error: err.message } }))
-          setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
+          const rid = msg.req_id as number
+          const buyCt = buyReqToCtRef.current.get(rid)
+          if (buyCt) {
+            // Error on a buy request
+            buyReqToCtRef.current.delete(rid)
+            setBuying(prev => ({ ...prev, [buyCt]: false }))
+            addToast({ type: 'error', msg: err.message })
+          } else {
+            // Error on a proposal subscription
+            const ct = REQ_TO_CT[rid]
+            if (ct) setProposals(prev => ({ ...prev, [ct]: { id: '', ask_price: 0, payout: 0, error: err.message } }))
+            setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
+          }
           return
         }
 
@@ -670,11 +719,15 @@ export default function ManualTraderPage() {
         }
 
         if (msg.msg_type === 'buy') {
-          // Clear the buying flag for whichever CT was in-flight
-          setBuying(prev => {
-            const ct = Object.keys(prev).find(k => prev[k])
-            return ct ? { ...prev, [ct]: false } : prev
-          })
+          const rid = msg.req_id as number
+          const ct = buyReqToCtRef.current.get(rid)
+          if (ct) {
+            buyReqToCtRef.current.delete(rid)
+            setBuying(prev => ({ ...prev, [ct]: false }))
+            addToast({ type: 'success', msg: `${CT_LABELS[ct] ?? ct} contract purchased!` })
+          } else {
+            setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
+          }
           // Fresh proposal IDs after buy
           setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) resubscribeAll(ws) }, 200)
         }
@@ -795,6 +848,20 @@ export default function ManualTraderPage() {
     }
   }, [fetchHistory, resubscribeAll])
 
+  /* ── Reconnect when user switches account via the header ── */
+  useEffect(() => {
+    const handler = () => {
+      // Force the auth WS to close + reconnect with the new account token
+      reconnectCount.current = 0
+      intentionalClose.current = false
+      setWsReady(false)
+      setProposals({})
+      botWsRef.current?.close()
+    }
+    window.addEventListener('deriv-account-switch', handler)
+    return () => window.removeEventListener('deriv-account-switch', handler)
+  }, [])
+
   /* ── Debounce resubscription on config changes ── */
   useEffect(() => {
     if (!botWsRef.current) return
@@ -808,7 +875,9 @@ export default function ManualTraderPage() {
     const ws = botWsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN || buying[ct]) return
     setBuying(prev => ({ ...prev, [ct]: true }))
-    ws.send(JSON.stringify({ buy: proposalId, price: parseFloat((askPrice * 1.02).toFixed(2)), req_id: ++reqIdRef.current }))
+    const rid = ++reqIdRef.current
+    buyReqToCtRef.current.set(rid, ct)
+    ws.send(JSON.stringify({ buy: proposalId, price: parseFloat((askPrice * 1.02).toFixed(2)), req_id: rid }))
   }, [buying])
 
   /* ── Sell handler ── */
@@ -1004,7 +1073,6 @@ export default function ManualTraderPage() {
 
         {/* OVER / UNDER */}
         <Card title="Over / Under" streakCount={ouData.streak} streakLabel={ouData.streakLabel}>
-          <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
           <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
           <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
           <Sequence seq={ouData.seq} colorMap={OU_COLORS} rawDigits={ouData.rawDigits} />
@@ -1018,13 +1086,13 @@ export default function ManualTraderPage() {
             durUnit="t" onDurUnitChange={() => {}} showDurUnit={false}
             onBuyA={() => { const pr = p['DIGITOVER'];  if (pr?.id) doBuy('DIGITOVER',  pr.id, pr.ask_price) }}
             onBuyB={() => { const pr = p['DIGITUNDER']; if (pr?.id) doBuy('DIGITUNDER', pr.id, pr.ask_price) }}
+            showDigitPicker selectedDigit={ouBarrier} onDigitSelect={setOuBarrier} digitLabel="Barrier"
           />
         </Card>
 
         {/* MATCH / DIFFER */}
         <div style={{ borderLeft: '1px solid rgba(255,255,255,0.07)' }}>
           <Card title="Match / Differ" streakCount={mdData.streak} streakLabel={mdData.streakLabel}>
-            <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
             <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
             <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
             <Sequence seq={mdData.seq} colorMap={MD_COLORS} rawDigits={mdData.rawDigits} />
@@ -1038,6 +1106,7 @@ export default function ManualTraderPage() {
               durUnit="t" onDurUnitChange={() => {}} showDurUnit={false}
               onBuyA={() => { const pr = p['DIGITMATCH']; if (pr?.id) doBuy('DIGITMATCH', pr.id, pr.ask_price) }}
               onBuyB={() => { const pr = p['DIGITDIFF'];  if (pr?.id) doBuy('DIGITDIFF',  pr.id, pr.ask_price) }}
+              showDigitPicker selectedDigit={mdDigit} onDigitSelect={setMdDigit} digitLabel="Digit"
             />
           </Card>
         </div>
@@ -1046,10 +1115,10 @@ export default function ManualTraderPage() {
         <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}>
           <Card title="Even / Odd" streakCount={eoData.streak} streakLabel={eoData.streakLabel}>
             <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
-            <Bar label="Odd"  color="#f97316" count={eoData.odd}  total={total} />
+            <Bar label="Odd"  color="#6366f1" count={eoData.odd}  total={total} />
             <Sequence seq={eoData.seq} colorMap={EO_COLORS} />
             <TradeControls
-              labelA="Even" labelB="Odd" colorA="#FCA311" colorB="#f97316"
+              labelA="Even" labelB="Odd" colorA="#FCA311" colorB="#6366f1"
               propA={p['DIGITEVEN'] ?? null} propB={p['DIGITODD'] ?? null}
               buyingA={!!buying['DIGITEVEN']} buyingB={!!buying['DIGITODD']}
               wsReady={wsReady} currency={currency}
@@ -1093,7 +1162,7 @@ export default function ManualTraderPage() {
       {/* Edge toggle when panel is closed */}
       {!panelOpen && (
         <button onClick={() => setPanelOpen(true)} style={{
-          position: 'fixed', right: 0, top: '50%', transform: 'translateY(-50%)',
+          position: 'fixed', right: 0, top: 'calc(50% + 50px)', transform: 'translateY(-50%)',
           background: '#070f1e', border: '1px solid rgba(255,255,255,0.1)',
           borderRight: 'none', borderRadius: '8px 0 0 8px',
           padding: '0.6rem 0.28rem', cursor: 'pointer', zIndex: 41,
@@ -1106,7 +1175,27 @@ export default function ManualTraderPage() {
         </button>
       )}
 
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }`}</style>
+      {/* ── Toast notifications ── */}
+      <div style={{ position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', gap: '8px', zIndex: 200, pointerEvents: 'none', alignItems: 'center' }}>
+        {toasts.map(t => (
+          <div key={t.id} style={{
+            padding: '0.55rem 1.1rem', borderRadius: '8px', fontSize: '0.8rem', fontWeight: 700,
+            background: t.type === 'success' ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)',
+            border: `1px solid ${t.type === 'success' ? '#22c55e' : '#ef4444'}`,
+            color: t.type === 'success' ? '#22c55e' : '#ef4444',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.6)',
+            whiteSpace: 'nowrap',
+            animation: 'toastIn 0.2s ease',
+          }}>
+            {t.type === 'success' ? '✓ ' : '✕ '}{t.msg}
+          </div>
+        ))}
+      </div>
+
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+        @keyframes toastIn { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+      `}</style>
     </div>
   )
 }
