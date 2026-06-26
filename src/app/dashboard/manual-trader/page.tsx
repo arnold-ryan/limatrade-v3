@@ -130,7 +130,7 @@ function Sequence({ seq, colorMap, rawDigits }: {
   const recent = seq.slice(-15)
   const recentRaw = rawDigits ? rawDigits.slice(-15) : undefined
   return (
-    <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.75rem', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.75rem', overflow: 'hidden', justifyContent: 'center' }}>
       {recent.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
         const isLast = i === recent.length - 1
@@ -203,7 +203,7 @@ function TradeControls({
   return (
     <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '0.8rem', paddingTop: '0.8rem' }}>
 
-      {/* Stake + Duration */}
+      {/* Stake + Digit (optional) + Duration — all in one row */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem' }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
@@ -213,6 +213,25 @@ function TradeControls({
             onChange={e => onStakeChange(e.target.value)}
             style={{ ...inp, width: '100%' }} />
         </div>
+
+        {/* Inline digit dropdown — only for OU / MD */}
+        {showDigitPicker && selectedDigit !== undefined && onDigitSelect && (
+          <div style={{ flex: '0 0 68px' }}>
+            <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
+              {digitLabel ?? 'Digit'}
+            </div>
+            <select
+              value={selectedDigit}
+              onChange={e => onDigitSelect(parseInt(e.target.value))}
+              style={{ ...inp, width: '100%', cursor: 'pointer' }}
+            >
+              {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
             Duration
@@ -236,27 +255,6 @@ function TradeControls({
           </div>
         </div>
       </div>
-
-      {/* Digit selector (for Over/Under barrier and Match/Differ target) */}
-      {showDigitPicker && selectedDigit !== undefined && onDigitSelect && (
-        <div style={{ marginBottom: '0.65rem' }}>
-          <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '5px' }}>
-            {digitLabel ?? 'Digit'} to Trade
-          </div>
-          <div style={{ display: 'flex', gap: '0.25rem' }}>
-            {[0,1,2,3,4,5,6,7,8,9].map(d => (
-              <button key={d} onClick={() => onDigitSelect(d)} style={{
-                flex: 1, height: '28px', borderRadius: '5px',
-                fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-                border: `1.5px solid ${selectedDigit === d ? '#FCA311' : 'rgba(255,255,255,0.1)'}`,
-                background: selectedDigit === d ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.03)',
-                color: selectedDigit === d ? '#FCA311' : 'rgba(229,229,229,0.45)',
-                transition: 'all 0.12s',
-              }}>{d}</button>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Proposal quotes preview */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem', marginBottom: '0.55rem' }}>
@@ -524,7 +522,7 @@ export default function ManualTraderPage() {
   const [histLoading,   setHistLoading]   = useState(false)
 
   /* ── UI ── */
-  const [panelOpen, setPanelOpen] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(true)
 
   /* ── Toast notifications ── */
   interface Toast { id: number; type: 'success' | 'error'; msg: string }
@@ -618,7 +616,7 @@ export default function ManualTraderPage() {
   const resubscribeAll = useCallback((ws: WebSocket) => {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 9994 }))
-    setProposals({})
+    // Do NOT clear proposals here — that flashes all cards. New values arrive quickly.
 
     const sym  = symbolRef.current
     const curr = currencyRef.current
@@ -724,11 +722,13 @@ export default function ManualTraderPage() {
           if (ct) {
             buyReqToCtRef.current.delete(rid)
             setBuying(prev => ({ ...prev, [ct]: false }))
+            // Clear only this CT's proposal so only this card briefly shows "—"
+            setProposals(prev => ({ ...prev, [ct]: null }))
             addToast({ type: 'success', msg: `${CT_LABELS[ct] ?? ct} contract purchased!` })
           } else {
             setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
           }
-          // Fresh proposal IDs after buy
+          // Refresh proposal for the bought CT only
           setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) resubscribeAll(ws) }, 200)
         }
 
@@ -1073,6 +1073,7 @@ export default function ManualTraderPage() {
 
         {/* OVER / UNDER */}
         <Card title="Over / Under" streakCount={ouData.streak} streakLabel={ouData.streakLabel}>
+          <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
           <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
           <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
           <Sequence seq={ouData.seq} colorMap={OU_COLORS} rawDigits={ouData.rawDigits} />
@@ -1093,6 +1094,7 @@ export default function ManualTraderPage() {
         {/* MATCH / DIFFER */}
         <div style={{ borderLeft: '1px solid rgba(255,255,255,0.07)' }}>
           <Card title="Match / Differ" streakCount={mdData.streak} streakLabel={mdData.streakLabel}>
+            <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
             <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
             <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
             <Sequence seq={mdData.seq} colorMap={MD_COLORS} rawDigits={mdData.rawDigits} />
@@ -1152,6 +1154,17 @@ export default function ManualTraderPage() {
         </div>
       </div>
 
+      {/* ── Backdrop — click anywhere outside panel to close ── */}
+      {panelOpen && (
+        <div
+          onClick={() => setPanelOpen(false)}
+          style={{
+            position: 'fixed', top: '100px', left: 0, right: '300px', bottom: 0,
+            zIndex: 38, cursor: 'pointer',
+          }}
+        />
+      )}
+
       {/* ── Positions Panel ── */}
       <PositionsPanel
         open={panelOpen} onClose={() => setPanelOpen(false)}
@@ -1159,21 +1172,21 @@ export default function ManualTraderPage() {
         currency={currency} onSell={handleSell} histLoading={histLoading}
       />
 
-      {/* Edge toggle when panel is closed */}
-      {!panelOpen && (
-        <button onClick={() => setPanelOpen(true)} style={{
-          position: 'fixed', right: 0, top: 'calc(50% + 50px)', transform: 'translateY(-50%)',
-          background: '#070f1e', border: '1px solid rgba(255,255,255,0.1)',
-          borderRight: 'none', borderRadius: '8px 0 0 8px',
-          padding: '0.6rem 0.28rem', cursor: 'pointer', zIndex: 41,
-          color: openCount > 0 ? '#FCA311' : 'rgba(229,229,229,0.4)',
-          fontSize: '0.62rem', fontWeight: 700,
-          writingMode: 'vertical-rl', letterSpacing: '0.04em',
-          borderColor: openCount > 0 ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.1)',
-        }}>
-          {openCount > 0 ? `${openCount} Open` : '«'}
-        </button>
-      )}
+      {/* Edge tab — opens panel when closed, closes when open */}
+      <button onClick={() => setPanelOpen(v => !v)} style={{
+        position: 'fixed', right: panelOpen ? '300px' : '0',
+        top: 'calc(50% + 50px)', transform: 'translateY(-50%)',
+        background: '#070f1e',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRight: 'none', borderRadius: '8px 0 0 8px',
+        padding: '0.65rem 0.32rem', cursor: 'pointer', zIndex: 42,
+        color: panelOpen ? '#FCA311' : openCount > 0 ? '#FCA311' : 'rgba(229,229,229,0.5)',
+        fontSize: '0.9rem', fontWeight: 700, lineHeight: 1,
+        transition: 'right 0.28s cubic-bezier(0.4,0,0.2,1)',
+        borderColor: openCount > 0 || panelOpen ? 'rgba(252,163,17,0.35)' : 'rgba(255,255,255,0.1)',
+      }}>
+        {panelOpen ? '›' : openCount > 0 ? `‹${openCount}` : '‹'}
+      </button>
 
       {/* ── Toast notifications ── */}
       <div style={{ position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', gap: '8px', zIndex: 200, pointerEvents: 'none', alignItems: 'center' }}>
