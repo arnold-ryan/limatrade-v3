@@ -120,9 +120,10 @@ function Bar({ label, color, count, total }: {
 }
 
 interface SeqColor { bg: string; border: string; text: string }
-function Sequence({ seq, colorMap, flash }: {
+function Sequence({ seq, colorMap, rawDigits, flash }: {
   seq: string[]
   colorMap: Record<string, SeqColor>
+  rawDigits?: number[]    // actual last digit at each position — displayed instead of the label
   flash?: { won: boolean } | null
 }) {
   return (
@@ -132,6 +133,7 @@ function Sequence({ seq, colorMap, flash }: {
         const isLast = i === seq.length - 1
         const isFlashing = isLast && flash != null
         const flashWon   = isFlashing && flash!.won
+        const display    = rawDigits != null ? String(rawDigits[i] ?? s) : s
         return (
           <div key={i} style={{
             width: '26px', height: '26px', borderRadius: '6px',
@@ -154,7 +156,7 @@ function Sequence({ seq, colorMap, flash }: {
             position: 'relative',
             zIndex: isFlashing ? 2 : undefined,
           }}>
-            {s}
+            {display}
           </div>
         )
       })}
@@ -232,7 +234,7 @@ interface TxEntry {
   won: boolean
   symbol: string
   entrySpot?: number   // live price at moment of trade entry
-  exitSpot?:  number   // live price approximated at sell time
+  exitSpot?:  number   // real settlement tick from proposal_open_contract (set after sell)
   longcode?:  string   // human-readable contract description from Deriv
   pending?:   boolean  // true while contract is still in-flight (buy sent, sell not yet received)
 }
@@ -1476,8 +1478,8 @@ export default function AnalysisPage() {
 
             pendingBuysRef.current.delete(tx.contract_id)
             const { buyPrice, entrySpot, longcode, potentialPayout } = pending
-            // Approximate exit spot from the live tick stream at sell time
-            const exitSpot = livePriceRef.current ?? undefined
+            // Exit spot is NOT set here — proposal_open_contract will deliver the real
+            // exit_spot once the contract settles, preventing a confusing double-update.
             const sellAmount = Math.max(0, tx.amount)
             const won = sellAmount > 0
 
@@ -1496,12 +1498,14 @@ export default function AnalysisPage() {
               }
             })
 
-            // Update the pending entry with the actual result (reveals the blurred P/L)
+            // Update the pending entry — reveal P/L, mark not pending.
+            // exitSpot intentionally omitted here; proposal_open_contract will
+            // deliver the real value once and set it, avoiding a confusing jump.
             setTxLog(prev => {
               const idx = prev.findIndex(t => t.id === tx.contract_id && t.pending)
               if (idx >= 0) {
                 const next = [...prev]
-                next[idx] = { ...next[idx], payout: sellAmount, won, exitSpot, pending: false }
+                next[idx] = { ...next[idx], payout: sellAmount, won, pending: false }
                 return next
               }
               // Fallback: add new entry (in case pending was missed)
@@ -1515,7 +1519,7 @@ export default function AnalysisPage() {
                 won,
                 symbol:          symbolRef.current,
                 entrySpot:       entrySpot ?? undefined,
-                exitSpot,
+                exitSpot:        undefined,
                 longcode,
               }, ...prev].slice(0, 100)
             })
@@ -1740,29 +1744,32 @@ export default function AnalysisPage() {
 
   /* Over / Under */
   const ouData = useMemo(() => {
+    const slice50 = digits.slice(-50)
     const over  = digits.filter(d => d > ouBarrier).length
     const under = digits.filter(d => d <= ouBarrier).length
-    const seq   = digits.slice(-50).map(d => d > ouBarrier ? 'O' : 'U')
+    const seq   = slice50.map(d => d > ouBarrier ? 'O' : 'U')
     const { count, val } = trailingStreak(seq)
-    return { over, under, seq, streak: count, streakLabel: val === 'O' ? 'Over' : 'Under' }
+    return { over, under, seq, rawDigits: slice50, streak: count, streakLabel: val === 'O' ? 'Over' : 'Under' }
   }, [digits, ouBarrier])
 
   /* Match / Differ */
   const mdData = useMemo(() => {
+    const slice50 = digits.slice(-50)
     const match  = digits.filter(d => d === mdDigit).length
     const differ = digits.filter(d => d !== mdDigit).length
-    const seq    = digits.slice(-50).map(d => d === mdDigit ? 'M' : 'D')
+    const seq    = slice50.map(d => d === mdDigit ? 'M' : 'D')
     const { count, val } = trailingStreak(seq)
-    return { match, differ, seq, streak: count, streakLabel: val === 'M' ? 'Match' : 'Differ' }
+    return { match, differ, seq, rawDigits: slice50, streak: count, streakLabel: val === 'M' ? 'Match' : 'Differ' }
   }, [digits, mdDigit])
 
   /* Even / Odd */
   const eoData = useMemo(() => {
+    const slice50 = digits.slice(-50)
     const even = digits.filter(d => d % 2 === 0).length
     const odd  = digits.filter(d => d % 2 !== 0).length
-    const seq  = digits.slice(-50).map(d => d % 2 === 0 ? 'E' : 'O')
+    const seq  = slice50.map(d => d % 2 === 0 ? 'E' : 'O')
     const { count, val } = trailingStreak(seq)
-    return { even, odd, seq, streak: count, streakLabel: val === 'E' ? 'Even' : 'Odd' }
+    return { even, odd, seq, rawDigits: slice50, streak: count, streakLabel: val === 'E' ? 'Even' : 'Odd' }
   }, [digits])
 
   /* Rise / Fall */
@@ -1770,13 +1777,20 @@ export default function AnalysisPage() {
     const slice = prices.slice(-tickCount)
     let rise = 0, fall = 0
     const seq: string[] = []
+    const rawDigits: number[] = []
     for (let i = 1; i < slice.length; i++) {
-      if (slice[i] > slice[i - 1])      { rise++; seq.push('R') }
-      else if (slice[i] < slice[i - 1]) { fall++; seq.push('F') }
+      if (slice[i] > slice[i - 1]) {
+        rise++; seq.push('R')
+        rawDigits.push(getLastDigit(slice[i], pipSizeRef.current))
+      } else if (slice[i] < slice[i - 1]) {
+        fall++; seq.push('F')
+        rawDigits.push(getLastDigit(slice[i], pipSizeRef.current))
+      }
     }
-    const recent = seq.slice(-50)
+    const recent    = seq.slice(-50)
+    const recentRaw = rawDigits.slice(-50)
     const { count, val } = trailingStreak(recent)
-    return { rise, fall, seq: recent, streak: count, streakLabel: val === 'R' ? 'Rise' : 'Fall', total: rise + fall }
+    return { rise, fall, seq: recent, rawDigits: recentRaw, streak: count, streakLabel: val === 'R' ? 'Rise' : 'Fall', total: rise + fall }
   }, [prices, tickCount])
 
   /* Circle styling */
@@ -1947,7 +1961,7 @@ export default function AnalysisPage() {
                 <DigitPicker selected={ouBarrier} onSelect={setOuBarrier} />
                 <Bar label="Over"  color="#22c55e" count={ouData.over}  total={total} />
                 <Bar label="Under" color="#3b82f6" count={ouData.under} total={total} />
-                <Sequence seq={ouData.seq.slice(-20)} colorMap={ouColors}
+                <Sequence seq={ouData.seq.slice(-20)} rawDigits={ouData.rawDigits.slice(-20)} colorMap={ouColors}
                   flash={(contractType === 'DIGITOVER' || contractType === 'DIGITUNDER') ? tradeFlash : null} />
               </Card>
 
@@ -1955,21 +1969,21 @@ export default function AnalysisPage() {
                 <DigitPicker selected={mdDigit} onSelect={setMdDigit} />
                 <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
                 <Bar label="Differ" color="#a855f7" count={mdData.differ} total={total} />
-                <Sequence seq={mdData.seq.slice(-20)} colorMap={mdColors}
+                <Sequence seq={mdData.seq.slice(-20)} rawDigits={mdData.rawDigits.slice(-20)} colorMap={mdColors}
                   flash={(contractType === 'DIGITMATCH' || contractType === 'DIGITDIFF') ? tradeFlash : null} />
               </Card>
 
               <Card title="Even / Odd" streak={eoData.streak} streakLabel={eoData.streakLabel}>
                 <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
                 <Bar label="Odd"  color="#ef4444" count={eoData.odd}  total={total} />
-                <Sequence seq={eoData.seq.slice(-20)} colorMap={eoColors}
+                <Sequence seq={eoData.seq.slice(-20)} rawDigits={eoData.rawDigits.slice(-20)} colorMap={eoColors}
                   flash={(contractType === 'DIGITEVEN' || contractType === 'DIGITODD') ? tradeFlash : null} />
               </Card>
 
               <Card title="Rise / Fall" streak={rfData.streak} streakLabel={rfData.streakLabel}>
                 <Bar label="Rise" color="#22c55e" count={rfData.rise} total={rfData.total} />
                 <Bar label="Fall" color="#ef4444" count={rfData.fall} total={rfData.total} />
-                <Sequence seq={rfData.seq.slice(-20)} colorMap={rfColors} />
+                <Sequence seq={rfData.seq.slice(-20)} rawDigits={rfData.rawDigits.slice(-20)} colorMap={rfColors} />
               </Card>
             </div>
           )}
