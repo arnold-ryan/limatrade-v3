@@ -83,6 +83,8 @@ interface TxRow {
   stake:        number
   payout:       number
   won:          boolean
+  settled:      boolean        // false while contract is still open
+  currentPnl?:  number        // live P/L from proposal_open_contract (undefined = no data yet)
 }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
@@ -402,6 +404,7 @@ export default function SpeedbotPage() {
   const intentionalClose  = useRef(false)
   const connectedAccountRef = useRef<string | null>(null)
   const inTradeRef        = useRef(false)   // prevent concurrent trades
+  const pocSubsRef        = useRef<Map<number, string>>(new Map()) // contract_id → subscription_id
   /** Tracks current effective trade type (may zigzag or alternate) */
   const effectiveTypeRef  = useRef('DIGITEVEN')
   /** Accumulated loss stake for martingale recovery calculation */
@@ -560,6 +563,7 @@ export default function SpeedbotPage() {
     let ws: WebSocket | null = null
     let ping: ReturnType<typeof setInterval> | null = null
     intentionalClose.current = false
+    const MAX_RECONNECT = 5
 
     function backoff(n: number) { return Math.min(2000 * 2 ** n, 30_000) }
 
@@ -682,6 +686,43 @@ export default function SpeedbotPage() {
             runs: statsRef.current.runs + 1,
           }
           setStats(statsRef.current)
+
+          // Add pending entry to tx log immediately (before settlement)
+          setTxLog(prev => [{
+            id:           buy.contract_id,
+            time:         Date.now(),
+            contractType: effectiveTypeRef.current,
+            stake:        buy.buy_price,
+            payout:       0,
+            won:          false,
+            settled:      false,
+            currentPnl:   undefined,
+          }, ...prev].slice(0, 60))
+
+          // Subscribe to real-time P/L for this contract
+          ws!.send(JSON.stringify({
+            proposal_open_contract: 1,
+            subscribe:              1,
+            contract_id:            buy.contract_id,
+            req_id:                 400,
+          }))
+        }
+
+        /* ── Live contract P/L (proposal_open_contract subscription) ── */
+        if (msg.msg_type === 'proposal_open_contract') {
+          const poc = msg.proposal_open_contract as {
+            contract_id: number
+            profit:      number
+            subscription?: { id: string }
+          }
+          if (poc.subscription?.id) {
+            pocSubsRef.current.set(poc.contract_id, poc.subscription.id)
+          }
+          setTxLog(prev => prev.map(tx =>
+            tx.id === poc.contract_id && !tx.settled
+              ? { ...tx, currentPnl: poc.profit }
+              : tx
+          ))
         }
 
         /* ── Transaction stream ── */
@@ -695,6 +736,13 @@ export default function SpeedbotPage() {
             if (pending === undefined) return
             pendingBuysRef.current.delete(tx.contract_id)
             inTradeRef.current = false
+
+            // Forget the proposal_open_contract subscription for this contract
+            const pocSubId = pocSubsRef.current.get(tx.contract_id)
+            if (pocSubId && ws?.readyState === WebSocket.OPEN) {
+              try { ws.send(JSON.stringify({ forget: pocSubId, req_id: 9996 })) } catch { /**/ }
+            }
+            pocSubsRef.current.delete(tx.contract_id)
 
             const { buyPrice } = pending
             const payout = Math.max(0, tx.amount)
@@ -728,15 +776,26 @@ export default function SpeedbotPage() {
               setStopReason(stopMsg)
             }
 
-            /* ── Append to tx log ── */
-            setTxLog(prev => [{
-              id:           tx.contract_id!,
-              time:         Date.now(),
-              contractType: effectiveTypeRef.current,
-              stake:        buyPrice,
-              payout,
-              won,
-            }, ...prev].slice(0, 60))
+            /* ── Settle the pending tx log entry ── */
+            setTxLog(prev => {
+              const idx = prev.findIndex(t => t.id === tx.contract_id)
+              if (idx !== -1) {
+                // Update existing pending entry
+                const updated = [...prev]
+                updated[idx] = { ...updated[idx], payout, won, settled: true, currentPnl: undefined }
+                return updated
+              }
+              // Fallback — shouldn't happen but keep list safe
+              return [{
+                id:           tx.contract_id!,
+                time:         Date.now(),
+                contractType: effectiveTypeRef.current,
+                stake:        buyPrice,
+                payout,
+                won,
+                settled:      true,
+              }, ...prev].slice(0, 60)
+            })
 
             /* ── Strategy post-trade logic ── */
             if (strategyRef.current === 'martingale') {
@@ -792,6 +851,11 @@ export default function SpeedbotPage() {
         if (ping) { clearInterval(ping); ping = null }
         if (runningRef.current) { setRunning(false); runningRef.current = false }
         if (!intentionalClose.current) {
+          if (reconnectCount.current >= MAX_RECONNECT) {
+            reconnectCount.current = 0
+            setBotError('Connection lost after 5 attempts — please refresh the page.')
+            return
+          }
           const delay = backoff(reconnectCount.current++)
           setBotError(`Disconnected — reconnecting in ${Math.round(delay / 1000)}s…`)
           scheduleReconnect(delay)
@@ -813,8 +877,12 @@ export default function SpeedbotPage() {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (ping) clearInterval(ping)
       if (ws?.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ forget_all: 'transaction', req_id: 9998 })) } catch { /**/ }
+        try {
+          ws.send(JSON.stringify({ forget_all: 'transaction',            req_id: 9998 }))
+          ws.send(JSON.stringify({ forget_all: 'proposal_open_contract', req_id: 9997 }))
+        } catch { /**/ }
       }
+      pocSubsRef.current.clear()
       ws?.close()
       botWsRef.current = null
     }
@@ -1510,7 +1578,6 @@ export default function SpeedbotPage() {
             )}
           </div>
 
-          </div>{/* end stats card */}
           </div>{/* end middle row grid */}
 
         </div>{/* end middle panel */}
@@ -1553,7 +1620,16 @@ export default function SpeedbotPage() {
                   ))}
                 </div>
                 {txLog.map(tx => {
-                  const pl = tx.payout - tx.stake
+                  // settled: use final payout; pending: use live currentPnl if available
+                  const pl: number | null = tx.settled
+                    ? tx.payout - tx.stake
+                    : tx.currentPnl ?? null
+                  const noData = !tx.settled && pl === null
+                  const dotBg  = tx.settled
+                    ? (tx.won ? '#22c55e' : '#ef4444')
+                    : pl != null
+                      ? (pl >= 0 ? 'rgba(34,197,94,0.7)' : 'rgba(239,68,68,0.7)')
+                      : 'rgba(251,191,36,0.8)'   // amber = waiting for first POC tick
                   return (
                     <div key={tx.id} style={{
                       display: 'grid', gridTemplateColumns: '1fr 60px 55px 65px',
@@ -1564,7 +1640,7 @@ export default function SpeedbotPage() {
                         {new Date(tx.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </span>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                        <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: tx.won ? '#22c55e' : '#ef4444' }} />
+                        <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: dotBg }} />
                         <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)' }}>
                           {TRADE_TYPES.find(t => t.value === tx.contractType)?.label ?? tx.contractType}
                         </span>
@@ -1573,10 +1649,15 @@ export default function SpeedbotPage() {
                         {fmt2(tx.stake)}
                       </span>
                       <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
-                        color: tx.pending ? 'rgba(229,229,229,0.25)' : pl >= 0 ? '#22c55e' : '#ef4444',
-                        filter: tx.pending ? 'blur(4px)' : 'none',
+                        color: noData
+                          ? 'rgba(229,229,229,0.25)'
+                          : pl != null && pl >= 0 ? '#22c55e' : '#ef4444',
+                        filter: noData ? 'blur(3px)' : 'none',
                       }}>
-                        {tx.pending ? '···' : `${pl >= 0 ? '+' : ''}${fmt2(pl)}`}
+                        {noData
+                          ? '···'
+                          : `${pl != null && pl >= 0 ? '+' : ''}${fmt2(pl ?? 0)}`
+                        }
                       </span>
                     </div>
                   )
