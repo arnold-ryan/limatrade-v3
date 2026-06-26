@@ -330,17 +330,18 @@ function Card({ title, streakCount, streakLabel, children }: {
 /* ─── Positions Panel (slides in from right) ─────────────────────────────── */
 function PositionsPanel({
   open, onClose, openPositions, history, currency,
-  onSell, histLoading, onClearHistory,
+  onSell, onClearHistory,
 }: {
   open: boolean; onClose: () => void
   openPositions: Map<number, OpenPos>; history: HistRow[]
   currency: string
-  onSell: (id: number) => void; histLoading: boolean
+  onSell: (id: number) => void
   onClearHistory: () => void
 }) {
   const [tab, setTab] = useState<'positions' | 'history'>('positions')
-  const openList = Array.from(openPositions.values())
-  const totalPL  = openList.reduce((s, p) => s + p.profit, 0)
+  const openList  = Array.from(openPositions.values())
+  const totalPL   = openList.reduce((s, p) => s + p.profit, 0)
+  const historyPL = history.reduce((s, r) => s + (r.sell_price - r.buy_price), 0)
 
   return (
     <div style={{
@@ -387,7 +388,7 @@ function PositionsPanel({
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
 
           {tab === 'positions' && (
             openList.length === 0 ? (
@@ -442,43 +443,66 @@ function PositionsPanel({
           )}
 
           {tab === 'history' && (
-            histLoading ? (
-              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem' }}>Loading…</div>
-            ) : history.length === 0 ? (
-              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem' }}>No trade history yet.</div>
+            history.length === 0 ? (
+              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem', flex: 1 }}>No trades yet.<br /><span style={{ fontSize: '0.65rem', opacity: 0.6 }}>Trades placed here will appear after settlement.</span></div>
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: '#070f1e', zIndex: 1 }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', flex: 1 }}>
-                    {['Time','Type','Stake','P/L'].map(h => (
-                      <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
-                    ))}
-                  </div>
-                  <button onClick={onClearHistory} style={{
-                    marginLeft: '0.5rem', padding: '0.18rem 0.5rem', borderRadius: '5px', flexShrink: 0,
-                    border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.07)',
-                    color: '#ef4444', fontSize: '0.6rem', fontWeight: 700, cursor: 'pointer',
-                  }}>Reset</button>
-                </div>
-                {history.map(row => {
-                  const pl  = row.sell_price - row.buy_price
-                  const won = pl > 0
-                  return (
-                    <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', width: '100%' }}>
-                      <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
-                        {row.purchase_time ? fmtTime(row.purchase_time) : '—'}
-                      </span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                        <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: won ? '#22c55e' : '#ef4444', flexShrink: 0 }} />
-                        <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.5)' }}>{CT_LABELS[row.contract_type] ?? row.contract_type}</span>
-                      </div>
-                      <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)', fontVariantNumeric: 'tabular-nums' }}>{fmt2(row.buy_price)}</span>
-                      <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: won ? '#22c55e' : '#ef4444' }}>
-                        {won ? '+' : ''}{fmt2(pl)}
-                      </span>
+                {/* Scrollable list */}
+                <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: '#070f1e', zIndex: 1 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', flex: 1 }}>
+                      {['Time','Type','Stake','P/L'].map(h => (
+                        <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
+                      ))}
                     </div>
-                  )
-                })}
+                    <button onClick={onClearHistory} style={{
+                      marginLeft: '0.5rem', padding: '0.18rem 0.5rem', borderRadius: '5px', flexShrink: 0,
+                      border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.07)',
+                      color: '#ef4444', fontSize: '0.6rem', fontWeight: 700, cursor: 'pointer',
+                    }}>Reset</button>
+                  </div>
+                  {history.map(row => {
+                    const pl  = row.sell_price - row.buy_price
+                    const won = pl > 0
+                    return (
+                      <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', width: '100%' }}>
+                        <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
+                          {row.purchase_time ? fmtTime(row.purchase_time) : '—'}
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: won ? '#22c55e' : '#ef4444', flexShrink: 0 }} />
+                          <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.5)' }}>{CT_LABELS[row.contract_type] ?? row.contract_type}</span>
+                        </div>
+                        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)', fontVariantNumeric: 'tabular-nums' }}>{fmt2(row.buy_price)}</span>
+                        <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: won ? '#22c55e' : '#ef4444' }}>
+                          {won ? '+' : ''}{fmt2(pl)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+                {/* P/L footer */}
+                <div style={{
+                  flexShrink: 0, padding: '0.75rem 1rem',
+                  borderTop: '1px solid rgba(255,255,255,0.08)',
+                  background: '#070f1e',
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>
+                      Total P/L ({history.length} trades)
+                    </div>
+                    <div style={{ fontSize: '1rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: historyPL >= 0 ? '#22c55e' : '#ef4444' }}>
+                      {historyPL >= 0 ? '+' : ''}{fmt2(historyPL)} {currency}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Win Rate</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'rgba(229,229,229,0.75)' }}>
+                      {history.length > 0 ? ((history.filter(r => r.sell_price > r.buy_price).length / history.length) * 100).toFixed(0) : '0'}%
+                    </div>
+                  </div>
+                </div>
               </>
             )
           )}
@@ -532,7 +556,6 @@ export default function ManualTraderPage() {
   /* ── Portfolio ── */
   const [openPositions, setOpenPositions] = useState<Map<number, OpenPos>>(new Map())
   const [history,       setHistory]       = useState<HistRow[]>([])
-  const [histLoading,   setHistLoading]   = useState(false)
 
   /* ── UI ── */
   const [panelOpen, setPanelOpen] = useState(true)
@@ -548,11 +571,12 @@ export default function ManualTraderPage() {
   }, [])
 
   /* ── Refs ── */
-  const botWsRef         = useRef<WebSocket | null>(null)
-  const pipSizeRef       = useRef(2)
-  const reqIdRef         = useRef(500)
-  const buyReqToCtRef    = useRef<Map<number, string>>(new Map())
-  const reconnectCount   = useRef(0)
+  const botWsRef              = useRef<WebSocket | null>(null)
+  const pipSizeRef            = useRef(2)
+  const reqIdRef              = useRef(500)
+  const buyReqToCtRef         = useRef<Map<number, string>>(new Map())
+  const manualTraderBoughtIds = useRef<Set<number>>(new Set())
+  const reconnectCount        = useRef(0)
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const intentionalClose = useRef(false)
 
@@ -645,13 +669,6 @@ export default function ManualTraderPage() {
     ws.send(JSON.stringify({ ...base(stakeRFRef.current), contract_type: 'PUT',  duration: durRFRef.current, duration_unit: durUnitRFRef.current, req_id: 41 }))
   }, [])
 
-  /* ── Fetch profit table ── */
-  const fetchHistory = useCallback((ws: WebSocket) => {
-    if (ws.readyState !== WebSocket.OPEN) return
-    setHistLoading(true)
-    ws.send(JSON.stringify({ profit_table: 1, description: 1, limit: 30, sort: 'DESC', req_id: 500 }))
-  }, [])
-
   /* ── Auth WS ── */
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -685,10 +702,8 @@ export default function ManualTraderPage() {
       ws.onopen = () => {
         reconnectCount.current = 0; setWsError(null); setWsReady(true)
         ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
         ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
         ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
-        fetchHistory(ws!)
         resubscribeAll(ws!)
         ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 30_000)
       }
@@ -730,6 +745,7 @@ export default function ManualTraderPage() {
         }
 
         if (msg.msg_type === 'buy') {
+          const buyData = (msg as { buy: { contract_id: number } }).buy
           const rid = msg.req_id as number
           const ct = buyReqToCtRef.current.get(rid)
           if (ct) {
@@ -738,6 +754,8 @@ export default function ManualTraderPage() {
             // Clear only this CT's proposal so only this card briefly shows "—"
             setProposals(prev => ({ ...prev, [ct]: null }))
             addToast({ type: 'success', msg: `${CT_LABELS[ct] ?? ct} contract purchased!` })
+            // Mark this contract as placed from Manual Trader — history tracks only these
+            if (buyData?.contract_id) manualTraderBoughtIds.current.add(buyData.contract_id)
           } else {
             setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
           }
@@ -767,7 +785,7 @@ export default function ManualTraderPage() {
         if (msg.msg_type === 'proposal_open_contract') {
           const poc = (msg as { proposal_open_contract: {
             contract_id: number; contract_type: string; underlying_symbol: string
-            buy_price: string; profit: string; status: string
+            buy_price: string; sell_price?: string; profit: string; status: string
             is_sold: number; is_valid_to_sell: number; is_settleable?: number
             currency: string; purchase_time: number; longcode: string
           }}).proposal_open_contract
@@ -790,7 +808,19 @@ export default function ManualTraderPage() {
             })
             setTimeout(() => {
               setOpenPositions(prev => { const n = new Map(prev); n.delete(poc.contract_id); return n })
-              if (ws?.readyState === WebSocket.OPEN) fetchHistory(ws)
+              // Only add to history if this contract was placed from the Manual Trader
+              if (manualTraderBoughtIds.current.has(poc.contract_id)) {
+                manualTraderBoughtIds.current.delete(poc.contract_id)
+                const bp = parseFloat(poc.buy_price) || 0
+                const sp = poc.sell_price != null ? parseFloat(poc.sell_price) : bp + (parseFloat(poc.profit) || 0)
+                setHistory(prev => [{
+                  contract_id: poc.contract_id,
+                  contract_type: poc.contract_type,
+                  buy_price: bp,
+                  sell_price: sp,
+                  purchase_time: poc.purchase_time,
+                }, ...prev].slice(0, 500))
+              }
             }, 2500)
           } else {
             setOpenPositions(prev => {
@@ -807,23 +837,6 @@ export default function ManualTraderPage() {
           }
         }
 
-        if (msg.msg_type === 'transaction') {
-          const tx = (msg as { transaction: { action: string } }).transaction
-          if (tx.action === 'sell') setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) fetchHistory(ws) }, 1500)
-        }
-
-        if (msg.msg_type === 'profit_table') {
-          setHistLoading(false)
-          type PtRow = { contract_id: number; contract_type?: string; buy_price?: number; sell_price?: number; purchase_time?: number }
-          const pt = (msg as { profit_table: { transactions?: PtRow[] } }).profit_table
-          if (pt.transactions) {
-            setHistory(pt.transactions.map(t => ({
-              contract_id: t.contract_id, contract_type: t.contract_type ?? '',
-              buy_price: t.buy_price ?? 0, sell_price: t.sell_price ?? 0,
-              purchase_time: t.purchase_time ?? 0,
-            })))
-          }
-        }
       }
 
       ws.onerror = () => {}
@@ -854,12 +867,11 @@ export default function ManualTraderPage() {
         try {
           ws.send(JSON.stringify({ forget_all: 'proposal',               req_id: 9993 }))
           ws.send(JSON.stringify({ forget_all: 'proposal_open_contract', req_id: 9992 }))
-          ws.send(JSON.stringify({ forget_all: 'transaction',            req_id: 9991 }))
         } catch { /**/ }
       }
       ws?.close(); botWsRef.current = null
     }
-  }, [fetchHistory, resubscribeAll])
+  }, [resubscribeAll])
 
   /* ── Reconnect when user switches account via the header ── */
   useEffect(() => {
@@ -1171,7 +1183,7 @@ export default function ManualTraderPage() {
       <PositionsPanel
         open={panelOpen} onClose={() => setPanelOpen(false)}
         openPositions={openPositions} history={history}
-        currency={currency} onSell={handleSell} histLoading={histLoading}
+        currency={currency} onSell={handleSell}
         onClearHistory={() => setHistory([])}
       />
 
