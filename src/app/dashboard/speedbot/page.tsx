@@ -178,6 +178,10 @@ export default function SpeedbotPage() {
   const effectiveTypeRef  = useRef('DIGITEVEN')
   /** Accumulated loss stake for martingale recovery calculation */
   const accumLossRef      = useRef(0)
+  /** Mirrors stats state synchronously — needed so checkStops runs outside setStats */
+  const statsRef          = useRef<SpeedStats>({
+    runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0,
+  })
 
   /* ── Keep refs in sync with state ── */
   useEffect(() => { runningRef.current     = running     }, [running])
@@ -252,31 +256,23 @@ export default function SpeedbotPage() {
     }
   }, [symbol])
 
-  /* ── Check risk stops after each contract settles ── */
-  const checkStops = useCallback((updatedStats: SpeedStats): boolean => {
+  /* ── Check risk stops — pure: returns reason string or null, no setState ── */
+  const checkStops = useCallback((updatedStats: SpeedStats): string | null => {
     const tp   = parseFloat(takeProfitRef.current)
     const sl   = parseFloat(stopLossRef.current)
     const maxC = parseInt(maxConsecRef.current, 10)
     const maxN = parseInt(maxContractsRef.current, 10)
     const cur  = currencyRef.current
 
-    if (Number.isFinite(tp) && tp > 0 && updatedStats.profit >= tp) {
-      setStopReason(`✅ Take Profit reached: +${fmt2(updatedStats.profit)} ${cur}`)
-      return true
-    }
-    if (Number.isFinite(sl) && sl > 0 && updatedStats.profit <= -sl) {
-      setStopReason(`🛑 Stop Loss triggered: ${fmt2(updatedStats.profit)} ${cur} (limit: -${fmt2(sl)} ${cur})`)
-      return true
-    }
-    if (Number.isFinite(maxC) && maxC > 0 && updatedStats.consecLosses >= maxC) {
-      setStopReason(`⚠️ Max consecutive losses (${maxC}) reached`)
-      return true
-    }
-    if (Number.isFinite(maxN) && maxN > 0 && updatedStats.runs >= maxN) {
-      setStopReason(`📊 Max contracts (${maxN}) reached`)
-      return true
-    }
-    return false
+    if (Number.isFinite(tp) && tp > 0 && updatedStats.profit >= tp)
+      return `✅ Take Profit reached: +${fmt2(updatedStats.profit)} ${cur}`
+    if (Number.isFinite(sl) && sl > 0 && updatedStats.profit <= -sl)
+      return `🛑 Stop Loss triggered: ${fmt2(updatedStats.profit)} ${cur} (limit: -${fmt2(sl)} ${cur})`
+    if (Number.isFinite(maxC) && maxC > 0 && updatedStats.consecLosses >= maxC)
+      return `⚠️ Max consecutive losses (${maxC}) reached`
+    if (Number.isFinite(maxN) && maxN > 0 && updatedStats.runs >= maxN)
+      return `📊 Max contracts (${maxN}) reached`
+    return null
   }, [])
 
   /* ── Execute one trade ── */
@@ -440,11 +436,13 @@ export default function SpeedbotPage() {
           if (reqId != null) pendingSpotsByReq.current.delete(reqId)
           pendingBuysRef.current.set(buy.contract_id, { buyPrice: buy.buy_price })
 
-          setStats(prev => ({
-            ...prev,
-            totalStake: parseFloat((prev.totalStake + buy.buy_price).toFixed(2)),
-            runs: prev.runs + 1,
-          }))
+          // Update statsRef synchronously, then mirror to state for rendering
+          statsRef.current = {
+            ...statsRef.current,
+            totalStake: parseFloat((statsRef.current.totalStake + buy.buy_price).toFixed(2)),
+            runs: statsRef.current.runs + 1,
+          }
+          setStats(statsRef.current)
         }
 
         /* ── Transaction stream ── */
@@ -460,31 +458,32 @@ export default function SpeedbotPage() {
             inTradeRef.current = false
 
             const { buyPrice } = pending
-            const payout   = Math.max(0, tx.amount)
-            const won      = payout > 0
-            const pl       = parseFloat((payout - buyPrice).toFixed(2))
+            const payout = Math.max(0, tx.amount)
+            const won    = payout > 0
 
-            /* ── Update running stats and check risk stops ── */
-            setStats(prev => {
-              const newTotalPayout  = parseFloat((prev.totalPayout + payout).toFixed(2))
-              const newTotalStake   = prev.totalStake  // already added on buy
-              const newProfit       = parseFloat((newTotalPayout - newTotalStake).toFixed(2))
-              const newConsec       = won ? 0 : prev.consecLosses + 1
-              const updated: SpeedStats = {
-                ...prev,
-                totalPayout:  newTotalPayout,
-                profit:       newProfit,
-                won:          won ? prev.won + 1 : prev.won,
-                lost:         won ? prev.lost : prev.lost + 1,
-                consecLosses: newConsec,
-              }
-              /* Risk stops — checked inside setStats callback for accuracy */
-              if (checkStops(updated)) {
-                setRunning(false)
-                runningRef.current = false
-              }
-              return updated
-            })
+            /* ── Compute updated stats from ref (synchronous, no React batching) ── */
+            const prev        = statsRef.current
+            const newTotalPayout = parseFloat((prev.totalPayout + payout).toFixed(2))
+            const newProfit      = parseFloat((newTotalPayout - prev.totalStake).toFixed(2))
+            const newConsec      = won ? 0 : prev.consecLosses + 1
+            const updated: SpeedStats = {
+              ...prev,
+              totalPayout:  newTotalPayout,
+              profit:       newProfit,
+              won:          won ? prev.won + 1 : prev.won,
+              lost:         won ? prev.lost : prev.lost + 1,
+              consecLosses: newConsec,
+            }
+            statsRef.current = updated
+            setStats(updated)
+
+            /* ── Check stops OUTSIDE setState — avoids React batching issue ── */
+            const stopMsg = checkStops(updated)
+            if (stopMsg) {
+              setRunning(false)
+              runningRef.current = false
+              setStopReason(stopMsg)
+            }
 
             /* ── Append to tx log ── */
             setTxLog(prev => [{
@@ -621,7 +620,9 @@ export default function SpeedbotPage() {
     if (isNaN(s) || s < 0.35) { setBotError('Stake must be at least 0.35 USD'); return }
     setBotError(null)
     setStopReason(null)
-    setStats({ runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 })
+    const emptyStats = { runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 }
+    statsRef.current = emptyStats
+    setStats(emptyStats)
     setTxLog([])
     setRunning(true)
   }
@@ -634,7 +635,9 @@ export default function SpeedbotPage() {
     currentStakeRef.current = parseFloat(stake) || 1.00
     accumLossRef.current    = 0
     effectiveTypeRef.current = tradeType
-    setStats({ runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 })
+    const emptyStats = { runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 }
+    statsRef.current = emptyStats
+    setStats(emptyStats)
     setTxLog([])
     setBotError(null)
     setStopReason(null)
