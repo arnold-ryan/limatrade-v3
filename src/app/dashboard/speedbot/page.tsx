@@ -64,7 +64,7 @@ const PAIR_MAP: Record<string, string> = Object.fromEntries(
 )
 
 type Strategy  = 'standard' | 'martingale'
-type ExecSpeed = 'fast' | 'normal'
+type ExecSpeed = 'turbo' | 'fast' | 'normal'
 
 interface SpeedStats {
   runs:         number
@@ -116,7 +116,7 @@ export default function SpeedbotPage() {
   const [prediction,  setPrediction] = useState(5)       // barrier digit for OVER/UNDER/MATCH/DIFF
   const [ticksDur,    setTicksDur]   = useState(1)        // contract duration in ticks (1-9)
   const [stake,       setStake]      = useState('1.00')
-  const [execSpeed,   setExecSpeed]  = useState<ExecSpeed>('normal')
+  const [execSpeed,   setExecSpeed]  = useState<ExecSpeed>('turbo')
   const [takeProfit,  setTakeProfit] = useState('10')
   const [stopLoss,    setStopLoss]   = useState('5')
   const [maxConsec,   setMaxConsec]  = useState('5')
@@ -130,6 +130,8 @@ export default function SpeedbotPage() {
   const [botReady,    setBotReady]   = useState(false)
   const [botError,    setBotError]   = useState<string | null>(null)
   const [stopReason,  setStopReason] = useState<string | null>(null)
+  /** Flashes the last digit bubble with win/loss color when a trade settles */
+  const [tradeFlash,  setTradeFlash] = useState<{ won: boolean } | null>(null)
   const [currency,    setCurrency]   = useState('USD')
   const [accountLabel,setAccountLabel] = useState('')
   const [stats,       setStats]      = useState<SpeedStats>({
@@ -150,7 +152,7 @@ export default function SpeedbotPage() {
   const predictionRef   = useRef(5)
   const ticksDurRef     = useRef(1)
   const stakeRef        = useRef('1.00')
-  const execSpeedRef    = useRef<ExecSpeed>('normal')
+  const execSpeedRef    = useRef<ExecSpeed>('turbo')
   const takeProfitRef   = useRef('10')
   const stopLossRef     = useRef('5')
   const maxConsecRef    = useRef('5')
@@ -461,6 +463,10 @@ export default function SpeedbotPage() {
             const payout = Math.max(0, tx.amount)
             const won    = payout > 0
 
+            /* ── Flash last digit bubble with result color ── */
+            setTradeFlash({ won })
+            setTimeout(() => setTradeFlash(null), 900)
+
             /* ── Compute updated stats from ref (synchronous, no React batching) ── */
             const prev        = statsRef.current
             const newTotalPayout = parseFloat((prev.totalPayout + payout).toFixed(2))
@@ -524,12 +530,18 @@ export default function SpeedbotPage() {
 
             /* ── Schedule next trade if still running ── */
             if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
-              const delay = execSpeedRef.current === 'fast' ? 400 : 1500
-              setTimeout(() => {
-                if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
-                  executeTrade(ws!)
-                }
-              }, delay)
+              const delay = execSpeedRef.current === 'turbo' ? 0
+                          : execSpeedRef.current === 'fast'  ? 400
+                          : 1500
+              if (delay === 0) {
+                executeTrade(ws!)   // fire instantly — no setTimeout overhead
+              } else {
+                setTimeout(() => {
+                  if (runningRef.current && ws?.readyState === WebSocket.OPEN) {
+                    executeTrade(ws!)
+                  }
+                }, delay)
+              }
             }
           }
         }
@@ -612,6 +624,7 @@ export default function SpeedbotPage() {
   /* ── Toggle run ── */
   function handleToggleRun() {
     if (running) {
+      runningRef.current = false   // sync immediately — prevents race where sell fires before useEffect runs
       setRunning(false)
       return
     }
@@ -682,7 +695,7 @@ export default function SpeedbotPage() {
             Speed Bot
           </h1>
           <p style={{ margin: 0, fontSize: '0.7rem', color: 'rgba(229,229,229,0.35)', marginTop: '1px' }}>
-            High-speed digit trading · {execSpeed === 'fast' ? 'Fast mode' : 'Normal mode'}
+            High-speed digit trading · {execSpeed === 'turbo' ? 'Turbo mode' : execSpeed === 'fast' ? 'Fast mode' : 'Normal mode'}
           </p>
         </div>
 
@@ -847,8 +860,8 @@ export default function SpeedbotPage() {
 
             {/* Execution speed toggle */}
             <span style={labelSt}>Execution Speed</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
-              {(['fast', 'normal'] as ExecSpeed[]).map(sp => (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.4rem' }}>
+              {(['turbo', 'fast', 'normal'] as ExecSpeed[]).map(sp => (
                 <button
                   key={sp}
                   onClick={() => setExecSpeed(sp)}
@@ -859,11 +872,11 @@ export default function SpeedbotPage() {
                     border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.08)'}`,
                     background: execSpeed === sp ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
                     color: execSpeed === sp ? '#FCA311' : 'rgba(229,229,229,0.45)',
-                    fontWeight: 600, fontSize: '0.78rem',
+                    fontWeight: 600, fontSize: '0.75rem',
                     cursor: running ? 'not-allowed' : 'pointer',
                   }}
                 >
-                  {sp === 'fast' ? '⚡ Fast (0.4s)' : '◎ Normal (1.5s)'}
+                  {sp === 'turbo' ? '🚀 Turbo (0ms)' : sp === 'fast' ? '⚡ Fast (0.4s)' : '◎ Normal (1.5s)'}
                 </button>
               ))}
             </div>
@@ -898,6 +911,32 @@ export default function SpeedbotPage() {
                   style={inputSt} placeholder="e.g. 50" />
               </div>
             </div>
+
+            {/* Live SL vs Stake warning */}
+            {(() => {
+              const sl = parseFloat(stopLoss)
+              const sk = parseFloat(stake)
+              if (sl > 0 && sk > 0 && sl < sk) {
+                return (
+                  <div style={{
+                    marginTop: '0.65rem',
+                    padding: '0.5rem 0.65rem',
+                    background: 'rgba(239,68,68,0.07)',
+                    border: '1px solid rgba(239,68,68,0.2)',
+                    borderRadius: '8px',
+                    fontSize: '0.67rem',
+                    color: '#fca5a5',
+                    lineHeight: 1.45,
+                  }}>
+                    ⚠ Stop Loss ({currency} {sl.toFixed(2)}) is less than your stake ({currency} {sk.toFixed(2)}).
+                    {strategy === 'martingale'
+                      ? ` In Martingale mode a single loss will stop the bot immediately. Set SL ≥ ${currency} ${sk.toFixed(2)} to allow recovery.`
+                      : ' A single losing trade will stop the bot.'}
+                  </div>
+                )
+              }
+              return null
+            })()}
           </div>
 
           {/* Toggles (Standard only) */}
@@ -1080,16 +1119,28 @@ export default function SpeedbotPage() {
             <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
               {recentDigits.map((d, i) => {
                 const isLast = i === recentDigits.length - 1
+                const flash  = isLast && tradeFlash
+                const flashWin  = flash && tradeFlash!.won
+                const flashLose = flash && !tradeFlash!.won
                 return (
                   <div key={i} style={{
                     width: '28px', height: '28px', borderRadius: '7px',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontSize: '0.72rem', fontWeight: 700,
-                    background: isLast ? DIGIT_COLORS[d] : `${DIGIT_COLORS[d]}22`,
-                    color:      isLast ? '#000'           : DIGIT_COLORS[d],
-                    border:     `1.5px solid ${DIGIT_COLORS[d]}${isLast ? '' : '55'}`,
-                    transition: 'all 0.15s',
-                    opacity: 0.4 + 0.6 * (i / recentDigits.length),
+                    background: flashWin  ? 'rgba(34,197,94,0.35)'
+                              : flashLose ? 'rgba(239,68,68,0.35)'
+                              : isLast    ? DIGIT_COLORS[d]
+                              : `${DIGIT_COLORS[d]}22`,
+                    color:  flash   ? '#fff' : isLast ? '#000' : DIGIT_COLORS[d],
+                    border: flashWin  ? '2px solid #22c55e'
+                          : flashLose ? '2px solid #ef4444'
+                          : `1.5px solid ${DIGIT_COLORS[d]}${isLast ? '' : '55'}`,
+                    boxShadow: flashWin  ? '0 0 14px #22c55e99'
+                             : flashLose ? '0 0 14px #ef444499'
+                             : 'none',
+                    transition: flash ? 'all 0.05s' : 'all 0.15s',
+                    opacity: flash ? 1 : 0.4 + 0.6 * (i / recentDigits.length),
+                    transform: flash ? 'scale(1.18)' : 'scale(1)',
                   }}>
                     {d}
                   </div>

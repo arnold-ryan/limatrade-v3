@@ -331,15 +331,30 @@ function RunPanel({
           border: '1px solid rgba(255,255,255,0.08)', borderRight: 'none',
           borderRadius: '8px 0 0 8px', cursor: 'pointer',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: 'rgba(229,229,229,0.45)', padding: 0,
+          color: open ? 'rgba(229,229,229,0.45)' : 'rgba(252,163,17,0.85)', padding: 0,
+          overflow: 'visible',
         }}
       >
-        <svg width="12" height="18" viewBox="0 0 12 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="12" height="18" viewBox="0 0 12 18"
+          fill="none" stroke="currentColor" strokeWidth="1.8"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={!open ? { animation: 'panelNudge 2.4s ease-in-out infinite' } : undefined}
+        >
           {open
             ? <><polyline points="7,4 11,9 7,14"/><polyline points="2,4 6,9 2,14"/></>
             : <><polyline points="5,4 1,9 5,14"/><polyline points="10,4 6,9 10,14"/></>}
         </svg>
       </button>
+      <style>{`
+        @keyframes panelNudge {
+          0%,55%,100% { transform: translateX(0); }
+          65%          { transform: translateX(-4px); }
+          75%          { transform: translateX(-1px); }
+          85%          { transform: translateX(-3px); }
+          95%          { transform: translateX(0); }
+        }
+      `}</style>
 
       {/* Tab bar */}
       <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
@@ -1074,7 +1089,7 @@ export default function AnalysisPage() {
   const pipSizeRef = useRef<number>(2)
 
   /* ── Run panel UI state ── */
-  const [runOpen,   setRunOpen]   = useState(false)
+  const [runOpen,   setRunOpen]   = useState(true)
   const [running,   setRunning]   = useState(false)
   const [execSpeed, setExecSpeed] = useState<ExecSpeed>('normal')
   const [runStats,  setRunStats]  = useState<RunStats>({
