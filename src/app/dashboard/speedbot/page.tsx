@@ -1093,7 +1093,7 @@ export default function SpeedbotPage() {
       {/* ── Two-column body ── */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '340px 1fr',
+        gridTemplateColumns: '340px 1fr 300px',
         flex: 1,
         minHeight: 0,
         overflow: 'hidden',
@@ -1366,7 +1366,6 @@ export default function SpeedbotPage() {
           display: 'flex', flexDirection: 'column',
           overflow: 'hidden',
           background: '#000',
-          paddingBottom: '64px', // clear sticky START bar
         }}>
           {/* Chart — full width, fixed height */}
           <div style={{ padding: '1rem 1.25rem 0', flexShrink: 0 }}>
@@ -1511,80 +1510,80 @@ export default function SpeedbotPage() {
             )}
           </div>
 
+          </div>{/* end stats card */}
           </div>{/* end middle row grid */}
 
-          {/* Transaction log — scrollable card, fills remaining vertical space */}
-          <div style={{
-            ...sectionSt,
-            margin: '0.75rem 1.25rem 0',
-            display: 'flex', flexDirection: 'column',
-            flex: 1, minHeight: 0, overflow: 'hidden',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem', flexShrink: 0 }}>
-              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>
-                Transactions
-              </span>
-              <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>
-                {txLog.length} records
-              </span>
-            </div>
+        </div>{/* end middle panel */}
 
+        {/* ════ RIGHT: Transactions Panel ════ */}
+        <div style={{
+          borderLeft: '1px solid rgba(255,255,255,0.07)',
+          background: '#020a14',
+          display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
+          paddingBottom: '64px',
+        }}>
+          {/* Header */}
+          <div style={{
+            padding: '1rem 1rem 0.75rem',
+            borderBottom: '1px solid rgba(255,255,255,0.06)',
+            flexShrink: 0,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>Transactions</span>
+            <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>{txLog.length} records</span>
+          </div>
+
+          {/* Scrollable list */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 0.75rem' }}>
             {txLog.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '2rem 0', color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem' }}>
-                No trades yet. Press START to begin.
+              <div style={{ textAlign: 'center', padding: '3rem 0', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>
+                No trades yet.<br />Press START to begin.
               </div>
             ) : (
-              <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
-                {/* Header */}
+              <>
+                {/* Column headers */}
                 <div style={{
-                  display: 'grid', gridTemplateColumns: '1fr 80px 80px 70px',
-                  padding: '0.35rem 0.5rem', marginBottom: '0.25rem',
+                  display: 'grid', gridTemplateColumns: '1fr 60px 55px 65px',
+                  padding: '0.5rem 0.25rem 0.25rem',
+                  position: 'sticky', top: 0, background: '#020a14', zIndex: 1,
                 }}>
-                  {['Time', 'Type', 'Stake', 'P/L'].map(h => (
-                    <span key={h} style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</span>
+                  {['Time','Type','Stake','P/L'].map(h => (
+                    <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</span>
                   ))}
                 </div>
                 {txLog.map(tx => {
                   const pl = tx.payout - tx.stake
                   return (
                     <div key={tx.id} style={{
-                      display: 'grid', gridTemplateColumns: '1fr 80px 80px 70px',
-                      alignItems: 'center', padding: '0.45rem 0.5rem',
-                      borderRadius: '6px', transition: 'background 0.1s',
+                      display: 'grid', gridTemplateColumns: '1fr 60px 55px 65px',
+                      alignItems: 'center', padding: '0.45rem 0.25rem',
                       borderBottom: '1px solid rgba(255,255,255,0.04)',
-                    }}
-                      onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
-                      onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
-                    >
-                      <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.38)', fontVariantNumeric: 'tabular-nums' }}>
+                    }}>
+                      <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
                         {new Date(tx.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <span style={{
-                          width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
-                          background: tx.won ? '#22c55e' : '#ef4444',
-                        }} />
-                        <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.55)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                        <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: tx.won ? '#22c55e' : '#ef4444' }} />
+                        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)' }}>
                           {TRADE_TYPES.find(t => t.value === tx.contractType)?.label ?? tx.contractType}
                         </span>
                       </div>
-                      <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.55)', fontVariantNumeric: 'tabular-nums' }}>
+                      <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)', fontVariantNumeric: 'tabular-nums' }}>
                         {fmt2(tx.stake)}
                       </span>
-                      <span style={{
-                        fontSize: '0.72rem', fontWeight: 700,
-                        color: pl >= 0 ? '#22c55e' : '#ef4444',
-                        fontVariantNumeric: 'tabular-nums',
+                      <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+                        color: tx.pending ? 'rgba(229,229,229,0.25)' : pl >= 0 ? '#22c55e' : '#ef4444',
+                        filter: tx.pending ? 'blur(4px)' : 'none',
                       }}>
-                        {pl >= 0 ? '+' : ''}{fmt2(pl)}
+                        {tx.pending ? '···' : `${pl >= 0 ? '+' : ''}${fmt2(pl)}`}
                       </span>
                     </div>
                   )
                 })}
-              </div>
+              </>
             )}
           </div>
-
         </div>
       </div>
 
