@@ -1,34 +1,18 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import {
+  createChart,
+  ColorType,
+  CrosshairMode,
+  IChartApi,
+  ISeriesApi,
+  UTCTimestamp,
+} from 'lightweight-charts'
 
-/* ─── Constants ─────────────────────────────────────────────────────────────── */
+/* ─── Constants ─────────────────────────────────────────────────────────── */
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
-const MARKETS = [
-  { symbol: '1HZ100V',   label: 'Volatility 100 (1s)' },
-  { symbol: '1HZ10V',    label: 'Volatility 10 (1s)'  },
-  { symbol: '1HZ25V',    label: 'Volatility 25 (1s)'  },
-  { symbol: '1HZ50V',    label: 'Volatility 50 (1s)'  },
-  { symbol: '1HZ75V',    label: 'Volatility 75 (1s)'  },
-  { symbol: 'R_100',     label: 'Volatility 100'       },
-  { symbol: 'R_10',      label: 'Volatility 10'        },
-  { symbol: 'R_25',      label: 'Volatility 25'        },
-  { symbol: 'R_50',      label: 'Volatility 50'        },
-  { symbol: 'R_75',      label: 'Volatility 75'        },
-  { symbol: 'BOOM1000',  label: 'Boom 1000'            },
-  { symbol: 'BOOM500',   label: 'Boom 500'             },
-  { symbol: 'CRASH1000', label: 'Crash 1000'           },
-  { symbol: 'CRASH500',  label: 'Crash 500'            },
-  { symbol: 'stpRNG',    label: 'Step Index'           },
-  { symbol: 'JD10',      label: 'Jump 10'              },
-  { symbol: 'JD25',      label: 'Jump 25'              },
-  { symbol: 'JD50',      label: 'Jump 50'              },
-  { symbol: 'JD75',      label: 'Jump 75'              },
-  { symbol: 'JD100',     label: 'Jump 100'             },
-]
-
-// Granularity=0 → tick mode; else → candle mode
 const TIMEFRAMES = [
   { label: '1T',  granularity: 0     },
   { label: '1m',  granularity: 60    },
@@ -40,357 +24,320 @@ const TIMEFRAMES = [
   { label: '1D',  granularity: 86400 },
 ]
 
-/* ─── Types ─────────────────────────────────────────────────────────────────── */
-interface Candle { epoch: number; open: number; high: number; low: number; close: number }
+const CHART_TYPES = [
+  { id: 'area',    label: 'Area'    },
+  { id: 'candles', label: 'Candles' },
+  { id: 'line',    label: 'Line'    },
+] as const
+type ChartType = 'area' | 'candles' | 'line'
 
-/* ─── Helpers ───────────────────────────────────────────────────────────────── */
-function fmtPrice(p: number, pip: number) {
-  return p.toFixed(pip)
+const MARKET_GROUPS = [
+  {
+    id: 'volatility',
+    name: 'Volatility indices',
+    markets: [
+      { symbol: '1HZ100V', label: 'Volatility 100 (1s) Index' },
+      { symbol: '1HZ75V',  label: 'Volatility 75 (1s) Index'  },
+      { symbol: '1HZ50V',  label: 'Volatility 50 (1s) Index'  },
+      { symbol: '1HZ25V',  label: 'Volatility 25 (1s) Index'  },
+      { symbol: '1HZ10V',  label: 'Volatility 10 (1s) Index'  },
+      { symbol: 'R_100',   label: 'Volatility 100 Index'       },
+      { symbol: 'R_75',    label: 'Volatility 75 Index'        },
+      { symbol: 'R_50',    label: 'Volatility 50 Index'        },
+      { symbol: 'R_25',    label: 'Volatility 25 Index'        },
+      { symbol: 'R_10',    label: 'Volatility 10 Index'        },
+    ],
+  },
+  {
+    id: 'crashboom',
+    name: 'Crash/Boom',
+    markets: [
+      { symbol: 'BOOM1000',  label: 'Boom 1000 Index'   },
+      { symbol: 'BOOM500',   label: 'Boom 500 Index'    },
+      { symbol: 'CRASH1000', label: 'Crash 1000 Index'  },
+      { symbol: 'CRASH500',  label: 'Crash 500 Index'   },
+    ],
+  },
+  {
+    id: 'jump',
+    name: 'Jump indices',
+    markets: [
+      { symbol: 'JD100', label: 'Jump 100 Index' },
+      { symbol: 'JD75',  label: 'Jump 75 Index'  },
+      { symbol: 'JD50',  label: 'Jump 50 Index'  },
+      { symbol: 'JD25',  label: 'Jump 25 Index'  },
+      { symbol: 'JD10',  label: 'Jump 10 Index'  },
+    ],
+  },
+  {
+    id: 'step',
+    name: 'Step indices',
+    markets: [{ symbol: 'stpRNG', label: 'Step Index 100' }],
+  },
+]
+
+const ALL_MARKETS = MARKET_GROUPS.flatMap(g => g.markets)
+
+/* ─── Shared button styles ───────────────────────────────────────────────── */
+const toolbarBtn: React.CSSProperties = {
+  width: '44px', height: '44px',
+  background: 'transparent', border: 'none',
+  color: 'rgba(200,215,235,0.5)', cursor: 'pointer', outline: 'none',
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  gap: '2px', borderRadius: '4px', flexShrink: 0,
+}
+const navBtn: React.CSSProperties = {
+  width: '30px', height: '30px',
+  background: 'transparent', border: 'none',
+  color: 'rgba(200,215,235,0.5)', cursor: 'pointer', outline: 'none',
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  borderRadius: '4px', flexShrink: 0,
 }
 
-function fmtTime(epoch: number, granularity: number): string {
-  const d = new Date(epoch * 1000)
-  if (granularity >= 86400) return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-  if (granularity >= 3600)  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
-/* ─── Candlestick Canvas ─────────────────────────────────────────────────────── */
-function CandleChart({ candles, pipSize, granularity }: {
-  candles: Candle[]; pipSize: number; granularity: number
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current
-    const container = containerRef.current
-    if (!canvas || !container || candles.length < 2) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const dpr = window.devicePixelRatio || 1
-    const W   = container.clientWidth
-    const H   = container.clientHeight
-    canvas.width  = W * dpr
-    canvas.height = H * dpr
-    canvas.style.width  = W + 'px'
-    canvas.style.height = H + 'px'
-    ctx.scale(dpr, dpr)
-
-    const padL = 12, padR = 72, padT = 14, padB = 28
-    const cW = W - padL - padR
-    const cH = H - padT - padB
-
-    // Background
-    ctx.fillStyle = '#060d18'
-    ctx.fillRect(0, 0, W, H)
-
-    // Visible candles — fit as many as possible with min 6px body width
-    const maxCandles = Math.min(candles.length, Math.floor(cW / 8))
-    const visible = candles.slice(-maxCandles)
-    const n = visible.length
-    if (n < 1) return
-
-    const candleW = Math.min(Math.floor(cW / n) - 2, 18)
-    const step    = cW / n
-    const xOf     = (i: number) => padL + (i + 0.5) * step
-
-    // Price range
-    let lo = Infinity, hi = -Infinity
-    for (const c of visible) { if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high }
-    const range = hi - lo || 1
-    const pad   = range * 0.08
-    lo -= pad; hi += pad
-    const yOf = (p: number) => padT + (1 - (p - lo) / (hi - lo)) * cH
-
-    // Horizontal grid lines + price labels
-    const gridCount = 5
-    for (let i = 0; i <= gridCount; i++) {
-      const y = padT + (i / gridCount) * cH
-      const v = hi - (i / gridCount) * (hi - lo)
-      ctx.strokeStyle = 'rgba(255,255,255,0.04)'
-      ctx.lineWidth = 1
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke()
-      ctx.fillStyle = 'rgba(255,255,255,0.28)'
-      ctx.font = `10px 'SF Mono', monospace`
-      ctx.textAlign = 'left'
-      ctx.fillText(fmtPrice(v, pipSize), W - padR + 5, y + 4)
-    }
-
-    // Vertical time labels (every ~8 candles)
-    const labelEvery = Math.max(1, Math.floor(n / 6))
-    for (let i = 0; i < n; i++) {
-      if (i % labelEvery !== 0) continue
-      const x = xOf(i)
-      ctx.strokeStyle = 'rgba(255,255,255,0.03)'
-      ctx.lineWidth = 1
-      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + cH); ctx.stroke()
-      ctx.fillStyle = 'rgba(255,255,255,0.22)'
-      ctx.font = '9px monospace'
-      ctx.textAlign = 'center'
-      ctx.fillText(fmtTime(visible[i].epoch, granularity), x, padT + cH + 18)
-    }
-
-    // Draw candles
-    for (let i = 0; i < n; i++) {
-      const c    = visible[i]
-      const x    = xOf(i)
-      const isUp = c.close >= c.open
-      const col  = isUp ? '#26a69a' : '#ef5350'  // Deriv-style teal/red
-
-      const bodyTop = yOf(Math.max(c.open, c.close))
-      const bodyBot = yOf(Math.min(c.open, c.close))
-      const bodyH   = Math.max(bodyBot - bodyTop, 1)
-      const wickX   = x
-
-      // Wick
-      ctx.strokeStyle = col
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(wickX, yOf(c.high))
-      ctx.lineTo(wickX, yOf(c.low))
-      ctx.stroke()
-
-      // Body
-      const isLast = i === n - 1
-      ctx.fillStyle = isUp
-        ? (isLast ? 'rgba(38,166,154,0.9)' : 'rgba(38,166,154,0.75)')
-        : (isLast ? 'rgba(239,83,80,0.9)'  : 'rgba(239,83,80,0.75)')
-      ctx.strokeStyle = col
-      ctx.lineWidth = 1
-      const bx = x - candleW / 2
-      ctx.fillRect(bx, bodyTop, candleW, bodyH)
-      ctx.strokeRect(bx, bodyTop, candleW, bodyH)
-    }
-
-    // Last price line
-    const last = visible[n - 1]
-    const ly   = yOf(last.close)
-    const isUp = last.close >= last.open
-    ctx.setLineDash([4, 3])
-    ctx.strokeStyle = isUp ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
-    ctx.lineWidth = 1
-    ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke()
-    ctx.setLineDash([])
-
-    // Price badge
-    const badgeColor = isUp ? '#26a69a' : '#ef5350'
-    ctx.fillStyle = badgeColor
-    const badge = fmtPrice(last.close, pipSize)
-    const bw = badge.length * 6.5 + 12
-    ctx.fillRect(W - padR + 1, ly - 9, bw, 18)
-    ctx.fillStyle = '#fff'
-    ctx.font = 'bold 10px monospace'
-    ctx.textAlign = 'left'
-    ctx.fillText(badge, W - padR + 6, ly + 4)
-
-  }, [candles, pipSize, granularity])
-
-  useEffect(() => {
-    draw()
-  }, [draw])
-
-  useEffect(() => {
-    const obs = new ResizeObserver(draw)
-    if (containerRef.current) obs.observe(containerRef.current)
-    return () => obs.disconnect()
-  }, [draw])
-
+/* ─── SVG icons ──────────────────────────────────────────────────────────── */
+function IcArea() {
   return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-      <canvas ref={canvasRef} style={{ display: 'block' }} />
-      {candles.length < 2 && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.8rem' }}>
-          Loading chart data…
-        </div>
-      )}
-    </div>
+    <svg width="22" height="20" viewBox="0 0 22 20" fill="none">
+      <path d="M2 16 L6 10 L10 13 L15 5 L20 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M2 16 L6 10 L10 13 L15 5 L20 8 L20 16 Z" fill="currentColor" fillOpacity="0.12"/>
+    </svg>
+  )
+}
+function IcCandles() {
+  return (
+    <svg width="22" height="20" viewBox="0 0 22 20" fill="none">
+      <rect x="3" y="6" width="4" height="8" rx="0.5" fill="currentColor" fillOpacity="0.75"/>
+      <line x1="5" y1="3" x2="5" y2="6" stroke="currentColor" strokeWidth="1.2"/>
+      <line x1="5" y1="14" x2="5" y2="17" stroke="currentColor" strokeWidth="1.2"/>
+      <rect x="9" y="4" width="4" height="6" rx="0.5" fill="currentColor" fillOpacity="0.45"/>
+      <line x1="11" y1="2" x2="11" y2="4" stroke="currentColor" strokeWidth="1.2"/>
+      <line x1="11" y1="10" x2="11" y2="13" stroke="currentColor" strokeWidth="1.2"/>
+      <rect x="15" y="7" width="4" height="7" rx="0.5" fill="currentColor" fillOpacity="0.75"/>
+      <line x1="17" y1="4" x2="17" y2="7" stroke="currentColor" strokeWidth="1.2"/>
+      <line x1="17" y1="14" x2="17" y2="17" stroke="currentColor" strokeWidth="1.2"/>
+    </svg>
+  )
+}
+function IcLine() {
+  return (
+    <svg width="22" height="20" viewBox="0 0 22 20" fill="none">
+      <path d="M2 15 L7 8 L12 11 L17 5 L20 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  )
+}
+function IcIndicators() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <path d="M2 17 L6 11 L10 14 L14 7 L18 10 L20 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      <circle cx="18" cy="5" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.3"/>
+      <line x1="18" y1="7.5" x2="18" y2="10" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  )
+}
+function IcTemplates() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <rect x="2" y="2" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="12" y="2" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="2" y="12" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="12" y="12" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  )
+}
+function IcDrawing() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <path d="M14 3L19 8L7 20L2 20L2 15Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" fill="none"/>
+      <path d="M11.5 5.5L16.5 10.5" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  )
+}
+function IcDownload() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <path d="M11 3V14M7 10L11 14L15 10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M3 18L3 20L19 20L19 18" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function IcZoomIn() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.4"/>
+      <path d="M4.5 6.5H8.5M6.5 4.5V8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+      <path d="M10 10L13 13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function IcZoomOut() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" strokeWidth="1.4"/>
+      <path d="M4.5 6.5H8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+      <path d="M10 10L13 13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function IcCrosshair() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <circle cx="7.5" cy="7.5" r="3" stroke="currentColor" strokeWidth="1.4"/>
+      <path d="M7.5 1V4.5M7.5 10.5V14M1 7.5H4.5M10.5 7.5H14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function IcLatest() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2 7H10M8 4L11 7L8 10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+      <line x1="12" y1="2" x2="12" y2="12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  )
+}
+function IcDropdown({ open }: { open: boolean }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <path d={open ? 'M3 8L6 5L9 8' : 'M3 4L6 7L9 4'} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
   )
 }
 
-/* ─── Tick Line Canvas ───────────────────────────────────────────────────────── */
-function TickChart({ prices, times, pipSize }: {
-  prices: number[]; times: number[]; pipSize: number
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
+function fmt(p: number, pip: number) { return p.toFixed(pip) }
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current
-    const container = containerRef.current
-    if (!canvas || !container || prices.length < 2) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const dpr = window.devicePixelRatio || 1
-    const W   = container.clientWidth
-    const H   = container.clientHeight
-    canvas.width  = W * dpr
-    canvas.height = H * dpr
-    canvas.style.width  = W + 'px'
-    canvas.style.height = H + 'px'
-    ctx.scale(dpr, dpr)
-
-    const padL = 12, padR = 72, padT = 14, padB = 28
-    const cW = W - padL - padR
-    const cH = H - padT - padB
-
-    ctx.fillStyle = '#060d18'
-    ctx.fillRect(0, 0, W, H)
-
-    // Use last 500 visible points max
-    const maxPts = Math.min(prices.length, 500)
-    const vis    = prices.slice(-maxPts)
-    const visTimes = times.slice(-maxPts)
-    const n      = vis.length
-
-    let lo = Math.min(...vis), hi = Math.max(...vis)
-    const range = hi - lo || 1
-    const pad = range * 0.1
-    lo -= pad; hi += pad
-    const xOf = (i: number) => padL + (i / (n - 1)) * cW
-    const yOf = (p: number) => padT + (1 - (p - lo) / (hi - lo)) * cH
-
-    // Grid + price labels
-    for (let i = 0; i <= 5; i++) {
-      const y = padT + (i / 5) * cH
-      const v = hi - (i / 5) * (hi - lo)
-      ctx.strokeStyle = 'rgba(255,255,255,0.04)'
-      ctx.lineWidth = 1
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke()
-      ctx.fillStyle = 'rgba(255,255,255,0.28)'
-      ctx.font = '10px monospace'
-      ctx.textAlign = 'left'
-      ctx.fillText(fmtPrice(v, pipSize), W - padR + 5, y + 4)
-    }
-
-    // Time labels
-    const labelEvery = Math.max(1, Math.floor(n / 5))
-    for (let i = 0; i < n; i++) {
-      if (i % labelEvery !== 0) continue
-      const x = xOf(i)
-      ctx.strokeStyle = 'rgba(255,255,255,0.03)'
-      ctx.lineWidth = 1
-      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + cH); ctx.stroke()
-      if (visTimes[i]) {
-        ctx.fillStyle = 'rgba(255,255,255,0.22)'
-        ctx.font = '9px monospace'
-        ctx.textAlign = 'center'
-        ctx.fillText(fmtTime(visTimes[i], 0), x, padT + cH + 18)
-      }
-    }
-
-    // Area fill
-    const grad = ctx.createLinearGradient(0, padT, 0, padT + cH)
-    grad.addColorStop(0, 'rgba(252,163,17,0.18)')
-    grad.addColorStop(1, 'rgba(252,163,17,0.01)')
-    ctx.beginPath()
-    ctx.moveTo(xOf(0), yOf(vis[0]))
-    for (let i = 1; i < n; i++) ctx.lineTo(xOf(i), yOf(vis[i]))
-    ctx.lineTo(xOf(n - 1), padT + cH)
-    ctx.lineTo(xOf(0), padT + cH)
-    ctx.closePath()
-    ctx.fillStyle = grad; ctx.fill()
-
-    // Line
-    ctx.beginPath()
-    ctx.moveTo(xOf(0), yOf(vis[0]))
-    for (let i = 1; i < n; i++) ctx.lineTo(xOf(i), yOf(vis[i]))
-    ctx.strokeStyle = '#FCA311'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke()
-
-    // Last price line + badge
-    const last = vis[n - 1]
-    const ly   = yOf(last)
-    ctx.setLineDash([4, 3])
-    ctx.strokeStyle = 'rgba(252,163,17,0.4)'
-    ctx.lineWidth = 1
-    ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke()
-    ctx.setLineDash([])
-    ctx.fillStyle = '#FCA311'
-    const badge = fmtPrice(last, pipSize)
-    const bw = badge.length * 6.5 + 12
-    ctx.fillRect(W - padR + 1, ly - 9, bw, 18)
-    ctx.fillStyle = '#000'
-    ctx.font = 'bold 10px monospace'
-    ctx.textAlign = 'left'
-    ctx.fillText(badge, W - padR + 6, ly + 4)
-
-    // Dot on last point
-    ctx.beginPath(); ctx.arc(xOf(n - 1), ly, 4, 0, Math.PI * 2)
-    ctx.fillStyle = '#FCA311'; ctx.fill()
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
-
-  }, [prices, times, pipSize])
-
-  useEffect(() => { draw() }, [draw])
-  useEffect(() => {
-    const obs = new ResizeObserver(draw)
-    if (containerRef.current) obs.observe(containerRef.current)
-    return () => obs.disconnect()
-  }, [draw])
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-      <canvas ref={canvasRef} style={{ display: 'block' }} />
-      {prices.length < 2 && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.8rem' }}>
-          Loading tick data…
-        </div>
-      )}
-    </div>
-  )
-}
-
-/* ─── Main Page ─────────────────────────────────────────────────────────────── */
+/* ─── Main Page ─────────────────────────────────────────────────────────── */
 export default function ChartsPage() {
-  const [symbol,    setSymbol]    = useState('1HZ100V')
-  const [tfIdx,     setTfIdx]     = useState(0)  // index into TIMEFRAMES
-  const [candles,   setCandles]   = useState<Candle[]>([])
-  const [prices,    setPrices]    = useState<number[]>([])
-  const [times,     setTimes]     = useState<number[]>([])
-  const [pipSize,   setPipSize]   = useState(2)
-  const [connected, setConnected] = useState(false)
-  const [livePrice, setLivePrice] = useState<number | null>(null)
-  const [priceDir,  setPriceDir]  = useState<'up' | 'down' | null>(null)
+  const [symbol,      setSymbol]      = useState('1HZ100V')
+  const [tfIdx,       setTfIdx]       = useState(0)
+  const [chartType,   setChartType]   = useState<ChartType>('area')
+  const [connected,   setConnected]   = useState(false)
+  const [livePrice,   setLivePrice]   = useState<number | null>(null)
+  const [priceChange, setPriceChange] = useState(0)
+  const [priceDir,    setPriceDir]    = useState<'up' | 'down' | null>(null)
+  const [pipSize,     setPipSize]     = useState(2)
+  const [showMkt,     setShowMkt]     = useState(false)
+  const [mktSearch,   setMktSearch]   = useState('')
+  const [showChartMenu, setShowChartMenu] = useState(false)
+  const [crosshair,   setCrosshair]   = useState(true)
 
-  const wsRef      = useRef<WebSocket | null>(null)
-  const prevPrice  = useRef<number | null>(null)
+  const chartContainerRef = useRef<HTMLDivElement>(null)
+  const chartRef    = useRef<IChartApi | null>(null)
+  const seriesRef   = useRef<ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null)
+  const prevPriceRef  = useRef<number | null>(null)
+  const firstPriceRef = useRef<number | null>(null)
+  const pipRef      = useRef(2)
+
   const tf         = TIMEFRAMES[tfIdx]
   const isTickMode = tf.granularity === 0
+  // In tick mode, always area
+  const effectiveType: ChartType = isTickMode ? 'area' : chartType
+  const market     = ALL_MARKETS.find(m => m.symbol === symbol)
 
-  // Connect / reconnect whenever symbol or timeframe changes
+  const priceUp    = priceDir === 'up'
+  const priceDown  = priceDir === 'down'
+  const priceColor = priceUp ? '#22c55e' : priceDown ? '#ef4444' : 'rgba(229,229,229,0.9)'
+  const changeColor = priceChange >= 0 ? '#22c55e' : '#ef4444'
+  const changePct   = firstPriceRef.current
+    ? (priceChange / firstPriceRef.current) * 100
+    : 0
+
+  /* ── Chart + WS: recreated on symbol / tf / chartType change ── */
   useEffect(() => {
-    setConnected(false)
-    setCandles([])
-    setPrices([])
-    setTimes([])
-    setLivePrice(null)
-    prevPrice.current = null
+    const container = chartContainerRef.current
+    if (!container) return
 
+    /* Create chart */
+    const chart = createChart(container, {
+      width:  container.clientWidth,
+      height: container.clientHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#060d18' },
+        textColor:   'rgba(190,205,225,0.45)',
+        fontSize:    11,
+      },
+      grid: {
+        vertLines: { color: 'rgba(255,255,255,0.025)' },
+        horzLines: { color: 'rgba(255,255,255,0.045)' },
+      },
+      rightPriceScale: {
+        borderColor:  'rgba(255,255,255,0.06)',
+        textColor:    'rgba(190,205,225,0.4)',
+        scaleMargins: { top: 0.1, bottom: 0.08 },
+      },
+      timeScale: {
+        borderColor:    'rgba(255,255,255,0.06)',
+        timeVisible:    true,
+        secondsVisible: isTickMode,
+        rightOffset:    10,
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: 'rgba(252,163,17,0.3)', labelBackgroundColor: '#142035' },
+        horzLine: { color: 'rgba(252,163,17,0.3)', labelBackgroundColor: '#142035' },
+      },
+      handleScroll: true,
+      handleScale:  true,
+    })
+    chartRef.current = chart
+
+    /* Create series based on type */
+    let series: ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>
+    if (effectiveType === 'area') {
+      series = chart.addAreaSeries({
+        lineColor:    '#FCA311',
+        topColor:     'rgba(252,163,17,0.18)',
+        bottomColor:  'rgba(252,163,17,0.0)',
+        lineWidth:    2,
+        priceLineColor: '#FCA311',
+        priceLineStyle: 2,
+      })
+    } else if (effectiveType === 'line') {
+      series = chart.addLineSeries({
+        color:          '#FCA311',
+        lineWidth:      2,
+        priceLineColor: '#FCA311',
+        priceLineStyle: 2,
+      })
+    } else {
+      series = chart.addCandlestickSeries({
+        upColor:         '#26a69a',
+        downColor:       '#ef5350',
+        borderUpColor:   '#26a69a',
+        borderDownColor: '#ef5350',
+        wickUpColor:     '#26a69a',
+        wickDownColor:   '#ef5350',
+        priceLineStyle:  2,
+      })
+    }
+    seriesRef.current = series
+
+    /* Resize observer */
+    const obs = new ResizeObserver(() => {
+      chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
+    })
+    obs.observe(container)
+
+    /* Reset live state */
+    setConnected(false)
+    setLivePrice(null)
+    setPriceDir(null)
+    setPriceChange(0)
+    prevPriceRef.current  = null
+    firstPriceRef.current = null
+
+    /* Open WebSocket */
     const ws = new WebSocket(PUBLIC_WS_URL)
-    wsRef.current = ws
 
     ws.onopen = () => {
       setConnected(true)
       if (isTickMode) {
         ws.send(JSON.stringify({
-          ticks_history: symbol,
-          end: 'latest',
-          count: 1000,
-          style: 'ticks',
-          subscribe: 1,
-          req_id: 1,
+          ticks_history: symbol, end: 'latest', count: 1000,
+          style: 'ticks', subscribe: 1, req_id: 1,
         }))
       } else {
         ws.send(JSON.stringify({
-          ticks_history: symbol,
-          end: 'latest',
-          count: 200,
-          style: 'candles',
-          granularity: tf.granularity,
-          subscribe: 1,
-          req_id: 2,
+          ticks_history: symbol, end: 'latest', count: 200,
+          style: 'candles', granularity: tf.granularity, subscribe: 1, req_id: 2,
         }))
       }
     }
@@ -400,187 +347,580 @@ export default function ChartsPage() {
       try { msg = JSON.parse(ev.data as string) } catch { return }
 
       const ps = (msg as { pip_size?: number }).pip_size
-      if (ps != null) setPipSize(ps)
+      if (ps != null) { setPipSize(ps); pipRef.current = ps }
 
-      // ── Tick history (initial batch) ──
+      /* Initial tick history */
       if (msg.msg_type === 'history') {
         type H = { history: { prices: number[]; times: number[] } }
         const h = (msg as unknown as H).history
-        const ps2 = ps ?? pipSize
-        void ps2
-        const nums = h.prices.map(Number)
-        const ts   = h.times.map(Number)
-        setPrices(nums)
-        setTimes(ts)
-        setLivePrice(nums[nums.length - 1] ?? null)
-        prevPrice.current = nums[nums.length - 1] ?? null
+        const prices = h.prices.map(Number)
+        const times  = h.times.map(Number)
+        const seen   = new Set<number>()
+        const data: { time: UTCTimestamp; value: number }[] = []
+        for (let i = 0; i < prices.length; i++) {
+          if (!seen.has(times[i])) { seen.add(times[i]); data.push({ time: times[i] as UTCTimestamp, value: prices[i] }) }
+        }
+        try { (series as ISeriesApi<'Area'>).setData(data) } catch { /**/ }
+        if (prices.length > 0) {
+          const last = prices[prices.length - 1]
+          firstPriceRef.current = prices[0]
+          prevPriceRef.current  = last
+          setLivePrice(last)
+          setPriceChange(last - prices[0])
+        }
       }
 
-      // ── Live tick update ──
+      /* Live tick */
       if (msg.msg_type === 'tick') {
-        type T = { tick: { quote: number; epoch: number; pip_size?: number } }
+        type T = { tick: { quote: number; epoch: number } }
         const t = (msg as unknown as T).tick
-        const q = Number(t.quote)
-        const e = Number(t.epoch)
-        const prev = prevPrice.current
+        const q = Number(t.quote), e = Number(t.epoch)
+        const prev = prevPriceRef.current
         setPriceDir(prev == null ? null : q > prev ? 'up' : q < prev ? 'down' : null)
-        prevPrice.current = q
+        prevPriceRef.current = q
         setLivePrice(q)
-        setPrices(prev => { const n = [...prev, q]; return n.length > 2000 ? n.slice(-2000) : n })
-        setTimes(prev => { const n = [...prev, e]; return n.length > 2000 ? n.slice(-2000) : n })
+        if (firstPriceRef.current != null) setPriceChange(q - firstPriceRef.current)
+        try { (series as ISeriesApi<'Area'>).update({ time: e as UTCTimestamp, value: q }) } catch { /**/ }
       }
 
-      // ── Candles (initial batch) ──
+      /* Initial candles */
       if (msg.msg_type === 'candles') {
         type C = { candles: Array<{ epoch: number; open: string; high: string; low: string; close: string }> }
         const arr = (msg as unknown as C).candles
-        const parsed: Candle[] = arr.map(c => ({
-          epoch: Number(c.epoch),
-          open:  Number(c.open),
-          high:  Number(c.high),
-          low:   Number(c.low),
-          close: Number(c.close),
+        const data = arr.map(c => ({
+          time: Number(c.epoch) as UTCTimestamp,
+          open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close),
         }))
-        setCandles(parsed)
-        const last = parsed[parsed.length - 1]
-        if (last) { setLivePrice(last.close); prevPrice.current = last.close }
+        try { (series as ISeriesApi<'Candlestick'>).setData(data) } catch { /**/ }
+        if (arr.length > 0) {
+          const last  = Number(arr[arr.length - 1].close)
+          const first = Number(arr[0].open)
+          firstPriceRef.current = first
+          prevPriceRef.current  = last
+          setLivePrice(last)
+          setPriceChange(last - first)
+        }
       }
 
-      // ── Live OHLC update (current candle forming) ──
-      // ohlc.open_time = epoch of candle start; if newer than last candle → new candle
+      /* Live OHLC */
       if (msg.msg_type === 'ohlc') {
-        type O = { ohlc: { open: string; high: string; low: string; close: string; open_time: string; epoch: string } }
-        const o = (msg as unknown as O).ohlc
-        const newCandle: Candle = {
-          epoch: Number(o.open_time),
-          open:  Number(o.open),
-          high:  Number(o.high),
-          low:   Number(o.low),
-          close: Number(o.close),
-        }
-        const q = newCandle.close
-        const prev = prevPrice.current
+        type O = { ohlc: { open: string; high: string; low: string; close: string; open_time: string } }
+        const o  = (msg as unknown as O).ohlc
+        const q  = Number(o.close)
+        const prev = prevPriceRef.current
         setPriceDir(prev == null ? null : q > prev ? 'up' : q < prev ? 'down' : null)
-        prevPrice.current = q
+        prevPriceRef.current = q
         setLivePrice(q)
-        setCandles(prev => {
-          if (!prev.length) return [newCandle]
-          const last = prev[prev.length - 1]
-          if (newCandle.epoch === last.epoch) {
-            // Update current candle
-            return [...prev.slice(0, -1), newCandle]
-          } else if (newCandle.epoch > last.epoch) {
-            // New candle started
-            return [...prev, newCandle]
-          }
-          return prev
-        })
+        if (firstPriceRef.current != null) setPriceChange(q - firstPriceRef.current)
+        try {
+          (series as ISeriesApi<'Candlestick'>).update({
+            time: Number(o.open_time) as UTCTimestamp,
+            open: Number(o.open), high: Number(o.high), low: Number(o.low), close: q,
+          })
+        } catch { /**/ }
       }
     }
 
     ws.onerror = () => setConnected(false)
-    ws.onclose = () => { setConnected(false); wsRef.current = null }
+    ws.onclose = () => { setConnected(false) }
 
     return () => {
+      obs.disconnect()
       try {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ forget_all: isTickMode ? 'ticks' : 'candles', req_id: 99 }))
-        }
       } catch { /**/ }
       ws.close()
-      wsRef.current = null
+      chart.remove()
+      chartRef.current  = null
+      seriesRef.current = null
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, tfIdx])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, tfIdx, chartType])
 
-  const market = MARKETS.find(m => m.symbol === symbol)
+  /* ── Crosshair toggle (no chart recreate needed) ── */
+  function toggleCrosshair() {
+    const next = !crosshair
+    setCrosshair(next)
+    chartRef.current?.applyOptions({
+      crosshair: { mode: next ? CrosshairMode.Normal : CrosshairMode.Hidden },
+    })
+  }
 
-  // Price change since first visible tick / open of first visible candle
-  const priceColor = priceDir === 'up' ? '#26a69a' : priceDir === 'down' ? '#ef5350' : '#FCA311'
+  /* ── Zoom helpers ── */
+  function zoom(direction: 'in' | 'out') {
+    const ts = chartRef.current?.timeScale()
+    if (!ts) return
+    const range = ts.getVisibleLogicalRange()
+    if (!range) return
+    const span = range.to - range.from
+    const delta = span * 0.2
+    ts.setVisibleLogicalRange({
+      from: range.from + (direction === 'in' ? delta : -delta),
+      to:   range.to   - (direction === 'in' ? delta : -delta),
+    })
+  }
+
+  /* ── Filtered market groups ── */
+  const filteredGroups = MARKET_GROUPS.map(g => ({
+    ...g,
+    markets: g.markets.filter(m =>
+      !mktSearch ||
+      m.label.toLowerCase().includes(mktSearch.toLowerCase()) ||
+      m.symbol.toLowerCase().includes(mktSearch.toLowerCase())
+    ),
+  })).filter(g => g.markets.length > 0)
+
+  /* ── Chart type icon ── */
+  const ChartTypeIcon = effectiveType === 'candles' ? IcCandles : effectiveType === 'line' ? IcLine : IcArea
 
   return (
-    <div style={{ background: '#060d18', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ background: '#060d18', height: '100%', display: 'flex', overflow: 'hidden', position: 'relative' }}>
 
-      {/* ── Top toolbar ── */}
+      {/* ══ LEFT TOOLBAR (sc-toolbar-widget) ══ */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap',
-        padding: '0.55rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.07)',
-        background: '#07101f', flexShrink: 0,
+        width: '44px', flexShrink: 0,
+        background: '#07101f',
+        borderRight: '1px solid rgba(255,255,255,0.055)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        paddingTop: '6px', paddingBottom: '8px',
+        zIndex: 3, position: 'relative',
       }}>
 
-        {/* Market selector */}
-        <select
-          value={symbol}
-          onChange={e => setSymbol(e.target.value)}
-          style={{
-            background: '#0d1829', border: '1px solid rgba(255,255,255,0.1)',
-            borderRadius: '6px', color: '#fff', fontSize: '0.78rem', fontWeight: 600,
-            padding: '0.32rem 0.55rem', cursor: 'pointer', outline: 'none',
-          }}
-        >
-          {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.label}</option>)}
-        </select>
+        {/* Chart-type / Timeframe button */}
+        <div style={{ position: 'relative', width: '100%' }}>
+          <button
+            onClick={() => { setShowChartMenu(v => !v); setShowMkt(false) }}
+            style={{
+              ...toolbarBtn,
+              width: '100%',
+              color: showChartMenu ? '#FCA311' : 'rgba(200,215,235,0.55)',
+              background: showChartMenu ? 'rgba(252,163,17,0.1)' : 'transparent',
+            }}
+            title="Chart types"
+          >
+            <span style={{ fontSize: '0.58rem', fontWeight: 800, color: 'inherit', lineHeight: 1 }}>
+              {tf.label}
+            </span>
+            <ChartTypeIcon />
+            <span style={{ fontSize: '0.48rem', color: 'rgba(200,215,235,0.35)', letterSpacing: '0.01em' }}>
+              {effectiveType === 'area' ? 'Area' : effectiveType === 'candles' ? 'Candles' : 'Line'}
+            </span>
+          </button>
+
+          {/* Chart-type / TF dropdown panel */}
+          {showChartMenu && (
+            <div style={{
+              position: 'absolute', top: 0, left: '48px',
+              background: '#0a1628',
+              border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '10px',
+              padding: '14px',
+              width: '200px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+              zIndex: 20,
+            }}>
+              {/* Timeframe section */}
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
+                  Timeframe
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                  {TIMEFRAMES.map((t, i) => (
+                    <button key={t.label} onClick={() => { setTfIdx(i); if (t.granularity === 0) setChartType('area') }} style={{
+                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer', outline: 'none',
+                      background: tfIdx === i ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.06)',
+                      color: tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.5)',
+                      fontSize: '0.68rem', fontWeight: 700,
+                      outline: tfIdx === i ? '1px solid rgba(252,163,17,0.4)' : 'none',
+                    }}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Chart type section (only for non-tick) */}
+              {!isTickMode && (
+                <div>
+                  <div style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
+                    Chart type
+                  </div>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    {CHART_TYPES.map(ct => {
+                      const Icon = ct.id === 'candles' ? IcCandles : ct.id === 'line' ? IcLine : IcArea
+                      return (
+                        <button key={ct.id} onClick={() => setChartType(ct.id as ChartType)} style={{
+                          flex: 1, padding: '6px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer', outline: 'none',
+                          background: chartType === ct.id ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.05)',
+                          color: chartType === ct.id ? '#FCA311' : 'rgba(229,229,229,0.45)',
+                          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
+                          outline: chartType === ct.id ? '1px solid rgba(252,163,17,0.4)' : 'none',
+                        }}>
+                          <Icon />
+                          <span style={{ fontSize: '0.55rem', fontWeight: 600 }}>{ct.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Divider */}
-        <div style={{ width: '1px', height: '20px', background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+        <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
-        {/* Timeframe pills */}
-        <div style={{ display: 'flex', gap: '2px', background: 'rgba(255,255,255,0.04)', borderRadius: '7px', padding: '3px' }}>
-          {TIMEFRAMES.map((tf, i) => (
-            <button key={tf.label} onClick={() => setTfIdx(i)} style={{
-              padding: '0.2rem 0.5rem', borderRadius: '5px', border: 'none',
-              background: tfIdx === i ? 'rgba(252,163,17,0.18)' : 'transparent',
-              color: tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.4)',
-              fontSize: '0.7rem', fontWeight: 700, cursor: 'pointer',
-              transition: 'all 0.12s',
-              outline: tfIdx === i ? '1px solid rgba(252,163,17,0.35)' : 'none',
-            }}>
-              {tf.label}
-            </button>
-          ))}
-        </div>
+        {/* Indicators */}
+        <button style={toolbarBtn} title="Indicators">
+          <IcIndicators />
+          <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Indicators</span>
+        </button>
 
-        {/* Live price */}
-        {livePrice != null && (
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'baseline', gap: '0.5rem' }}>
-            <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              {market?.label}
-            </span>
-            <span style={{
-              fontSize: '1.15rem', fontWeight: 800,
-              color: priceColor,
-              fontVariantNumeric: 'tabular-nums', lineHeight: 1,
-              transition: 'color 0.2s',
-            }}>
-              {fmtPrice(livePrice, pipSize)}
-            </span>
-          </div>
-        )}
+        {/* Templates */}
+        <button style={toolbarBtn} title="Templates">
+          <IcTemplates />
+          <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Templates</span>
+        </button>
 
-        {/* Connection dot */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginLeft: livePrice != null ? '0' : 'auto' }}>
-          <span style={{
-            width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
-            background: connected ? '#22c55e' : '#666',
-            boxShadow: connected ? '0 0 5px #22c55e88' : 'none',
-            animation: connected ? 'pulse 2s ease infinite' : 'none',
-          }} />
-          <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>
-            {connected ? 'Live' : 'Connecting…'}
-          </span>
-        </div>
+        {/* Drawing tools */}
+        <button style={toolbarBtn} title="Drawing tools">
+          <IcDrawing />
+          <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Drawing</span>
+        </button>
+
+        {/* Download */}
+        <button style={toolbarBtn} title="Download">
+          <IcDownload />
+          <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Download</span>
+        </button>
       </div>
 
-      {/* ── Chart area ── */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '0' }}>
-        {isTickMode
-          ? <TickChart prices={prices} times={times} pipSize={pipSize} />
-          : <CandleChart candles={candles} pipSize={pipSize} granularity={tf.granularity} />
-        }
+      {/* ══ MAIN CHART AREA ══ */}
+      <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+
+        {/* cq-top-ui-widgets — market selector button overlaid on chart */}
+        <div style={{
+          position: 'absolute', top: '10px', left: '10px',
+          zIndex: 5, display: 'flex', alignItems: 'center', gap: '8px',
+        }}>
+          {/* cq-symbol-select-btn */}
+          <button
+            onClick={() => { setShowMkt(v => !v); setMktSearch(''); setShowChartMenu(false) }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              background: 'rgba(6,13,24,0.88)',
+              border: showMkt ? '1px solid rgba(252,163,17,0.5)' : '1px solid rgba(255,255,255,0.09)',
+              borderRadius: '9px',
+              padding: '7px 10px 7px 8px',
+              cursor: 'pointer', outline: 'none',
+              backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+              boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
+            }}
+          >
+            {/* Market icon */}
+            <span style={{
+              width: '26px', height: '26px', borderRadius: '50%', flexShrink: 0,
+              background: 'linear-gradient(135deg,#FCA311 0%,#c97000 100%)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: '0.5rem', fontWeight: 900, color: '#000', letterSpacing: '-0.02em',
+            }}>
+              {symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase()}
+            </span>
+
+            {/* cq-symbol-info */}
+            <div>
+              {/* Market name */}
+              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#e5e5e5', lineHeight: 1.25, whiteSpace: 'nowrap' }}>
+                {market?.label ?? symbol}
+              </div>
+              {/* cq-chart-price */}
+              {livePrice != null && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '1px' }}>
+                  {/* cq-animated-price */}
+                  <span style={{
+                    fontSize: '0.82rem', fontWeight: 800,
+                    color: priceColor, fontVariantNumeric: 'tabular-nums',
+                    transition: 'color 0.18s',
+                    animation: priceDir ? 'pricePulse 0.25s ease' : 'none',
+                  }}>
+                    {fmt(livePrice, pipSize)}
+                  </span>
+                  <span style={{ color: 'rgba(229,229,229,0.3)', fontSize: '0.65rem' }}>-</span>
+                  {/* cq-change */}
+                  <span style={{ fontSize: '0.65rem', color: changeColor, fontVariantNumeric: 'tabular-nums' }}>
+                    {priceChange >= 0 ? '+' : ''}{fmt(priceChange, pipSize)}
+                    <span style={{ marginLeft: '3px' }}>
+                      ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
+                    </span>
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* cq-symbol-dropdown arrow */}
+            <span style={{ color: 'rgba(229,229,229,0.35)', marginLeft: '2px' }}>
+              <IcDropdown open={showMkt} />
+            </span>
+          </button>
+
+          {/* Connection indicator */}
+          <span style={{
+            display: 'flex', alignItems: 'center', gap: '4px',
+            background: 'rgba(6,13,24,0.8)', borderRadius: '6px',
+            padding: '4px 8px', border: '1px solid rgba(255,255,255,0.07)',
+          }}>
+            <span style={{
+              width: '6px', height: '6px', borderRadius: '50%',
+              background: connected ? '#22c55e' : '#444',
+              boxShadow: connected ? '0 0 6px #22c55e88' : 'none',
+              animation: connected ? 'pulse 2s ease infinite' : 'none',
+            }} />
+            <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.28)' }}>
+              {connected ? 'Live' : 'Connecting'}
+            </span>
+          </span>
+        </div>
+
+        {/* lightweight-charts canvas mount */}
+        <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
+
+        {/* ── sc-mcd (Market selector dialog) overlaid on chart ── */}
+        {showMkt && (
+          <>
+            {/* Backdrop */}
+            <div
+              onClick={() => setShowMkt(false)}
+              style={{ position: 'absolute', inset: 0, zIndex: 9, background: 'rgba(0,0,0,0.2)' }}
+            />
+
+            {/* Dialog panel */}
+            <div style={{
+              position: 'absolute', top: 0, left: 0, bottom: 0,
+              width: '520px', zIndex: 10,
+              background: '#070f1e',
+              borderRight: '1px solid rgba(255,255,255,0.07)',
+              display: 'flex',
+              boxShadow: '8px 0 40px rgba(0,0,0,0.65)',
+            }}>
+
+              {/* sc-mcd__tabs — LEFT category filter */}
+              <div style={{
+                width: '155px', flexShrink: 0,
+                borderRight: '1px solid rgba(255,255,255,0.06)',
+                display: 'flex', flexDirection: 'column',
+              }}>
+                <div style={{
+                  padding: '14px 14px 10px',
+                  fontSize: '0.8rem', fontWeight: 700, color: 'rgba(229,229,229,0.75)',
+                  borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  flexShrink: 0,
+                }}>
+                  Markets
+                </div>
+
+                {/* Category items */}
+                {[
+                  { icon: '★', label: 'Favorites' },
+                  { icon: '◉', label: 'Derived',    active: true },
+                  { icon: '₿', label: 'Crypto' },
+                  { icon: '⟲', label: 'Forex' },
+                  { icon: '◈', label: 'Commodities' },
+                ].map(cat => (
+                  <div
+                    key={cat.label}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      padding: '9px 14px',
+                      background: cat.active ? 'rgba(252,163,17,0.09)' : 'transparent',
+                      borderLeft: cat.active ? '2px solid #FCA311' : '2px solid transparent',
+                      cursor: 'default',
+                    }}
+                  >
+                    <span style={{ fontSize: '0.7rem', color: cat.active ? '#FCA311' : 'rgba(229,229,229,0.4)' }}>{cat.icon}</span>
+                    <span style={{ fontSize: '0.73rem', fontWeight: cat.active ? 700 : 400, color: cat.active ? '#FCA311' : 'rgba(229,229,229,0.5)' }}>
+                      {cat.label}
+                    </span>
+                    {cat.active && (
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 'auto' }}>
+                        <path d="M2 7L5 4L8 7" stroke="#FCA311" strokeWidth="1.5" strokeLinecap="round"/>
+                      </svg>
+                    )}
+                  </div>
+                ))}
+
+                {/* Sub-items for Derived */}
+                <div style={{ paddingLeft: '22px' }}>
+                  <div style={{ padding: '6px 14px', fontSize: '0.68rem', color: 'rgba(229,229,229,0.45)', cursor: 'default' }}>
+                    baskets
+                  </div>
+                  <div style={{
+                    padding: '6px 14px', fontSize: '0.68rem', fontWeight: 600,
+                    color: '#FCA311', borderLeft: '2px solid #FCA311', cursor: 'default',
+                  }}>
+                    synthetics
+                  </div>
+                </div>
+              </div>
+
+              {/* sc-mcd__content — RIGHT search + market list */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+
+                {/* Search */}
+                <div style={{
+                  padding: '10px 12px',
+                  borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  flexShrink: 0,
+                }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    background: 'rgba(255,255,255,0.06)', borderRadius: '8px',
+                    padding: '8px 12px', border: '1px solid rgba(255,255,255,0.08)',
+                  }}>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <circle cx="6" cy="6" r="4" stroke="rgba(229,229,229,0.35)" strokeWidth="1.5"/>
+                      <path d="M9 9L12 12" stroke="rgba(229,229,229,0.35)" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                    <input
+                      autoFocus
+                      type="text"
+                      placeholder="Search..."
+                      value={mktSearch}
+                      onChange={e => setMktSearch(e.target.value)}
+                      style={{
+                        background: 'none', border: 'none', outline: 'none',
+                        color: '#e5e5e5', fontSize: '0.78rem', flex: 1,
+                      }}
+                    />
+                    {mktSearch && (
+                      <button onClick={() => setMktSearch('')} style={{
+                        background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)',
+                        cursor: 'pointer', padding: 0, fontSize: '1rem', lineHeight: 1,
+                      }}>×</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Market list (sc-mcd__content__body) */}
+                <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '8px' }}>
+                  {filteredGroups.map(group => (
+                    <div key={group.id}>
+                      {/* subcategory header */}
+                      <div style={{
+                        padding: '10px 14px 4px',
+                        fontSize: '0.6rem', fontWeight: 700,
+                        color: 'rgba(229,229,229,0.28)',
+                        textTransform: 'uppercase', letterSpacing: '0.08em',
+                      }}>
+                        {group.name}
+                      </div>
+
+                      {group.markets.map(m => {
+                        const isSel = m.symbol === symbol
+                        return (
+                          <button
+                            key={m.symbol}
+                            onClick={() => { setSymbol(m.symbol); setShowMkt(false) }}
+                            style={{
+                              width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
+                              padding: '8px 14px',
+                              background: isSel ? 'rgba(252,163,17,0.07)' : 'transparent',
+                              border: 'none',
+                              borderLeft: isSel ? '2px solid #FCA311' : '2px solid transparent',
+                              color: isSel ? '#FCA311' : 'rgba(229,229,229,0.75)',
+                              cursor: 'pointer', textAlign: 'left',
+                            }}
+                          >
+                            {/* market icon */}
+                            <span style={{
+                              width: '28px', height: '28px', borderRadius: '50%', flexShrink: 0,
+                              background: isSel ? 'rgba(252,163,17,0.18)' : 'rgba(255,255,255,0.06)',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: '0.52rem', fontWeight: 800,
+                              color: isSel ? '#FCA311' : 'rgba(229,229,229,0.4)',
+                              letterSpacing: '-0.03em',
+                            }}>
+                              {m.symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase()}
+                            </span>
+
+                            <span style={{ fontSize: '0.75rem', fontWeight: isSel ? 700 : 400 }}>
+                              {m.label}
+                            </span>
+
+                            {isSel && (
+                              <span style={{ marginLeft: 'auto', color: '#FCA311', fontSize: '0.8rem' }}>✓</span>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ))}
+
+                  {filteredGroups.length === 0 && (
+                    <div style={{
+                      textAlign: 'center', padding: '2.5rem',
+                      color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem',
+                    }}>
+                      No markets found
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Close chart-menu when clicking outside */}
+        {showChartMenu && (
+          <div
+            onClick={() => setShowChartMenu(false)}
+            style={{ position: 'absolute', inset: 0, zIndex: 15 }}
+          />
+        )}
+      </div>
+
+      {/* ══ RIGHT NAVIGATION WIDGET (sc-navigation-widget) ══ */}
+      <div style={{
+        width: '32px', flexShrink: 0,
+        background: '#07101f',
+        borderLeft: '1px solid rgba(255,255,255,0.055)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        justifyContent: 'flex-end', paddingBottom: '42px', gap: '3px',
+      }}>
+        <button title="Zoom in"    style={navBtn} onClick={() => zoom('in')}>
+          <IcZoomIn />
+        </button>
+        <button
+          title={crosshair ? 'Disable crosshair' : 'Enable crosshair'}
+          onClick={toggleCrosshair}
+          style={{
+            ...navBtn,
+            background: crosshair ? 'rgba(252,163,17,0.12)' : 'transparent',
+            color: crosshair ? '#FCA311' : 'rgba(200,215,235,0.5)',
+            outline: crosshair ? '1px solid rgba(252,163,17,0.3)' : 'none',
+            borderRadius: '4px',
+          }}
+        >
+          <IcCrosshair />
+        </button>
+        <button title="Zoom out"   style={navBtn} onClick={() => zoom('out')}>
+          <IcZoomOut />
+        </button>
+        <button title="Scroll to latest" style={navBtn} onClick={() => chartRef.current?.timeScale().scrollToRealTime()}>
+          <IcLatest />
+        </button>
       </div>
 
       <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+        @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        @keyframes pricePulse { 0%{opacity:0.5} 100%{opacity:1} }
+        input::placeholder { color: rgba(229,229,229,0.28); }
+        button:hover       { filter: brightness(1.2); }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
       `}</style>
     </div>
   )
