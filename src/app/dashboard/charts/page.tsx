@@ -10,11 +10,16 @@ import {
   UTCTimestamp,
 } from 'lightweight-charts'
 
-/* ─── Constants ─────────────────────────────────────────────────────────── */
+/* ─── API ────────────────────────────────────────────────────────────────── */
+// Public WebSocket — no auth required for market data
 const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
+// Valid granularities from ticks_history API schema
+// Source: https://api.deriv.com/api-explorer/#ticks_history
+// granularity 0 = our sentinel for tick mode (sends style:'ticks', no granularity param)
+// Valid API values: 60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400
 const TIMEFRAMES = [
-  { label: '1T',  granularity: 0     },
+  { label: '1T',  granularity: 0     },  // style: 'ticks'
   { label: '1m',  granularity: 60    },
   { label: '5m',  granularity: 300   },
   { label: '15m', granularity: 900   },
@@ -31,52 +36,37 @@ const CHART_TYPES = [
 ] as const
 type ChartType = 'area' | 'candles' | 'line'
 
-const MARKET_GROUPS = [
-  {
-    id: 'volatility',
-    name: 'Volatility indices',
-    markets: [
-      { symbol: '1HZ100V', label: 'Volatility 100 (1s) Index' },
-      { symbol: '1HZ75V',  label: 'Volatility 75 (1s) Index'  },
-      { symbol: '1HZ50V',  label: 'Volatility 50 (1s) Index'  },
-      { symbol: '1HZ25V',  label: 'Volatility 25 (1s) Index'  },
-      { symbol: '1HZ10V',  label: 'Volatility 10 (1s) Index'  },
-      { symbol: 'R_100',   label: 'Volatility 100 Index'       },
-      { symbol: 'R_75',    label: 'Volatility 75 Index'        },
-      { symbol: 'R_50',    label: 'Volatility 50 Index'        },
-      { symbol: 'R_25',    label: 'Volatility 25 Index'        },
-      { symbol: 'R_10',    label: 'Volatility 10 Index'        },
-    ],
-  },
-  {
-    id: 'crashboom',
-    name: 'Crash/Boom',
-    markets: [
-      { symbol: 'BOOM1000',  label: 'Boom 1000 Index'   },
-      { symbol: 'BOOM500',   label: 'Boom 500 Index'    },
-      { symbol: 'CRASH1000', label: 'Crash 1000 Index'  },
-      { symbol: 'CRASH500',  label: 'Crash 500 Index'   },
-    ],
-  },
-  {
-    id: 'jump',
-    name: 'Jump indices',
-    markets: [
-      { symbol: 'JD100', label: 'Jump 100 Index' },
-      { symbol: 'JD75',  label: 'Jump 75 Index'  },
-      { symbol: 'JD50',  label: 'Jump 50 Index'  },
-      { symbol: 'JD25',  label: 'Jump 25 Index'  },
-      { symbol: 'JD10',  label: 'Jump 10 Index'  },
-    ],
-  },
-  {
-    id: 'step',
-    name: 'Step indices',
-    markets: [{ symbol: 'stpRNG', label: 'Step Index 100' }],
-  },
-]
+/* ─── active_symbols API types ───────────────────────────────────────────── */
+// Source: https://api.deriv.com/api-explorer/#active_symbols
+interface ActiveSymbol {
+  underlying_symbol:      string  // e.g. "1HZ100V"
+  underlying_symbol_name: string  // e.g. "Volatility 100 (1s) Index"
+  market:                 string  // e.g. "synthetic_index"
+  submarket:              string  // e.g. "random_1hz_index"
+  pip_size:               number  // decimal places for price display
+  exchange_is_open:       0 | 1   // live market open status
+}
 
-const ALL_MARKETS = MARKET_GROUPS.flatMap(g => g.markets)
+interface SymbolGroup {
+  submarket:   string
+  displayName: string
+  symbols:     ActiveSymbol[]
+}
+
+/* ─── Submarket display names ────────────────────────────────────────────── */
+function formatSubmarket(sub: string): string {
+  const map: Record<string, string> = {
+    random_1hz_index: 'Volatility (1s) Indices',
+    random_index:     'Volatility Indices',
+    crash_index:      'Crash/Boom Indices',
+    jump_daily:       'Jump Indices',
+    step_index:       'Step Indices',
+    random_daily:     'Daily Reset Indices',
+  }
+  return map[sub] ?? sub.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+const DEFAULT_SYMBOL = '1HZ100V'
 
 /* ─── Shared button styles ───────────────────────────────────────────────── */
 const toolbarBtn: React.CSSProperties = {
@@ -94,7 +84,7 @@ const navBtn: React.CSSProperties = {
   borderRadius: '4px', flexShrink: 0,
 }
 
-/* ─── SVG icons ──────────────────────────────────────────────────────────── */
+/* ─── SVG Icons ──────────────────────────────────────────────────────────── */
 function IcArea() {
   return (
     <svg width="22" height="20" viewBox="0 0 22 20" fill="none">
@@ -202,50 +192,100 @@ function IcDropdown({ open }: { open: boolean }) {
   )
 }
 
+/* ─── Helpers ────────────────────────────────────────────────────────────── */
 function fmt(p: number, pip: number) { return p.toFixed(pip) }
 
 /* ─── Main Page ─────────────────────────────────────────────────────────── */
 export default function ChartsPage() {
-  const [symbol,      setSymbol]      = useState('1HZ100V')
-  const [tfIdx,       setTfIdx]       = useState(0)
-  const [chartType,   setChartType]   = useState<ChartType>('area')
-  const [connected,   setConnected]   = useState(false)
-  const [livePrice,   setLivePrice]   = useState<number | null>(null)
-  const [priceChange, setPriceChange] = useState(0)
-  const [priceDir,    setPriceDir]    = useState<'up' | 'down' | null>(null)
-  const [pipSize,     setPipSize]     = useState(2)
-  const [showMkt,     setShowMkt]     = useState(false)
-  const [mktSearch,   setMktSearch]   = useState('')
-  const [showChartMenu, setShowChartMenu] = useState(false)
-  const [crosshair,   setCrosshair]   = useState(true)
 
+  /* ── UI state ── */
+  const [symbol,         setSymbol]         = useState(DEFAULT_SYMBOL)
+  const [tfIdx,          setTfIdx]          = useState(0)
+  const [chartType,      setChartType]      = useState<ChartType>('area')
+  const [connected,      setConnected]      = useState(false)
+  const [livePrice,      setLivePrice]      = useState<number | null>(null)
+  const [priceChange,    setPriceChange]    = useState(0)
+  const [priceDir,       setPriceDir]       = useState<'up' | 'down' | null>(null)
+  const [pipSize,        setPipSize]        = useState(2)
+  const [showMkt,        setShowMkt]        = useState(false)
+  const [mktSearch,      setMktSearch]      = useState('')
+  const [showChartMenu,  setShowChartMenu]  = useState(false)
+  const [crosshair,      setCrosshair]      = useState(true)
+  const [symbolGroups,   setSymbolGroups]   = useState<SymbolGroup[]>([])
+  const [loadingSymbols, setLoadingSymbols] = useState(true)
+
+  /* ── Refs ── */
   const chartContainerRef = useRef<HTMLDivElement>(null)
-  const chartRef    = useRef<IChartApi | null>(null)
-  const seriesRef   = useRef<ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null)
-  const prevPriceRef  = useRef<number | null>(null)
-  const firstPriceRef = useRef<number | null>(null)
-  const pipRef      = useRef(2)
+  const chartRef          = useRef<IChartApi | null>(null)
+  const seriesRef         = useRef<ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null)
+  const wsRef             = useRef<WebSocket | null>(null)
+  const prevPriceRef      = useRef<number | null>(null)
+  const firstPriceRef     = useRef<number | null>(null)
 
-  const tf         = TIMEFRAMES[tfIdx]
-  const isTickMode = tf.granularity === 0
-  // In tick mode, always area
+  /* ── Derived ── */
+  const tf           = TIMEFRAMES[tfIdx]
+  const isTickMode   = tf.granularity === 0
+  // In tick mode always render as area (candles need OHLC data)
   const effectiveType: ChartType = isTickMode ? 'area' : chartType
-  const market     = ALL_MARKETS.find(m => m.symbol === symbol)
+  const allSymbols   = symbolGroups.flatMap(g => g.symbols)
+  const activeSymbol = allSymbols.find(s => s.underlying_symbol === symbol)
+  const pip          = activeSymbol?.pip_size ?? pipSize
 
-  const priceUp    = priceDir === 'up'
-  const priceDown  = priceDir === 'down'
-  const priceColor = priceUp ? '#22c55e' : priceDown ? '#ef4444' : 'rgba(229,229,229,0.9)'
+  const priceColor  = priceDir === 'up' ? '#22c55e' : priceDir === 'down' ? '#ef4444' : 'rgba(229,229,229,0.9)'
   const changeColor = priceChange >= 0 ? '#22c55e' : '#ef4444'
-  const changePct   = firstPriceRef.current
-    ? (priceChange / firstPriceRef.current) * 100
-    : 0
+  const changePct   = firstPriceRef.current ? (priceChange / firstPriceRef.current) * 100 : 0
 
-  /* ── Chart + WS: recreated on symbol / tf / chartType change ── */
+  /* ────────────────────────────────────────────────────────────────────────
+     Effect 1: Fetch active_symbols on mount (one-time)
+     Matches Deriv API docs: active_symbols request with brief subset.
+     Source: https://api.deriv.com/api-explorer/#active_symbols
+  ─────────────────────────────────────────────────────────────────────────── */
+  useEffect(() => {
+    const ws = new WebSocket(PUBLIC_WS_URL)
+
+    ws.onopen = () => {
+      // 'brief' returns a subset of fields sufficient for our selector
+      ws.send(JSON.stringify({ active_symbols: 'brief', req_id: 1 }))
+    }
+
+    ws.onmessage = (ev) => {
+      let msg: Record<string, unknown>
+      try { msg = JSON.parse(ev.data as string) } catch { return }
+
+      if (msg.msg_type === 'active_symbols') {
+        type AS = { active_symbols: ActiveSymbol[] }
+        const symbols = (msg as unknown as AS).active_symbols
+
+        // Group by submarket; focus on synthetic_index (chartable 24/7)
+        const grouped: Record<string, SymbolGroup> = {}
+        for (const s of symbols) {
+          if (s.market !== 'synthetic_index') continue
+          const key = s.submarket
+          if (!grouped[key]) {
+            grouped[key] = { submarket: key, displayName: formatSubmarket(key), symbols: [] }
+          }
+          grouped[key].symbols.push(s)
+        }
+        setSymbolGroups(Object.values(grouped))
+        setLoadingSymbols(false)
+        ws.close()
+      }
+    }
+
+    ws.onerror = () => { setLoadingSymbols(false); try { ws.close() } catch { /**/ } }
+    return () => { try { ws.close() } catch { /**/ } }
+  }, [])
+
+  /* ────────────────────────────────────────────────────────────────────────
+     Effect 2: Create chart instance (mount only)
+     Chart is kept alive across symbol / TF / chartType changes — only the
+     series is swapped in Effect 3. This preserves the chart layout and
+     avoids expensive DOM recreation on every user interaction.
+  ─────────────────────────────────────────────────────────────────────────── */
   useEffect(() => {
     const container = chartContainerRef.current
     if (!container) return
 
-    /* Create chart */
     const chart = createChart(container, {
       width:  container.clientWidth,
       height: container.clientHeight,
@@ -266,7 +306,7 @@ export default function ChartsPage() {
       timeScale: {
         borderColor:    'rgba(255,255,255,0.06)',
         timeVisible:    true,
-        secondsVisible: isTickMode,
+        secondsVisible: true,
         rightOffset:    10,
       },
       crosshair: {
@@ -279,44 +319,72 @@ export default function ChartsPage() {
     })
     chartRef.current = chart
 
-    /* Create series based on type */
-    let series: ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>
-    if (effectiveType === 'area') {
-      series = chart.addAreaSeries({
-        lineColor:    '#FCA311',
-        topColor:     'rgba(252,163,17,0.18)',
-        bottomColor:  'rgba(252,163,17,0.0)',
-        lineWidth:    2,
-        priceLineColor: '#FCA311',
-        priceLineStyle: 2,
-      })
-    } else if (effectiveType === 'line') {
-      series = chart.addLineSeries({
-        color:          '#FCA311',
-        lineWidth:      2,
-        priceLineColor: '#FCA311',
-        priceLineStyle: 2,
-      })
-    } else {
-      series = chart.addCandlestickSeries({
-        upColor:         '#26a69a',
-        downColor:       '#ef5350',
-        borderUpColor:   '#26a69a',
-        borderDownColor: '#ef5350',
-        wickUpColor:     '#26a69a',
-        wickDownColor:   '#ef5350',
-        priceLineStyle:  2,
-      })
-    }
+    // Create initial area series — Effect 3 will swap as needed
+    const series = chart.addAreaSeries({
+      lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)',
+      lineWidth: 2, priceLineColor: '#FCA311', priceLineStyle: 2,
+    })
     seriesRef.current = series
 
-    /* Resize observer */
+    // Responsive: resize chart to match container
     const obs = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
     })
     obs.observe(container)
 
-    /* Reset live state */
+    return () => {
+      obs.disconnect()
+      chart.remove()
+      chartRef.current  = null
+      seriesRef.current = null
+    }
+  }, [])
+
+  /* ────────────────────────────────────────────────────────────────────────
+     Effect 3: Chart data WebSocket — reruns on symbol / TF / chartType change
+     Pattern mirrors manual-trader: one WS per session config, cleaned up
+     with forget_all before close.
+
+     ticks_history API:
+       - style: 'ticks'                      → msg_type: 'history' (initial), 'tick' (live)
+       - style: 'candles', granularity: G   → msg_type: 'candles' (initial), 'ohlc' (live)
+     Source: https://api.deriv.com/api-explorer/#ticks_history
+  ─────────────────────────────────────────────────────────────────────────── */
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+
+    // ── 1. Swap series to match effectiveType ──────────────────────────────
+    // Remove the old series and add the correct type for this session.
+    if (seriesRef.current) {
+      try { chart.removeSeries(seriesRef.current) } catch { /**/ }
+      seriesRef.current = null
+    }
+
+    let series: ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>
+    if (effectiveType === 'area') {
+      series = chart.addAreaSeries({
+        lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)',
+        lineWidth: 2, priceLineColor: '#FCA311', priceLineStyle: 2,
+      })
+    } else if (effectiveType === 'line') {
+      series = chart.addLineSeries({
+        color: '#FCA311', lineWidth: 2, priceLineColor: '#FCA311', priceLineStyle: 2,
+      })
+    } else {
+      series = chart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+        priceLineStyle: 2,
+      })
+    }
+    seriesRef.current = series
+
+    // Show seconds for tick mode (ticks arrive every ~1s)
+    chart.applyOptions({ timeScale: { secondsVisible: isTickMode } })
+
+    // ── 2. Reset live state ───────────────────────────────────────────────
     setConnected(false)
     setLivePrice(null)
     setPriceDir(null)
@@ -324,20 +392,25 @@ export default function ChartsPage() {
     prevPriceRef.current  = null
     firstPriceRef.current = null
 
-    /* Open WebSocket */
+    // ── 3. Open WebSocket ─────────────────────────────────────────────────
     const ws = new WebSocket(PUBLIC_WS_URL)
+    wsRef.current = ws
 
     ws.onopen = () => {
       setConnected(true)
+
       if (isTickMode) {
+        // Tick mode: style 'ticks' — do NOT send granularity (not a valid param for ticks)
         ws.send(JSON.stringify({
           ticks_history: symbol, end: 'latest', count: 1000,
-          style: 'ticks', subscribe: 1, req_id: 1,
+          style: 'ticks', subscribe: 1, req_id: 10,
         }))
       } else {
+        // Candle mode: style 'candles' with a valid granularity value
+        // Valid values: 60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400
         ws.send(JSON.stringify({
           ticks_history: symbol, end: 'latest', count: 200,
-          style: 'candles', granularity: tf.granularity, subscribe: 1, req_id: 2,
+          style: 'candles', granularity: tf.granularity, subscribe: 1, req_id: 10,
         }))
       }
     }
@@ -346,21 +419,29 @@ export default function ChartsPage() {
       let msg: Record<string, unknown>
       try { msg = JSON.parse(ev.data as string) } catch { return }
 
+      // pip_size: number of decimal places for this symbol's price
       const ps = (msg as { pip_size?: number }).pip_size
-      if (ps != null) { setPipSize(ps); pipRef.current = ps }
+      if (ps != null) setPipSize(ps)
 
-      /* Initial tick history */
+      // ── Initial tick history (style: 'ticks') ───────────────────────────
+      // Response msg_type: 'history' — full batch of historical tick prices
       if (msg.msg_type === 'history') {
         type H = { history: { prices: number[]; times: number[] } }
-        const h = (msg as unknown as H).history
+        const h      = (msg as unknown as H).history
         const prices = h.prices.map(Number)
         const times  = h.times.map(Number)
-        const seen   = new Set<number>()
+
+        // Deduplicate: API may return consecutive ticks with identical epoch
+        const seen = new Set<number>()
         const data: { time: UTCTimestamp; value: number }[] = []
         for (let i = 0; i < prices.length; i++) {
-          if (!seen.has(times[i])) { seen.add(times[i]); data.push({ time: times[i] as UTCTimestamp, value: prices[i] }) }
+          if (!seen.has(times[i])) {
+            seen.add(times[i])
+            data.push({ time: times[i] as UTCTimestamp, value: prices[i] })
+          }
         }
-        try { (series as ISeriesApi<'Area'>).setData(data) } catch { /**/ }
+        try { (seriesRef.current as ISeriesApi<'Area'>)?.setData(data) } catch { /**/ }
+
         if (prices.length > 0) {
           const last = prices[prices.length - 1]
           firstPriceRef.current = prices[0]
@@ -370,28 +451,34 @@ export default function ChartsPage() {
         }
       }
 
-      /* Live tick */
+      // ── Live tick update ─────────────────────────────────────────────────
+      // Response msg_type: 'tick' — one live price update
       if (msg.msg_type === 'tick') {
         type T = { tick: { quote: number; epoch: number } }
-        const t = (msg as unknown as T).tick
-        const q = Number(t.quote), e = Number(t.epoch)
+        const { quote: q, epoch: e } = (msg as unknown as T).tick
         const prev = prevPriceRef.current
         setPriceDir(prev == null ? null : q > prev ? 'up' : q < prev ? 'down' : null)
         prevPriceRef.current = q
         setLivePrice(q)
         if (firstPriceRef.current != null) setPriceChange(q - firstPriceRef.current)
-        try { (series as ISeriesApi<'Area'>).update({ time: e as UTCTimestamp, value: q }) } catch { /**/ }
+        try { (seriesRef.current as ISeriesApi<'Area'>)?.update({ time: e as UTCTimestamp, value: q }) } catch { /**/ }
       }
 
-      /* Initial candles */
+      // ── Initial candles batch (style: 'candles') ─────────────────────────
+      // Response msg_type: 'candles' — full OHLC history
+      // candle.epoch = candle open time (start of the granularity period)
       if (msg.msg_type === 'candles') {
         type C = { candles: Array<{ epoch: number; open: string; high: string; low: string; close: string }> }
-        const arr = (msg as unknown as C).candles
+        const arr  = (msg as unknown as C).candles
         const data = arr.map(c => ({
-          time: Number(c.epoch) as UTCTimestamp,
-          open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close),
+          time:  Number(c.epoch) as UTCTimestamp,
+          open:  Number(c.open),
+          high:  Number(c.high),
+          low:   Number(c.low),
+          close: Number(c.close),
         }))
-        try { (series as ISeriesApi<'Candlestick'>).setData(data) } catch { /**/ }
+        try { (seriesRef.current as ISeriesApi<'Candlestick'>)?.setData(data) } catch { /**/ }
+
         if (arr.length > 0) {
           const last  = Number(arr[arr.length - 1].close)
           const first = Number(arr[0].open)
@@ -402,43 +489,48 @@ export default function ChartsPage() {
         }
       }
 
-      /* Live OHLC */
+      // ── Live OHLC candle update ──────────────────────────────────────────
+      // Response msg_type: 'ohlc' — live update to the current open candle
+      // ohlc.open_time = candle start epoch (matches candle.epoch in the batch)
+      // ohlc.close     = current closing price of the live candle
       if (msg.msg_type === 'ohlc') {
         type O = { ohlc: { open: string; high: string; low: string; close: string; open_time: string } }
-        const o  = (msg as unknown as O).ohlc
-        const q  = Number(o.close)
+        const o    = (msg as unknown as O).ohlc
+        const q    = Number(o.close)
         const prev = prevPriceRef.current
         setPriceDir(prev == null ? null : q > prev ? 'up' : q < prev ? 'down' : null)
         prevPriceRef.current = q
         setLivePrice(q)
         if (firstPriceRef.current != null) setPriceChange(q - firstPriceRef.current)
         try {
-          (series as ISeriesApi<'Candlestick'>).update({
-            time: Number(o.open_time) as UTCTimestamp,
-            open: Number(o.open), high: Number(o.high), low: Number(o.low), close: q,
+          (seriesRef.current as ISeriesApi<'Candlestick'>)?.update({
+            time:  Number(o.open_time) as UTCTimestamp,
+            open:  Number(o.open),
+            high:  Number(o.high),
+            low:   Number(o.low),
+            close: q,
           })
         } catch { /**/ }
       }
     }
 
     ws.onerror = () => setConnected(false)
-    ws.onclose = () => { setConnected(false) }
+    ws.onclose = () => { setConnected(false); wsRef.current = null }
 
+    // ── Cleanup: forget subscription before closing (Deriv API best practice) ──
     return () => {
-      obs.disconnect()
       try {
-        if (ws.readyState === WebSocket.OPEN)
+        if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ forget_all: isTickMode ? 'ticks' : 'candles', req_id: 99 }))
+        }
       } catch { /**/ }
       ws.close()
-      chart.remove()
-      chartRef.current  = null
-      seriesRef.current = null
+      wsRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, tfIdx, chartType])
 
-  /* ── Crosshair toggle (no chart recreate needed) ── */
+  /* ── Crosshair toggle ── */
   function toggleCrosshair() {
     const next = !crosshair
     setCrosshair(next)
@@ -448,32 +540,33 @@ export default function ChartsPage() {
   }
 
   /* ── Zoom helpers ── */
-  function zoom(direction: 'in' | 'out') {
+  function zoom(dir: 'in' | 'out') {
     const ts = chartRef.current?.timeScale()
     if (!ts) return
     const range = ts.getVisibleLogicalRange()
     if (!range) return
-    const span = range.to - range.from
+    const span  = range.to - range.from
     const delta = span * 0.2
     ts.setVisibleLogicalRange({
-      from: range.from + (direction === 'in' ? delta : -delta),
-      to:   range.to   - (direction === 'in' ? delta : -delta),
+      from: range.from + (dir === 'in' ?  delta : -delta),
+      to:   range.to   - (dir === 'in' ?  delta : -delta),
     })
   }
 
-  /* ── Filtered market groups ── */
-  const filteredGroups = MARKET_GROUPS.map(g => ({
+  /* ── Filtered market groups for search ── */
+  const filteredGroups = symbolGroups.map(g => ({
     ...g,
-    markets: g.markets.filter(m =>
+    symbols: g.symbols.filter(s =>
       !mktSearch ||
-      m.label.toLowerCase().includes(mktSearch.toLowerCase()) ||
-      m.symbol.toLowerCase().includes(mktSearch.toLowerCase())
+      s.underlying_symbol_name.toLowerCase().includes(mktSearch.toLowerCase()) ||
+      s.underlying_symbol.toLowerCase().includes(mktSearch.toLowerCase())
     ),
-  })).filter(g => g.markets.length > 0)
+  })).filter(g => g.symbols.length > 0)
 
-  /* ── Chart type icon ── */
   const ChartTypeIcon = effectiveType === 'candles' ? IcCandles : effectiveType === 'line' ? IcLine : IcArea
+  const displayName   = activeSymbol?.underlying_symbol_name ?? symbol
 
+  /* ── Render ── */
   return (
     <div style={{ background: '#060d18', height: '100%', display: 'flex', overflow: 'hidden', position: 'relative' }}>
 
@@ -492,12 +585,11 @@ export default function ChartsPage() {
           <button
             onClick={() => { setShowChartMenu(v => !v); setShowMkt(false) }}
             style={{
-              ...toolbarBtn,
-              width: '100%',
-              color: showChartMenu ? '#FCA311' : 'rgba(200,215,235,0.55)',
+              ...toolbarBtn, width: '100%',
+              color:      showChartMenu ? '#FCA311' : 'rgba(200,215,235,0.55)',
               background: showChartMenu ? 'rgba(252,163,17,0.1)' : 'transparent',
             }}
-            title="Chart types"
+            title="Chart type &amp; timeframe"
           >
             <span style={{ fontSize: '0.58rem', fontWeight: 800, color: 'inherit', lineHeight: 1 }}>
               {tf.label}
@@ -508,7 +600,7 @@ export default function ChartsPage() {
             </span>
           </button>
 
-          {/* Chart-type / TF dropdown panel */}
+          {/* Dropdown panel: TF pills + chart type buttons */}
           {showChartMenu && (
             <div style={{
               position: 'absolute', top: 0, left: '48px',
@@ -527,20 +619,24 @@ export default function ChartsPage() {
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                   {TIMEFRAMES.map((t, i) => (
-                    <button key={t.label} onClick={() => { setTfIdx(i); if (t.granularity === 0) setChartType('area') }} style={{
-                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
-                      background: tfIdx === i ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.06)',
-                      color: tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.5)',
-                      fontSize: '0.68rem', fontWeight: 700,
-                      outline: tfIdx === i ? '1px solid rgba(252,163,17,0.4)' : 'none',
-                    }}>
+                    <button
+                      key={t.label}
+                      onClick={() => { setTfIdx(i); if (t.granularity === 0) setChartType('area') }}
+                      style={{
+                        padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                        background: tfIdx === i ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.06)',
+                        color:      tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.5)',
+                        fontSize: '0.68rem', fontWeight: 700,
+                        outline: tfIdx === i ? '1px solid rgba(252,163,17,0.4)' : 'none',
+                      }}
+                    >
                       {t.label}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Chart type section (only for non-tick) */}
+              {/* Chart type section (only for non-tick modes) */}
               {!isTickMode && (
                 <div>
                   <div style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
@@ -550,13 +646,17 @@ export default function ChartsPage() {
                     {CHART_TYPES.map(ct => {
                       const Icon = ct.id === 'candles' ? IcCandles : ct.id === 'line' ? IcLine : IcArea
                       return (
-                        <button key={ct.id} onClick={() => setChartType(ct.id as ChartType)} style={{
-                          flex: 1, padding: '6px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer',
-                          background: chartType === ct.id ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.05)',
-                          color: chartType === ct.id ? '#FCA311' : 'rgba(229,229,229,0.45)',
-                          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
-                          outline: chartType === ct.id ? '1px solid rgba(252,163,17,0.4)' : 'none',
-                        }}>
+                        <button
+                          key={ct.id}
+                          onClick={() => setChartType(ct.id as ChartType)}
+                          style={{
+                            flex: 1, padding: '6px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                            background: chartType === ct.id ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.05)',
+                            color:      chartType === ct.id ? '#FCA311' : 'rgba(229,229,229,0.45)',
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
+                            outline: chartType === ct.id ? '1px solid rgba(252,163,17,0.4)' : 'none',
+                          }}
+                        >
                           <Icon />
                           <span style={{ fontSize: '0.55rem', fontWeight: 600 }}>{ct.label}</span>
                         </button>
@@ -591,7 +691,7 @@ export default function ChartsPage() {
         </button>
 
         {/* Download */}
-        <button style={toolbarBtn} title="Download">
+        <button style={toolbarBtn} title="Download chart">
           <IcDownload />
           <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Download</span>
         </button>
@@ -600,7 +700,7 @@ export default function ChartsPage() {
       {/* ══ MAIN CHART AREA ══ */}
       <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
 
-        {/* cq-top-ui-widgets — market selector button overlaid on chart */}
+        {/* cq-top-ui-widgets: symbol selector + live price overlay */}
         <div style={{
           position: 'absolute', top: '10px', left: '10px',
           zIndex: 5, display: 'flex', alignItems: 'center', gap: '8px',
@@ -629,13 +729,11 @@ export default function ChartsPage() {
               {symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase()}
             </span>
 
-            {/* cq-symbol-info */}
+            {/* Symbol name + live price */}
             <div>
-              {/* Market name */}
               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#e5e5e5', lineHeight: 1.25, whiteSpace: 'nowrap' }}>
-                {market?.label ?? symbol}
+                {displayName}
               </div>
-              {/* cq-chart-price */}
               {livePrice != null && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '1px' }}>
                   {/* cq-animated-price */}
@@ -645,12 +743,12 @@ export default function ChartsPage() {
                     transition: 'color 0.18s',
                     animation: priceDir ? 'pricePulse 0.25s ease' : 'none',
                   }}>
-                    {fmt(livePrice, pipSize)}
+                    {fmt(livePrice, pip)}
                   </span>
                   <span style={{ color: 'rgba(229,229,229,0.3)', fontSize: '0.65rem' }}>-</span>
                   {/* cq-change */}
                   <span style={{ fontSize: '0.65rem', color: changeColor, fontVariantNumeric: 'tabular-nums' }}>
-                    {priceChange >= 0 ? '+' : ''}{fmt(priceChange, pipSize)}
+                    {priceChange >= 0 ? '+' : ''}{fmt(priceChange, pip)}
                     <span style={{ marginLeft: '3px' }}>
                       ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
                     </span>
@@ -686,7 +784,7 @@ export default function ChartsPage() {
         {/* lightweight-charts canvas mount */}
         <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
 
-        {/* ── sc-mcd (Market selector dialog) overlaid on chart ── */}
+        {/* ── sc-mcd: Market Selector Dialog (overlaid on chart) ── */}
         {showMkt && (
           <>
             {/* Backdrop */}
@@ -705,7 +803,7 @@ export default function ChartsPage() {
               boxShadow: '8px 0 40px rgba(0,0,0,0.65)',
             }}>
 
-              {/* sc-mcd__tabs — LEFT category filter */}
+              {/* sc-mcd__tabs: LEFT category filter */}
               <div style={{
                 width: '155px', flexShrink: 0,
                 borderRight: '1px solid rgba(255,255,255,0.06)',
@@ -720,25 +818,23 @@ export default function ChartsPage() {
                   Markets
                 </div>
 
-                {/* Category items */}
                 {[
-                  { icon: '★', label: 'Favorites' },
+                  { icon: '★', label: 'Favorites'   },
                   { icon: '◉', label: 'Derived',    active: true },
-                  { icon: '₿', label: 'Crypto' },
-                  { icon: '⟲', label: 'Forex' },
+                  { icon: '₿', label: 'Crypto'      },
+                  { icon: '⟲', label: 'Forex'       },
                   { icon: '◈', label: 'Commodities' },
                 ].map(cat => (
-                  <div
-                    key={cat.label}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: '8px',
-                      padding: '9px 14px',
-                      background: cat.active ? 'rgba(252,163,17,0.09)' : 'transparent',
-                      borderLeft: cat.active ? '2px solid #FCA311' : '2px solid transparent',
-                      cursor: 'default',
-                    }}
-                  >
-                    <span style={{ fontSize: '0.7rem', color: cat.active ? '#FCA311' : 'rgba(229,229,229,0.4)' }}>{cat.icon}</span>
+                  <div key={cat.label} style={{
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    padding: '9px 14px',
+                    background: cat.active ? 'rgba(252,163,17,0.09)' : 'transparent',
+                    borderLeft: cat.active ? '2px solid #FCA311' : '2px solid transparent',
+                    cursor: 'default',
+                  }}>
+                    <span style={{ fontSize: '0.7rem', color: cat.active ? '#FCA311' : 'rgba(229,229,229,0.4)' }}>
+                      {cat.icon}
+                    </span>
                     <span style={{ fontSize: '0.73rem', fontWeight: cat.active ? 700 : 400, color: cat.active ? '#FCA311' : 'rgba(229,229,229,0.5)' }}>
                       {cat.label}
                     </span>
@@ -764,15 +860,11 @@ export default function ChartsPage() {
                 </div>
               </div>
 
-              {/* sc-mcd__content — RIGHT search + market list */}
+              {/* sc-mcd__content: RIGHT search + symbol list */}
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
 
                 {/* Search */}
-                <div style={{
-                  padding: '10px 12px',
-                  borderBottom: '1px solid rgba(255,255,255,0.06)',
-                  flexShrink: 0,
-                }}>
+                <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: '8px',
                     background: 'rgba(255,255,255,0.06)', borderRadius: '8px',
@@ -788,10 +880,7 @@ export default function ChartsPage() {
                       placeholder="Search..."
                       value={mktSearch}
                       onChange={e => setMktSearch(e.target.value)}
-                      style={{
-                        background: 'none', border: 'none', outline: 'none',
-                        color: '#e5e5e5', fontSize: '0.78rem', flex: 1,
-                      }}
+                      style={{ background: 'none', border: 'none', outline: 'none', color: '#e5e5e5', fontSize: '0.78rem', flex: 1 }}
                     />
                     {mktSearch && (
                       <button onClick={() => setMktSearch('')} style={{
@@ -802,26 +891,32 @@ export default function ChartsPage() {
                   </div>
                 </div>
 
-                {/* Market list (sc-mcd__content__body) */}
+                {/* sc-mcd__content__body: symbol list from active_symbols API */}
                 <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '8px' }}>
-                  {filteredGroups.map(group => (
-                    <div key={group.id}>
-                      {/* subcategory header */}
+                  {loadingSymbols && (
+                    <div style={{ padding: '2.5rem', textAlign: 'center', color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem' }}>
+                      Loading markets…
+                    </div>
+                  )}
+
+                  {!loadingSymbols && filteredGroups.map(group => (
+                    <div key={group.submarket}>
+                      {/* Submarket group header */}
                       <div style={{
                         padding: '10px 14px 4px',
                         fontSize: '0.6rem', fontWeight: 700,
                         color: 'rgba(229,229,229,0.28)',
                         textTransform: 'uppercase', letterSpacing: '0.08em',
                       }}>
-                        {group.name}
+                        {group.displayName}
                       </div>
 
-                      {group.markets.map(m => {
-                        const isSel = m.symbol === symbol
+                      {group.symbols.map(sym => {
+                        const isSel = sym.underlying_symbol === symbol
                         return (
                           <button
-                            key={m.symbol}
-                            onClick={() => { setSymbol(m.symbol); setShowMkt(false) }}
+                            key={sym.underlying_symbol}
+                            onClick={() => { setSymbol(sym.underlying_symbol); setShowMkt(false) }}
                             style={{
                               width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
                               padding: '8px 14px',
@@ -830,9 +925,10 @@ export default function ChartsPage() {
                               borderLeft: isSel ? '2px solid #FCA311' : '2px solid transparent',
                               color: isSel ? '#FCA311' : 'rgba(229,229,229,0.75)',
                               cursor: 'pointer', textAlign: 'left',
+                              opacity: sym.exchange_is_open ? 1 : 0.45,
                             }}
                           >
-                            {/* market icon */}
+                            {/* Symbol icon */}
                             <span style={{
                               width: '28px', height: '28px', borderRadius: '50%', flexShrink: 0,
                               background: isSel ? 'rgba(252,163,17,0.18)' : 'rgba(255,255,255,0.06)',
@@ -841,15 +937,20 @@ export default function ChartsPage() {
                               color: isSel ? '#FCA311' : 'rgba(229,229,229,0.4)',
                               letterSpacing: '-0.03em',
                             }}>
-                              {m.symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase()}
+                              {sym.underlying_symbol.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase()}
                             </span>
 
-                            <span style={{ fontSize: '0.75rem', fontWeight: isSel ? 700 : 400 }}>
-                              {m.label}
-                            </span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: '0.75rem', fontWeight: isSel ? 700 : 400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {sym.underlying_symbol_name}
+                              </div>
+                              {!sym.exchange_is_open && (
+                                <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)' }}>Closed</div>
+                              )}
+                            </div>
 
                             {isSel && (
-                              <span style={{ marginLeft: 'auto', color: '#FCA311', fontSize: '0.8rem' }}>✓</span>
+                              <span style={{ marginLeft: 'auto', color: '#FCA311', fontSize: '0.8rem', flexShrink: 0 }}>✓</span>
                             )}
                           </button>
                         )
@@ -857,11 +958,8 @@ export default function ChartsPage() {
                     </div>
                   ))}
 
-                  {filteredGroups.length === 0 && (
-                    <div style={{
-                      textAlign: 'center', padding: '2.5rem',
-                      color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem',
-                    }}>
+                  {!loadingSymbols && filteredGroups.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '2.5rem', color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem' }}>
                       No markets found
                     </div>
                   )}
@@ -888,7 +986,7 @@ export default function ChartsPage() {
         display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'flex-end', paddingBottom: '42px', gap: '3px',
       }}>
-        <button title="Zoom in"    style={navBtn} onClick={() => zoom('in')}>
+        <button title="Zoom in" style={navBtn} onClick={() => zoom('in')}>
           <IcZoomIn />
         </button>
         <button
@@ -897,14 +995,13 @@ export default function ChartsPage() {
           style={{
             ...navBtn,
             background: crosshair ? 'rgba(252,163,17,0.12)' : 'transparent',
-            color: crosshair ? '#FCA311' : 'rgba(200,215,235,0.5)',
-            outline: crosshair ? '1px solid rgba(252,163,17,0.3)' : 'none',
-            borderRadius: '4px',
+            color:      crosshair ? '#FCA311' : 'rgba(200,215,235,0.5)',
+            outline:    crosshair ? '1px solid rgba(252,163,17,0.3)' : 'none',
           }}
         >
           <IcCrosshair />
         </button>
-        <button title="Zoom out"   style={navBtn} onClick={() => zoom('out')}>
+        <button title="Zoom out" style={navBtn} onClick={() => zoom('out')}>
           <IcZoomOut />
         </button>
         <button title="Scroll to latest" style={navBtn} onClick={() => chartRef.current?.timeScale().scrollToRealTime()}>
@@ -913,11 +1010,11 @@ export default function ChartsPage() {
       </div>
 
       <style>{`
-        @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes pricePulse { 0%{opacity:0.5} 100%{opacity:1} }
-        input::placeholder { color: rgba(229,229,229,0.28); }
-        button:hover       { filter: brightness(1.2); }
-        ::-webkit-scrollbar { width: 4px; }
+        @keyframes pulse     { 0%,100%{opacity:1} 50%{opacity:0.4} }
+        @keyframes pricePulse{ 0%{opacity:0.5} 100%{opacity:1} }
+        input::placeholder   { color: rgba(229,229,229,0.28); }
+        button:hover         { filter: brightness(1.2); }
+        ::-webkit-scrollbar       { width: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
