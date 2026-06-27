@@ -117,6 +117,32 @@ function computeDigitCounts(prices: number[], pip: number): number[] {
 
 const DEFAULT_SYMBOL = '1HZ100V'
 
+/* ─── Signal Analyzer — Over/Under barrier presets ───────────────────────── */
+// O1 = DIGITOVER 1 (wins if last digit > 1, i.e. 2-9) → 80% theoretical
+// U8 = DIGITUNDER 8 (wins if last digit < 8, i.e. 0-7) → 80% theoretical
+// Only O1-O5 and U6-U8 have >50% theoretical win rate on uniform distribution
+const SIGNAL_PRESETS = [
+  { label: 'O1', side: 'over' as const, barrier: 1 },
+  { label: 'O2', side: 'over' as const, barrier: 2 },
+  { label: 'O3', side: 'over' as const, barrier: 3 },
+  { label: 'O4', side: 'over' as const, barrier: 4 },
+  { label: 'O5', side: 'over' as const, barrier: 5 },
+  { label: 'U6', side: 'under' as const, barrier: 6 },
+  { label: 'U7', side: 'under' as const, barrier: 7 },
+  { label: 'U8', side: 'under' as const, barrier: 8 },
+]
+
+/**
+ * Win probability for a given Over/Under barrier from recent tick history.
+ * Over N:  last digit must be > N  → digits N+1 … 9
+ * Under N: last digit must be < N  → digits 0 … N-1
+ */
+function signalProb(counts: number[], total: number, side: 'over' | 'under', barrier: number): number {
+  if (total === 0) return 0
+  if (side === 'over') return counts.slice(barrier + 1).reduce((a, c) => a + c, 0) / total
+  return counts.slice(0, barrier).reduce((a, c) => a + c, 0) / total
+}
+
 /* ─── Shared styles ──────────────────────────────────────────────────────── */
 const toolbarBtn: React.CSSProperties = {
   width: '44px', height: '44px', background: 'transparent', border: 'none',
@@ -225,6 +251,10 @@ export default function ChartsPage() {
   const [wsError,      setWsError]      = useState<string | null>(null)
   const [currency,     setCurrency]     = useState('USD')
 
+  /* ── Signal analyzer state (OU mode only) ── */
+  const [autoOn,       setAutoOn]       = useState(false)
+  const [sigFilter,    setSigFilter]    = useState<string>('All') // 'All' | 'O1'…'U8'
+
   /* ── Refs (chart) ── */
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef          = useRef<IChartApi | null>(null)
@@ -272,6 +302,16 @@ export default function ChartsPage() {
   const digitTotal   = prices.length
   const activeProp   = sideA ? propA : propB
   const activeColor  = sideA ? currentTT.colorA : currentTT.colorB
+
+  /* ── Signal analyzer derivations (OU type only) ── */
+  const signalData = SIGNAL_PRESETS.map(s => ({
+    ...s,
+    prob: signalProb(digitCounts, digitTotal, s.side, s.barrier),
+  }))
+  const bestSignal = digitTotal > 20
+    ? signalData.reduce((best, s) => s.prob > best.prob ? s : best, signalData[0])
+    : null
+  void sigFilter // used in JSX signal button rendering
 
   const priceColor  = priceDir === 'up' ? '#22c55e' : priceDir === 'down' ? '#ef4444' : 'rgba(229,229,229,0.9)'
   const changeColor = priceChange >= 0 ? '#22c55e' : '#ef4444'
@@ -653,6 +693,17 @@ export default function ChartsPage() {
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, tradeTypeIdx, digit, stake, duration, wsReady, resubscribeProposals])
+
+  /* ────────────────────────────────────────────────────────────────────────
+     Effect 6: Auto-signal mode — when autoOn and OU type, auto-apply best signal
+     Recalculates whenever digit distribution changes or autoOn toggles.
+     Writes to digit + sideA state → triggers debounced resubscribe automatically.
+  ─────────────────────────────────────────────────────────────────────────── */
+  useEffect(() => {
+    if (!autoOn || !bestSignal || currentTT.id !== 'OU') return
+    setDigit(bestSignal.barrier)
+    setSideA(bestSignal.side === 'over')
+  }, [autoOn, bestSignal, currentTT.id])
 
   /* ── Buy handler ── */
   const doBuy = useCallback((isA: boolean) => {
@@ -1053,6 +1104,118 @@ export default function ChartsPage() {
               )
             })}
           </div>
+
+          {/* ── Signal Analyzer (Over/Under only) ─────────────────────────── */}
+          {currentTT.id === 'OU' && (
+            <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '9px', padding: '9px 10px', border: '1px solid rgba(255,255,255,0.05)' }}>
+
+              {/* Header row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '7px' }}>
+                <span style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.45)', letterSpacing: '0.05em' }}>
+                  SIGNAL
+                </span>
+                <button
+                  onClick={() => setAutoOn(v => !v)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '5px', cursor: 'pointer',
+                    background: autoOn ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.05)',
+                    border: `1px solid ${autoOn ? 'rgba(34,197,94,0.35)' : 'rgba(255,255,255,0.08)'}`,
+                    borderRadius: '5px', padding: '3px 8px', outline: 'none',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  <span style={{
+                    width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0,
+                    background: autoOn ? '#22c55e' : 'rgba(229,229,229,0.25)',
+                    boxShadow: autoOn ? '0 0 5px #22c55e88' : 'none',
+                    animation: autoOn ? 'pulse 2s ease infinite' : 'none',
+                  }} />
+                  <span style={{ fontSize: '0.58rem', fontWeight: 700, color: autoOn ? '#22c55e' : 'rgba(229,229,229,0.35)' }}>
+                    Auto {autoOn ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+              </div>
+
+              {/* Best signal recommendation */}
+              {bestSignal && digitTotal >= 20 && (
+                <div style={{
+                  background: 'rgba(252,163,17,0.07)', border: '1px solid rgba(252,163,17,0.18)',
+                  borderRadius: '7px', padding: '7px 9px', marginBottom: '8px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', marginBottom: '2px' }}>Recommended</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#FCA311' }}>
+                      {bestSignal.side === 'over' ? 'Over' : 'Under'} {bestSignal.barrier}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', marginBottom: '2px' }}>Win rate</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: bestSignal.prob > 0.8 ? '#22c55e' : bestSignal.prob > 0.7 ? '#FCA311' : '#aaa' }}>
+                      {(bestSignal.prob * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Signal preset buttons — All / O1-O5 / U6-U8 */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
+                {/* All button */}
+                <button
+                  onClick={() => setSigFilter('All')}
+                  style={{
+                    padding: '4px 7px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                    background: sigFilter === 'All' ? 'rgba(252,163,17,0.18)' : 'rgba(255,255,255,0.05)',
+                    color:      sigFilter === 'All' ? '#FCA311' : 'rgba(229,229,229,0.45)',
+                    fontSize: '0.62rem', fontWeight: 700,
+                    outline: sigFilter === 'All' ? '1px solid rgba(252,163,17,0.35)' : 'none',
+                  }}
+                >
+                  All
+                </button>
+
+                {/* O1–O5 (over) and U6–U8 (under) */}
+                {signalData.map(s => {
+                  const isOver  = s.side === 'over'
+                  const isBest  = bestSignal?.label === s.label
+                  const isSel   = sigFilter === s.label
+                  const pctText = digitTotal >= 20 ? `${(s.prob * 100).toFixed(0)}%` : '--'
+                  const baseColor = isOver ? '#22c55e' : '#3b82f6'
+                  return (
+                    <button
+                      key={s.label}
+                      title={`${s.side === 'over' ? 'Over' : 'Under'} ${s.barrier} — win rate ${pctText}`}
+                      onClick={() => {
+                        setSigFilter(s.label)
+                        setDigit(s.barrier)
+                        setSideA(s.side === 'over')
+                      }}
+                      style={{
+                        padding: '4px 6px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                        background: isSel
+                          ? `${baseColor}22`
+                          : isBest ? 'rgba(252,163,17,0.1)' : 'rgba(255,255,255,0.04)',
+                        color: isSel ? baseColor : isBest ? '#FCA311' : 'rgba(229,229,229,0.4)',
+                        fontSize: '0.6rem', fontWeight: 700,
+                        outline: isBest && !isSel ? '1px solid rgba(252,163,17,0.3)' : isSel ? `1px solid ${baseColor}55` : 'none',
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1px',
+                        transition: 'all 0.1s',
+                      }}
+                    >
+                      <span>{s.label}</span>
+                      <span style={{ fontSize: '0.48rem', opacity: 0.75 }}>{pctText}</span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              {digitTotal < 20 && (
+                <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.2)', marginTop: '6px' }}>
+                  Collecting tick data…
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Last digit prediction grid (digit contracts only) */}
           {currentTT.hasDigit && (
