@@ -528,7 +528,7 @@ export default function ChartsPage() {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                   {TIMEFRAMES.map((t, i) => (
                     <button key={t.label} onClick={() => { setTfIdx(i); if (t.granularity === 0) setChartType('area') }} style={{
-                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer', outline: 'none',
+                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
                       background: tfIdx === i ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.06)',
                       color: tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.5)',
                       fontSize: '0.68rem', fontWeight: 700,
@@ -551,7 +551,7 @@ export default function ChartsPage() {
                       const Icon = ct.id === 'candles' ? IcCandles : ct.id === 'line' ? IcLine : IcArea
                       return (
                         <button key={ct.id} onClick={() => setChartType(ct.id as ChartType)} style={{
-                          flex: 1, padding: '6px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer', outline: 'none',
+                          flex: 1, padding: '6px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer',
                           background: chartType === ct.id ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.05)',
                           color: chartType === ct.id ? '#FCA311' : 'rgba(229,229,229,0.45)',
                           display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
