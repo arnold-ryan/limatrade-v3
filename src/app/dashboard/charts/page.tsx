@@ -1103,8 +1103,8 @@ export default function ChartsPage() {
         background: '#07101f',
         borderRight: '1px solid rgba(255,255,255,0.055)',
         display: 'flex', flexDirection: 'column', alignItems: 'center',
-        paddingTop: '6px', paddingBottom: '8px',
-        zIndex: 3, position: 'relative',
+        paddingTop: '80px', paddingBottom: '8px',
+        zIndex: 6, position: 'relative',
       }}>
 
         {/* TF + chart type button */}
@@ -1181,9 +1181,6 @@ export default function ChartsPage() {
             </div>
           )}
         </div>
-
-        {/* Fixed gap — clears the market selector card (card bottom ~130px, TF button ~66px, sep ~13px → need ~60px spacer) */}
-        <div style={{ height: '60px', flexShrink: 0 }} />
 
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
