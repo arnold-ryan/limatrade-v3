@@ -1,1402 +1,989 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v80
+ * Lima Trade — Charts Page v82
  *
- * Correct two-WebSocket architecture (modelled from dbtraders.com compiled source):
+ * Brand-new layout (nothing reused from v77-v81 UI):
  *
- *   PUBLIC WS  wss://api.derivws.com/trading/v1/options/ws/public
- *     → active_symbols   (market list + pip sizes)
- *     → ticks            (live price stream)
- *     → ticks_history    (seed chart + digit counts)
+ *   ┌──────────────────────────────────────────┬────────────────┐
+ *   │  chart overlay bar (symbol, price, TF)   │                │
+ *   │                                          │   TRADE PANEL  │
+ *   │         LIGHTWEIGHT-CHARTS CANVAS        │  (type, dur,   │
+ *   │                                          │   stake, both  │
+ *   │                                          │   proposals)   │
+ *   ├──────────────────────────────────────────┴────────────────┤
+ *   │             POSITIONS / HISTORY  (bottom panel)           │
+ *   └───────────────────────────────────────────────────────────┘
  *
- *   AUTH WS    (OTP URL from /api/user/ws-url)
- *     → balance          (live balance)
- *     → proposal A/B     (price quotes — auth WS, not public)
- *     → buy              (purchase contract)
- *     → proposal_open_contract (monitor open contracts)
- *     → forget_all       (cleanup)
- *
- * Why proposals go on AUTH WS:
- *   The public WS is market-data only. Proposals need account context
- *   (currency, account type) which only the authenticated WS carries.
- *   This was confirmed from dbtraders.com source which uses api.send()
- *   on the authenticated connection for all trading operations.
- *
- * Deriv API rules (from schema docs + source):
- *   - proposal.id (UUID) is passed directly to buy.buy field
- *   - buy.price = max price willing to pay (use ask_price * 1.02 buffer)
- *   - Proposal UUID is consumed on buy → must forget_all + resubscribe immediately
- *   - POC is_sold === 1 means contract settled
- *   - Last digit = Math.abs(Math.round(price * 10**dp)) % 10
+ * Two-WebSocket architecture (unchanged from v80/v81 — confirmed correct):
+ *   PUBLIC  wss://api.derivws.com/trading/v1/options/ws/public  → ticks, history, symbols
+ *   AUTH    OTP URL from /api/user/ws-url                       → balance, proposals, buy, POC
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import {
-  createChart,
-  IChartApi,
-  UTCTimestamp,
-  ISeriesApi,
-  LineData,
-  CandlestickData,
-  AreaData,
+  createChart, IChartApi, UTCTimestamp,
+  ISeriesApi, LineData, CandlestickData, AreaData,
 } from 'lightweight-charts'
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-const PUB_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
+// ─── Constants ────────────────────────────────────────────────────────────────
+const PUB_WS = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
-const TRADE_TYPES = [
-  { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', labelA: 'Over',  labelB: 'Under',  colorA: '#22c55e', colorB: '#3b82f6', hasBarrier: true  },
-  { id: 'EO', label: 'Even / Odd',     ctA: 'DIGITEVEN',  ctB: 'DIGITODD',   labelA: 'Even',  labelB: 'Odd',    colorA: '#22c55e', colorB: '#3b82f6', hasBarrier: false },
-  { id: 'MD', label: 'Match / Differ', ctA: 'DIGITMATCH', ctB: 'DIGITDIFF',  labelA: 'Match', labelB: 'Differ', colorA: '#22c55e', colorB: '#ef4444', hasBarrier: true  },
-  { id: 'RF', label: 'Rise / Fall',    ctA: 'CALL',       ctB: 'PUT',        labelA: 'Rise',  labelB: 'Fall',   colorA: '#22c55e', colorB: '#ef4444', hasBarrier: false },
+const TT = [
+  { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', lA: 'Over',  lB: 'Under',  cA: '#22c55e', cB: '#3b82f6', barrier: true  },
+  { id: 'EO', label: 'Even / Odd',     ctA: 'DIGITEVEN',  ctB: 'DIGITODD',   lA: 'Even',  lB: 'Odd',    cA: '#22c55e', cB: '#a855f7', barrier: false },
+  { id: 'MD', label: 'Match / Differ', ctA: 'DIGITMATCH', ctB: 'DIGITDIFF',  lA: 'Match', lB: 'Differ', cA: '#22c55e', cB: '#ef4444', barrier: true  },
+  { id: 'RF', label: 'Rise / Fall',    ctA: 'CALL',       ctB: 'PUT',        lA: 'Rise',  lB: 'Fall',   cA: '#22c55e', cB: '#ef4444', barrier: false },
 ]
 
-const TIMEFRAMES = [
-  { label: '1T',  granularity: 0     },
-  { label: '1m',  granularity: 60    },
-  { label: '5m',  granularity: 300   },
-  { label: '15m', granularity: 900   },
-  { label: '1h',  granularity: 3600  },
-  { label: '4h',  granularity: 14400 },
-  { label: '1D',  granularity: 86400 },
+const TFS = [
+  { label: '1T', gran: 0     },
+  { label: '1m', gran: 60    },
+  { label: '5m', gran: 300   },
+  { label: '15m',gran: 900   },
+  { label: '1h', gran: 3600  },
+  { label: '4h', gran: 14400 },
+  { label: '1D', gran: 86400 },
 ]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface MarketSymbol {
-  symbol: string
-  display_name: string
-  pip: number
-  dp: number                      // decimal places = -log10(pip)
-  submarket: string
-  isOpen: boolean
-}
-
-interface Proposal {
-  id: string                      // UUID → passed to buy
-  ask: number
-  payout: number
-  err?: string
-}
-
-interface Position {
-  id: number
-  contractType: string
-  side: 'A' | 'B'
-  tt: typeof TRADE_TYPES[number]
-  buyPrice: number
-  payout: number
-  bidPrice: number
-  profit: number
-  status: 'open' | 'won' | 'lost' | 'sold' | 'cancelled'
-  barrier?: string
-  epoch: number
+interface Sym  { symbol: string; name: string; pip: number; dp: number; group: string; open: boolean }
+interface Prop { id: string; ask: number; payout: number; err?: string }
+interface Pos  {
+  id: number; ct: string; side: 'A'|'B'; ttId: string
+  lA: string; lB: string; cA: string; cB: string
+  stake: number; payout: number; bid: number; profit: number
+  status: 'open'|'won'|'lost'|'sold'; barrier?: string; ts: number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const d2 = (n: number) => n.toFixed(2)
-const df  = (n: number, dp: number) => n.toFixed(dp)
-
-function lastDigit(price: number, dp: number): number {
-  return Math.abs(Math.round(price * 10 ** dp)) % 10
-}
-
-function simpleMA(prices: number[], period: number): (number | null)[] {
-  return prices.map((_, i) => {
-    if (i < period - 1) return null
-    const s = prices.slice(i - period + 1, i + 1)
-    return s.reduce((a, b) => a + b, 0) / period
-  })
-}
+const f2  = (n: number) => n.toFixed(2)
+const fdp = (n: number, dp: number) => n.toFixed(dp)
+const lastDigit = (p: number, dp: number) => Math.abs(Math.round(p * 10 ** dp)) % 10
+const sma = (arr: number[], n: number) =>
+  arr.map((_, i) => i < n - 1 ? null : arr.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n)
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function ChartsPage() {
 
-  // ── Layout toggles ──────────────────────────────────────────────────────────
-  const [showTfMenu,      setShowTfMenu]      = useState(false)
-  const [showIndicators,  setShowIndicators]  = useState(false)
-  const [showDrawing,     setShowDrawing]      = useState(false)
-  const [showMarketDlg,  setShowMarketDlg]   = useState(false)
-  const [mktSearch,      setMktSearch]       = useState('')
-
-  const closeAllPanels = useCallback(() => {
-    setShowTfMenu(false)
-    setShowIndicators(false)
-    setShowDrawing(false)
-  }, [])
-
-  // ── Chart config ─────────────────────────────────────────────────────────────
-  const [tfIdx,      setTfIdx]      = useState(0)               // timeframe index
-  const [chartType,  setChartType]  = useState<'area'|'candles'|'line'>('area')
-  const [maOn,       setMaOn]       = useState(false)
-  const [maPeriod,   setMaPeriod]   = useState(20)
-  const [crosshair,  setCrosshair]  = useState(false)
-  const tf = TIMEFRAMES[tfIdx]
-  const isTickMode = tf.granularity === 0
-
-  // ── Market ────────────────────────────────────────────────────────────────────
-  const [symbol,    setSymbol]    = useState('R_100')
-  const [markets,   setMarkets]   = useState<MarketSymbol[]>([])
-  const [mktsLoaded,setMktsLoaded]= useState(false)
-
+  // ── Market ──────────────────────────────────────────────────────────────────
+  const [symbol,  setSymbol]  = useState('R_100')
+  const [syms,    setSyms]    = useState<Sym[]>([])
+  const [symsOk,  setSymsOk]  = useState(false)
+  const [mktOpen, setMktOpen] = useState(false)
+  const [mktQ,    setMktQ]    = useState('')
   const symbolRef = useRef(symbol)
   useEffect(() => { symbolRef.current = symbol }, [symbol])
-
-  const curMarket = markets.find(m => m.symbol === symbol)
-  const dp        = curMarket?.dp ?? 2
-  const dpRef     = useRef(dp)
+  const curSym = syms.find(s => s.symbol === symbol)
+  const dp     = curSym?.dp ?? 2
+  const dpRef  = useRef(dp)
   useEffect(() => { dpRef.current = dp }, [dp])
 
-  // ── Price ─────────────────────────────────────────────────────────────────────
-  const [livePrice,  setLivePrice]  = useState<number | null>(null)
-  const [priceDir,   setPriceDir]   = useState<'up'|'dn'|null>(null)
-  const [priceDelta, setPriceDelta] = useState(0)
-  const prevPriceRef = useRef<number | null>(null)
-
-  // ── Digit counts ──────────────────────────────────────────────────────────────
-  const [digits,     setDigits]     = useState<number[]>(new Array(10).fill(0))
-  const [digitTotal, setDigitTotal] = useState(0)
-
-  // ── Trade params ──────────────────────────────────────────────────────────────
-  const [ttIdx,   setTtIdx]   = useState(0)          // trade type index
-  const [sideA,   setSideA]   = useState(true)       // true = side A (Over/Even/Match/Rise)
-  const [stake,   setStake]   = useState('1.00')
-  const [dur,     setDur]     = useState(1)           // duration in ticks
-  const [barrier, setBarrier] = useState(5)           // digit barrier 0-9
-  const tt = TRADE_TYPES[ttIdx]
-  const ttRef    = useRef(tt)
-  const stakeRef = useRef(stake)
-  const durRef   = useRef(dur)
-  const barrierRef = useRef(barrier)
-  useEffect(() => { ttRef.current     = tt      }, [tt])
-  useEffect(() => { stakeRef.current  = stake   }, [stake])
-  useEffect(() => { durRef.current    = dur     }, [dur])
-  useEffect(() => { barrierRef.current = barrier }, [barrier])
-
-  // ── Proposals (from AUTH WS) ──────────────────────────────────────────────────
-  const [propA, setPropA] = useState<Proposal | null>(null)
-  const [propB, setPropB] = useState<Proposal | null>(null)
-  const propARef = useRef<Proposal | null>(null)
-  const propBRef = useRef<Proposal | null>(null)
-  useEffect(() => { propARef.current = propA }, [propA])
-  useEffect(() => { propBRef.current = propB }, [propB])
-
-  const activeProp = sideA ? propA : propB
-
-  // ── Buy state ──────────────────────────────────────────────────────────────────
-  const [buying,   setBuying]   = useState(false)
-  const [buyErr,   setBuyErr]   = useState<string | null>(null)
-
-  // ── Positions ──────────────────────────────────────────────────────────────────
-  const [openPos,   setOpenPos]   = useState<Position[]>([])
-  const [closedPos, setClosedPos] = useState<Position[]>([])
-
-  // ── Auth WS state ─────────────────────────────────────────────────────────────
-  const [authReady,   setAuthReady]   = useState(false)
-  const [wsErr,       setWsErr]       = useState<string | null>(null)   // 'login' | 'reconnecting' | 'lost' | null
-  const [balance,     setBalance]     = useState<number | null>(null)
-  const [currency,    setCurrency]    = useState('USD')
-  const currencyRef = useRef('USD')
-  useEffect(() => { currencyRef.current = currency }, [currency])
-
-  // ── Pub WS state ──────────────────────────────────────────────────────────────
-  const [connected, setConnected] = useState(false)
-
-  // ── WS refs ───────────────────────────────────────────────────────────────────
-  const pubWsRef  = useRef<WebSocket | null>(null)
-  const authWsRef = useRef<WebSocket | null>(null)
-
-  // ── Chart refs ────────────────────────────────────────────────────────────────
-  const chartContainerRef = useRef<HTMLDivElement>(null)
-  const chartRef          = useRef<IChartApi | null>(null)
-  const areaRef    = useRef<ISeriesApi<'Area'>        | null>(null)
-  const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const lineRef    = useRef<ISeriesApi<'Line'>        | null>(null)
-  const maRef      = useRef<ISeriesApi<'Line'>        | null>(null)
-
-  const tickPrices = useRef<number[]>([])
-  const tickTimes  = useRef<UTCTimestamp[]>([])
-  const curCandle  = useRef<CandlestickData | null>(null)
-
-  // ── Request ID counter + buy-request map ─────────────────────────────────────
-  const reqId  = useRef(100)
-  const buyMap = useRef<Map<number, { side: 'A'|'B', tt: typeof TRADE_TYPES[number], barrier?: string }>>(new Map())
-
-  // ── Stable refs for WS callbacks ──────────────────────────────────────────────
+  // ── Chart config ────────────────────────────────────────────────────────────
+  const [tfIdx,     setTfIdx]     = useState(0)
+  const [chartType, setChartType] = useState<'area'|'line'|'candles'>('area')
+  const [maOn,      setMaOn]      = useState(false)
+  const [maPeriod,  setMaPeriod]  = useState(20)
+  const tf      = TFS[tfIdx]
+  const isTick  = tf.gran === 0
   const tfIdxRef    = useRef(tfIdx)
   const maOnRef     = useRef(maOn)
   const maPeriodRef = useRef(maPeriod)
-  const isTickRef   = useRef(isTickMode)
-  useEffect(() => { tfIdxRef.current    = tfIdx      }, [tfIdx])
-  useEffect(() => { maOnRef.current     = maOn       }, [maOn])
-  useEffect(() => { maPeriodRef.current = maPeriod   }, [maPeriod])
-  useEffect(() => { isTickRef.current   = isTickMode }, [isTickMode])
+  const isTickRef   = useRef(isTick)
+  useEffect(() => { tfIdxRef.current    = tfIdx     }, [tfIdx])
+  useEffect(() => { maOnRef.current     = maOn      }, [maOn])
+  useEffect(() => { maPeriodRef.current = maPeriod  }, [maPeriod])
+  useEffect(() => { isTickRef.current   = isTick    }, [isTick])
 
-  // ── Market filter + groups ────────────────────────────────────────────────────
-  const filteredMkts = mktSearch
-    ? markets.filter(m =>
-        m.display_name.toLowerCase().includes(mktSearch.toLowerCase()) ||
-        m.symbol.toLowerCase().includes(mktSearch.toLowerCase())
-      )
-    : markets
+  // ── Price ───────────────────────────────────────────────────────────────────
+  const [price,    setPrice]    = useState<number|null>(null)
+  const [priceDir, setPriceDir] = useState<'up'|'dn'|null>(null)
+  const [delta,    setDelta]    = useState(0)
+  const prevRef = useRef<number|null>(null)
 
-  const mktGroups = filteredMkts.reduce<Record<string, MarketSymbol[]>>((acc, m) => {
-    if (!acc[m.submarket]) acc[m.submarket] = []
-    acc[m.submarket].push(m)
-    return acc
-  }, {})
+  // ── Trading state ────────────────────────────────────────────────────────────
+  const [ttIdx,   setTtIdx]   = useState(0)
+  const [dur,     setDur]     = useState(5)
+  const [stake,   setStake]   = useState('1.00')
+  const [barrier, setBarrier] = useState(5)
+  const [propA,   setPropA]   = useState<Prop|null>(null)
+  const [propB,   setPropB]   = useState<Prop|null>(null)
+  const [buyingA, setBuyingA] = useState(false)
+  const [buyingB, setBuyingB] = useState(false)
+  const [buyErr,  setBuyErr]  = useState<string|null>(null)
+  const [openPos, setOpenPos] = useState<Pos[]>([])
+  const [closed,  setClosed]  = useState<Pos[]>([])
+  const [posTabs, setPosTabs] = useState<'open'|'history'>('open')
+  const tt = TT[ttIdx]
+  const ttRef      = useRef(tt)
+  const stakeRef   = useRef(stake)
+  const durRef     = useRef(dur)
+  const barrierRef = useRef(barrier)
+  const propARef   = useRef<Prop|null>(null)
+  const propBRef   = useRef<Prop|null>(null)
+  useEffect(() => { ttRef.current      = tt      }, [tt])
+  useEffect(() => { stakeRef.current   = stake   }, [stake])
+  useEffect(() => { durRef.current     = dur     }, [dur])
+  useEffect(() => { barrierRef.current = barrier }, [barrier])
+  useEffect(() => { propARef.current   = propA   }, [propA])
+  useEffect(() => { propBRef.current   = propB   }, [propB])
 
-  // ─── Chart helpers ────────────────────────────────────────────────────────────
+  // ── Auth WS state ────────────────────────────────────────────────────────────
+  const [authKey,   setAuthKey]   = useState(0)
+  const [authReady, setAuthReady] = useState(false)
+  const [balance,   setBalance]   = useState<number|null>(null)
+  const [currency,  setCurrency]  = useState('USD')
+  const [wsErr,     setWsErr]     = useState<string|null>(null)
+  const currencyRef = useRef('USD')
+  useEffect(() => { currencyRef.current = currency }, [currency])
+
+  // ── Pub WS state ─────────────────────────────────────────────────────────────
+  const [live, setLive] = useState(false)
+
+  // ── WS + Chart refs ──────────────────────────────────────────────────────────
+  const pubRef    = useRef<WebSocket|null>(null)
+  const authRef   = useRef<WebSocket|null>(null)
+  const chartRef  = useRef<IChartApi|null>(null)
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const areaR     = useRef<ISeriesApi<'Area'>|null>(null)
+  const lineR     = useRef<ISeriesApi<'Line'>|null>(null)
+  const candleR   = useRef<ISeriesApi<'Candlestick'>|null>(null)
+  const maR       = useRef<ISeriesApi<'Line'>|null>(null)
+  const prices    = useRef<number[]>([])
+  const times     = useRef<UTCTimestamp[]>([])
+  const curCandleRef = useRef<CandlestickData|null>(null)
+  const reqId     = useRef(100)
+  const buyMapA   = useRef<Map<number, Pos>>(new Map())
+  const buyMapB   = useRef<Map<number, Pos>>(new Map())
+
+  // ── Account switch listener ──────────────────────────────────────────────────
+  useEffect(() => {
+    const h = () => {
+      setPropA(null); setPropB(null)
+      setBalance(null); setAuthReady(false)
+      authRef.current?.close()
+      setAuthKey(k => k + 1)
+    }
+    window.addEventListener('deriv-account-switch', h)
+    return () => window.removeEventListener('deriv-account-switch', h)
+  }, [])
+
+  // ── Chart helpers ────────────────────────────────────────────────────────────
   const clearSeries = useCallback(() => {
-    const c = chartRef.current
-    if (!c) return
-    ;[areaRef, candleRef, lineRef, maRef].forEach(r => {
+    const c = chartRef.current; if (!c) return
+    ;[areaR, lineR, candleR, maR].forEach(r => {
       if (r.current) { try { c.removeSeries(r.current) } catch {} ; r.current = null }
     })
   }, [])
 
   const addMA = useCallback(() => {
     if (!chartRef.current || !maOnRef.current) return
-    maRef.current = chartRef.current.addLineSeries({
-      color: '#3b82f6', lineWidth: 1, lastValueVisible: false, priceLineVisible: false,
-    })
-    const prices = tickPrices.current
-    const times  = tickTimes.current
-    if (!prices.length) return
-    const vals = simpleMA(prices, maPeriodRef.current)
-    const data = vals
-      .map((v, i) => v !== null ? { time: times[i], value: v } as LineData : null)
-      .filter(Boolean) as LineData[]
-    if (data.length) maRef.current.setData(data)
+    maR.current = chartRef.current.addLineSeries({ color: '#f59e0b', lineWidth: 1, lastValueVisible: false, priceLineVisible: false })
+    const vs = sma(prices.current, maPeriodRef.current)
+    const d  = vs.map((v, i) => v !== null ? { time: times.current[i], value: v } as LineData : null).filter(Boolean) as LineData[]
+    if (d.length) maR.current.setData(d)
   }, [])
 
   const buildSeries = useCallback(() => {
     clearSeries()
-    const c = chartRef.current
-    if (!c) return
+    const c = chartRef.current; if (!c) return
     const type = isTickRef.current ? 'area' : chartType
-
     if (type === 'area') {
-      areaRef.current = c.addAreaSeries({
-        lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.22)',
-        bottomColor: 'rgba(252,163,17,0)', lineWidth: 2,
-      })
-      const data = tickTimes.current.map((t, i) => ({ time: t, value: tickPrices.current[i] })) as AreaData[]
-      if (data.length) areaRef.current.setData(data)
+      areaR.current = c.addAreaSeries({ lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)', lineWidth: 2 })
+      const d = times.current.map((t, i) => ({ time: t, value: prices.current[i] })) as AreaData[]
+      if (d.length) areaR.current.setData(d)
       addMA()
     } else if (type === 'line') {
-      lineRef.current = c.addLineSeries({ color: '#FCA311', lineWidth: 2 })
-      const data = tickTimes.current.map((t, i) => ({ time: t, value: tickPrices.current[i] })) as LineData[]
-      if (data.length) lineRef.current.setData(data)
+      lineR.current = c.addLineSeries({ color: '#FCA311', lineWidth: 2 })
+      const d = times.current.map((t, i) => ({ time: t, value: prices.current[i] })) as LineData[]
+      if (d.length) lineR.current.setData(d)
       addMA()
     } else {
-      candleRef.current = c.addCandlestickSeries({
-        upColor: '#22c55e', downColor: '#ef4444',
-        borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-        wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      })
-      // candle data set by ticks_history handler
+      candleR.current = c.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444' })
     }
   }, [chartType, clearSeries, addMA])
 
-  // ─── Append one tick to active series ─────────────────────────────────────────
-  const appendTick = useCallback((epoch: number, price: number) => {
+  const appendTick = useCallback((epoch: number, p: number) => {
     const t = epoch as UTCTimestamp
     if (isTickRef.current) {
-      tickPrices.current.push(price)
-      tickTimes.current.push(t)
-      if (tickPrices.current.length > 2000) {
-        tickPrices.current.shift()
-        tickTimes.current.shift()
-      }
-      const pt = { time: t, value: price }
-      areaRef.current?.update(pt as AreaData)
-      lineRef.current?.update(pt as LineData)
-      if (maRef.current && maOnRef.current) {
-        const p = tickPrices.current
+      prices.current.push(p)
+      times.current.push(t)
+      if (prices.current.length > 2000) { prices.current.shift(); times.current.shift() }
+      const pt = { time: t, value: p }
+      areaR.current?.update(pt as AreaData)
+      lineR.current?.update(pt as LineData)
+      if (maR.current && maOnRef.current) {
         const n = maPeriodRef.current
-        if (p.length >= n) {
-          const slice = p.slice(-n)
-          const avg = slice.reduce((a, b) => a + b, 0) / n
-          maRef.current.update({ time: t, value: avg } as LineData)
+        if (prices.current.length >= n) {
+          const sl = prices.current.slice(-n)
+          maR.current.update({ time: t, value: sl.reduce((a, b) => a + b, 0) / n } as LineData)
         }
       }
     } else {
-      // Candle mode: bucket ticks into candle periods
-      const gran = TIMEFRAMES[tfIdxRef.current].granularity
-      const bucket = (Math.floor(epoch / gran) * gran) as UTCTimestamp
-      const cur = curCandle.current
-      if (cur && cur.time === bucket) {
-        const updated: CandlestickData = {
-          time: bucket, open: cur.open,
-          high: Math.max(cur.high, price),
-          low: Math.min(cur.low, price),
-          close: price,
-        }
-        curCandle.current = updated
-        candleRef.current?.update(updated)
+      const gran = TFS[tfIdxRef.current].gran
+      const bkt  = (Math.floor(epoch / gran) * gran) as UTCTimestamp
+      const cur  = curCandleRef.current
+      if (cur && cur.time === bkt) {
+        const u: CandlestickData = { time: bkt, open: cur.open, high: Math.max(cur.high, p), low: Math.min(cur.low, p), close: p }
+        curCandleRef.current = u; candleR.current?.update(u)
       } else {
-        const nc: CandlestickData = { time: bucket, open: price, high: price, low: price, close: price }
-        curCandle.current = nc
-        candleRef.current?.update(nc)
+        const nc: CandlestickData = { time: bkt, open: p, high: p, low: p, close: p }
+        curCandleRef.current = nc; candleR.current?.update(nc)
       }
     }
   }, [])
 
-  // ─── Proposal subscription (AUTH WS) ─────────────────────────────────────────
+  // ── subscribeProposals ───────────────────────────────────────────────────────
   const subscribeProposals = useCallback((ws: WebSocket) => {
     if (ws.readyState !== WebSocket.OPEN) return
-    // Cancel existing proposals first
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
-    setPropA(null)
-    setPropB(null)
-
-    const amount  = parseFloat(stakeRef.current) || 1
-    const curTT   = ttRef.current
-    const bar     = curTT.hasBarrier ? String(barrierRef.current) : undefined
-    const base = {
-      proposal: 1, subscribe: 1,
-      basis: 'stake', amount,
-      currency: currencyRef.current,
-      underlying_symbol: symbolRef.current,
-      duration: durRef.current,
-      duration_unit: 't',
-    }
-    ws.send(JSON.stringify({ ...base, contract_type: curTT.ctA, ...(bar ? { barrier: bar } : {}), req_id: 10 }))
-    ws.send(JSON.stringify({ ...base, contract_type: curTT.ctB, ...(bar ? { barrier: bar } : {}), req_id: 11 }))
+    setPropA(null); setPropB(null)
+    const amt = parseFloat(stakeRef.current) || 1
+    const cur = ttRef.current
+    const bar = cur.barrier ? String(barrierRef.current) : undefined
+    const base = { proposal: 1, subscribe: 1, basis: 'stake', amount: amt, currency: currencyRef.current, underlying_symbol: symbolRef.current, duration: durRef.current, duration_unit: 't' }
+    ws.send(JSON.stringify({ ...base, contract_type: cur.ctA, ...(bar ? { barrier: bar } : {}), req_id: 10 }))
+    ws.send(JSON.stringify({ ...base, contract_type: cur.ctB, ...(bar ? { barrier: bar } : {}), req_id: 11 }))
   }, [])
 
-  // ─── History request (PUBLIC WS) ─────────────────────────────────────────────
-  const requestHistory = useCallback((ws: WebSocket, sym: string, granularity: number) => {
+  const requestHistory = useCallback((ws: WebSocket, sym: string, gran: number) => {
     if (ws.readyState !== WebSocket.OPEN) return
-    if (granularity === 0) {
+    if (gran === 0) {
       ws.send(JSON.stringify({ ticks_history: sym, count: 1000, end: 'latest', style: 'ticks', req_id: 3 }))
     } else {
-      ws.send(JSON.stringify({ ticks_history: sym, count: 500, end: 'latest', style: 'candles', granularity, req_id: 3 }))
+      ws.send(JSON.stringify({ ticks_history: sym, count: 500, end: 'latest', style: 'candles', granularity: gran, req_id: 3 }))
     }
   }, [])
 
-  // ─── Tick subscription (PUBLIC WS) ───────────────────────────────────────────
   const subscribeTicks = useCallback((ws: WebSocket, sym: string) => {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 999 }))
     ws.send(JSON.stringify({ ticks: sym, subscribe: 1, req_id: 2 }))
   }, [])
 
-  // ─── PUBLIC WebSocket ─────────────────────────────────────────────────────────
+  // ── PUBLIC WebSocket ──────────────────────────────────────────────────────────
   useEffect(() => {
-    let ws: WebSocket
-    let ping: ReturnType<typeof setInterval>
-    let dead = false
-
+    let ws: WebSocket, ping: ReturnType<typeof setInterval>, dead = false
     function connect() {
-      ws = new WebSocket(PUB_WS_URL)
-      pubWsRef.current = ws
-
+      ws = new WebSocket(PUB_WS)
+      pubRef.current = ws
       ws.onopen = () => {
         if (dead) return
-        setConnected(true)
+        setLive(true)
         ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic', req_id: 1 }))
         subscribeTicks(ws, symbolRef.current)
-        requestHistory(ws, symbolRef.current, TIMEFRAMES[tfIdxRef.current].granularity)
-        ping = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 900 }))
-        }, 25_000)
+        requestHistory(ws, symbolRef.current, TFS[tfIdxRef.current].gran)
+        ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 900 })) }, 25_000)
       }
-
-      ws.onmessage = (ev: MessageEvent) => {
+      ws.onmessage = ev => {
         if (dead) return
-        let msg: any
-        try { msg = JSON.parse(ev.data as string) } catch { return }
-
-        // active_symbols
+        let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
         if (msg.msg_type === 'active_symbols') {
-          const list: MarketSymbol[] = (msg.active_symbols as any[]).map((s: any) => {
-            const pip = s.pip as number
-            const dp  = Math.round(-Math.log10(pip))
-            return {
-              symbol:   s.symbol,
-              display_name: s.display_name,
-              pip,
-              dp,
-              submarket: s.submarket_display_name,
-              isOpen:   !!s.exchange_is_open,
-            }
-          })
-          setMarkets(list)
-          setMktsLoaded(true)
+          const list: Sym[] = (msg.active_symbols as any[]).map((s: any) => ({
+            symbol: s.symbol, name: s.display_name,
+            pip: s.pip, dp: Math.round(-Math.log10(s.pip)),
+            group: s.submarket_display_name, open: !!s.exchange_is_open,
+          }))
+          setSyms(list); setSymsOk(true)
         }
-
-        // live tick
         if (msg.msg_type === 'tick') {
-          const tick = msg.tick as { symbol: string; quote: number; epoch: number }
-          if (tick.symbol !== symbolRef.current) return
-          const price = tick.quote
-          const prev  = prevPriceRef.current
-          setLivePrice(price)
-          if (prev !== null) {
-            setPriceDir(price > prev ? 'up' : price < prev ? 'dn' : null)
-            setPriceDelta(price - prev)
-          }
-          prevPriceRef.current = price
-          setConnected(true)
-
-          // digit counting
-          const d = lastDigit(price, dpRef.current)
-          setDigits(prev => { const n = [...prev]; n[d]++; return n })
-          setDigitTotal(t => t + 1)
-
-          // chart
-          appendTick(tick.epoch, price)
+          const t = msg.tick as { symbol: string; quote: number; epoch: number }
+          if (t.symbol !== symbolRef.current) return
+          const p = t.quote, prev = prevRef.current
+          setPrice(p)
+          if (prev !== null) { setPriceDir(p > prev ? 'up' : p < prev ? 'dn' : null); setDelta(p - prev) }
+          prevRef.current = p; setLive(true)
+          appendTick(t.epoch, p)
         }
-
-        // ticks_history (style: ticks)
         if (msg.msg_type === 'history' && msg.req_id === 3) {
           const h = msg.history as { times: number[]; prices: number[] }
           if (!h?.times?.length) return
-          tickPrices.current = [...h.prices]
-          tickTimes.current  = h.times.map(t => t as UTCTimestamp)
-
-          // seed digit counts
-          const counts = new Array(10).fill(0)
-          h.prices.forEach(p => { counts[lastDigit(p, dpRef.current)]++ })
-          setDigits(counts)
-          setDigitTotal(h.prices.length)
-
-          // push to chart series
-          const areaData = h.times.map((t, i) => ({ time: t as UTCTimestamp, value: h.prices[i] }))
-          areaRef.current?.setData(areaData as AreaData[])
-          lineRef.current?.setData(areaData as LineData[])
-
-          // rebuild MA
-          if (maOnRef.current && maRef.current) {
-            const ma = simpleMA(h.prices, maPeriodRef.current)
-            const maData = ma
-              .map((v, i) => v !== null ? { time: h.times[i] as UTCTimestamp, value: v } as LineData : null)
-              .filter(Boolean) as LineData[]
-            maRef.current.setData(maData)
+          prices.current = [...h.prices]
+          times.current  = h.times.map(t => t as UTCTimestamp)
+          const d = h.times.map((t, i) => ({ time: t as UTCTimestamp, value: h.prices[i] }))
+          areaR.current?.setData(d as AreaData[])
+          lineR.current?.setData(d as LineData[])
+          if (maOnRef.current && maR.current) {
+            const vs = sma(h.prices, maPeriodRef.current)
+            const md = vs.map((v, i) => v !== null ? { time: h.times[i] as UTCTimestamp, value: v } as LineData : null).filter(Boolean) as LineData[]
+            maR.current.setData(md)
           }
         }
-
-        // ticks_history (style: candles)
         if (msg.msg_type === 'candles' && msg.req_id === 3) {
-          const candles = msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>
-          if (!candles?.length) return
-          const data: CandlestickData[] = candles.map(c => ({
-            time: c.epoch as UTCTimestamp,
-            open: c.open, high: c.high, low: c.low, close: c.close,
-          }))
-          candleRef.current?.setData(data)
-          curCandle.current = data[data.length - 1]
-          // also store close prices for MA
-          tickPrices.current = candles.map(c => c.close)
-          tickTimes.current  = candles.map(c => c.epoch as UTCTimestamp)
+          const cs = msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>
+          if (!cs?.length) return
+          const d: CandlestickData[] = cs.map(c => ({ time: c.epoch as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }))
+          candleR.current?.setData(d)
+          curCandleRef.current = d[d.length - 1]
+          prices.current = cs.map(c => c.close)
+          times.current  = cs.map(c => c.epoch as UTCTimestamp)
         }
       }
-
-      ws.onerror = () => setConnected(false)
-      ws.onclose = () => {
-        setConnected(false)
-        if (!dead) setTimeout(connect, 3000)
-      }
+      ws.onerror = () => setLive(false)
+      ws.onclose = () => { setLive(false); if (!dead) setTimeout(connect, 3000) }
     }
-
     connect()
-    return () => {
-      dead = true
-      clearInterval(ping)
-      ws?.close()
-      pubWsRef.current = null
-    }
+    return () => { dead = true; clearInterval(ping); ws?.close(); pubRef.current = null }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── AUTH WebSocket ───────────────────────────────────────────────────────────
+  // ── AUTH WebSocket ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    let ws: WebSocket | null = null
-    let ping: ReturnType<typeof setInterval>
-    let dead = false
-    let retries = 0
-
+    let ws: WebSocket|null = null, ping: ReturnType<typeof setInterval>, dead = false, retries = 0
     async function connect() {
       try {
         const r = await fetch('/api/user/ws-url', { cache: 'no-store' })
         if (!r.ok) { setWsErr('login'); return }
         const { wsUrl } = await r.json()
         if (!wsUrl) { setWsErr('login'); return }
-
         ws = new WebSocket(wsUrl)
-        authWsRef.current = ws
-
+        authRef.current = ws
         ws.onopen = () => {
           if (dead) return
-          retries = 0
-          setAuthReady(true)
-          setWsErr(null)
-          // subscribe to balance
+          retries = 0; setAuthReady(true); setWsErr(null)
           ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-          // subscribe to proposals once auth is ready
           subscribeProposals(ws!)
-          // keep-alive
-          ping = setInterval(() => {
-            if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 901 }))
-          }, 25_000)
+          ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 901 })) }, 25_000)
         }
-
-        ws.onmessage = (ev: MessageEvent) => {
+        ws.onmessage = ev => {
           if (dead) return
-          let msg: any
-          try { msg = JSON.parse(ev.data as string) } catch { return }
-
-          if (msg.error?.code === 'AuthorizationRequired' || msg.error?.code === 'InvalidToken') {
-            setWsErr('login'); ws?.close(); return
-          }
-
-          // balance
+          let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
+          if (msg.error?.code === 'AuthorizationRequired' || msg.error?.code === 'InvalidToken') { setWsErr('login'); ws?.close(); return }
           if (msg.msg_type === 'balance') {
             const b = msg.balance as { balance: number; currency: string }
-            setBalance(b.balance)
-            if (b.currency) setCurrency(b.currency)
+            setBalance(b.balance); if (b.currency) setCurrency(b.currency)
+            window.dispatchEvent(new CustomEvent('deriv-balance', { detail: { balance: b.balance, currency: b.currency } }))
           }
-
-          // proposal (req 10 = side A, req 11 = side B)
           if (msg.msg_type === 'proposal') {
             if (msg.error) {
-              const err = msg.error.message ?? 'Proposal error'
-              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err })
-              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err })
+              const e = msg.error.message ?? 'Error'
+              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: e })
+              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: e })
               return
             }
             const p = msg.proposal as { id: string; ask_price: number; payout: number }
-            const prop: Proposal = { id: p.id, ask: p.ask_price, payout: p.payout }
+            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
             if (msg.req_id === 10) setPropA(prop)
             if (msg.req_id === 11) setPropB(prop)
           }
-
-          // buy response
           if (msg.msg_type === 'buy') {
+            const rid = msg.req_id as number
+            const isA = buyMapA.current.has(rid)
+            const map = isA ? buyMapA.current : buyMapB.current
             if (msg.error) {
-              setBuying(false)
+              map.delete(rid)
+              isA ? setBuyingA(false) : setBuyingB(false)
               setBuyErr(msg.error.message ?? 'Buy failed')
-              // IMPORTANT: proposal UUID was consumed — must resubscribe even on error
               if (ws?.readyState === WebSocket.OPEN) subscribeProposals(ws)
               return
             }
-            const b = msg.buy as {
-              contract_id: number; buy_price: number; payout: number;
-              balance_after: number; purchase_time: number
-            }
-            const meta = buyMap.current.get(msg.req_id as number)
-            buyMap.current.delete(msg.req_id as number)
-            setBuying(false)
-            setBuyErr(null)
-            setBalance(b.balance_after)
-
+            const b = msg.buy as { contract_id: number; buy_price: number; payout: number; balance_after: number; purchase_time: number }
+            const meta = map.get(rid)!; map.delete(rid)
+            isA ? setBuyingA(false) : setBuyingB(false)
+            setBuyErr(null); setBalance(b.balance_after)
             if (meta) {
-              const pos: Position = {
-                id: b.contract_id,
-                contractType: meta.side === 'A' ? meta.tt.ctA : meta.tt.ctB,
-                side: meta.side,
-                tt: meta.tt,
-                buyPrice: b.buy_price,
-                payout: b.payout,
-                bidPrice: b.buy_price,
-                profit: 0,
-                status: 'open',
-                barrier: meta.barrier,
-                epoch: b.purchase_time,
-              }
+              const pos: Pos = { ...meta, id: b.contract_id, stake: b.buy_price, payout: b.payout, bid: b.buy_price, profit: 0, status: 'open', ts: b.purchase_time }
               setOpenPos(prev => [pos, ...prev])
-
-              // subscribe to POC for this contract
-              if (ws?.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                  proposal_open_contract: 1,
-                  contract_id: b.contract_id,
-                  subscribe: 1,
-                  req_id: ++reqId.current,
-                }))
-              }
+              if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1, req_id: ++reqId.current }))
             }
-
-            // CRITICAL: resubscribe proposals — old UUID is consumed
             if (ws?.readyState === WebSocket.OPEN) subscribeProposals(ws)
           }
-
-          // proposal_open_contract updates
           if (msg.msg_type === 'proposal_open_contract' && msg.proposal_open_contract) {
-            const poc = msg.proposal_open_contract as {
-              contract_id: number
-              is_sold: number
-              status: string
-              bid_price: string
-              profit: string
-            }
-            const cid    = poc.contract_id
-            const settled = poc.is_sold === 1
-            const status  = poc.status as Position['status']
-            const bid    = parseFloat(poc.bid_price ?? '0')
-            const profit = parseFloat(poc.profit ?? '0')
-
+            const poc = msg.proposal_open_contract as { contract_id: number; is_sold: number; status: string; bid_price: string; profit: string }
+            const cid = poc.contract_id, settled = poc.is_sold === 1
+            const bid = parseFloat(poc.bid_price ?? '0'), profit = parseFloat(poc.profit ?? '0')
             if (settled) {
               setOpenPos(prev => prev.filter(p => p.id !== cid))
-              setClosedPos(prev => {
-                const orig = prev.find(p => p.id === cid) ?? null
-                const updated: Position = orig
-                  ? { ...orig, bidPrice: bid, profit, status }
-                  : { id: cid, contractType: '', side: 'A', tt: TRADE_TYPES[0], buyPrice: 0, payout: 0, bidPrice: bid, profit, status, epoch: 0 }
-                return [updated, ...prev.filter(p => p.id !== cid)].slice(0, 50)
+              setClosed(prev => {
+                const orig = prev.find(p => p.id === cid)
+                const u: Pos = orig ? { ...orig, bid, profit, status: poc.status as Pos['status'] }
+                  : { id: cid, ct: '', side: 'A', ttId: '', lA: '', lB: '', cA: '#22c55e', cB: '#ef4444', stake: 0, payout: 0, bid, profit, status: poc.status as Pos['status'], ts: 0 }
+                return [u, ...prev.filter(p => p.id !== cid)].slice(0, 50)
               })
             } else {
-              setOpenPos(prev => prev.map(p => p.id === cid ? { ...p, bidPrice: bid, profit, status } : p))
+              setOpenPos(prev => prev.map(p => p.id === cid ? { ...p, bid, profit, status: poc.status as Pos['status'] } : p))
             }
           }
         }
-
         ws.onerror = () => setAuthReady(false)
         ws.onclose = () => {
-          setAuthReady(false)
-          authWsRef.current = null
+          setAuthReady(false); authRef.current = null
           if (dead) return
           retries++
           if (retries > 5) { setWsErr('lost'); return }
           setWsErr('reconnecting')
           setTimeout(connect, Math.min(retries * 2000, 10_000))
         }
-      } catch {
-        if (!dead) setTimeout(connect, 5000)
-      }
+      } catch { if (!dead) setTimeout(connect, 5000) }
     }
-
     connect()
-    return () => {
-      dead = true
-      clearInterval(ping)
-      ws?.close()
-      authWsRef.current = null
-    }
-  }, [subscribeProposals]) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { dead = true; clearInterval(ping); ws?.close(); authRef.current = null }
+  }, [subscribeProposals, authKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Symbol change ────────────────────────────────────────────────────────────
+  // ── Symbol change ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    // Reset chart + digit data
-    tickPrices.current = []
-    tickTimes.current  = []
-    curCandle.current  = null
-    setDigits(new Array(10).fill(0))
-    setDigitTotal(0)
-    setLivePrice(null)
-    prevPriceRef.current = null
-
-    const pub  = pubWsRef.current
-    const auth = authWsRef.current
+    prices.current = []; times.current = []; curCandleRef.current = null
+    setPrice(null); prevRef.current = null
+    const pub = pubRef.current, auth = authRef.current
     if (pub?.readyState === WebSocket.OPEN) {
       subscribeTicks(pub, symbol)
-      requestHistory(pub, symbol, TIMEFRAMES[tfIdxRef.current].granularity)
+      requestHistory(pub, symbol, TFS[tfIdxRef.current].gran)
     }
-    // Resubscribe proposals for new symbol on auth WS
     if (auth?.readyState === WebSocket.OPEN) subscribeProposals(auth)
   }, [symbol]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Timeframe change ─────────────────────────────────────────────────────────
+  // ── TF change ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    tickPrices.current = []
-    tickTimes.current  = []
-    curCandle.current  = null
-    const pub = pubWsRef.current
-    if (pub?.readyState === WebSocket.OPEN)
-      requestHistory(pub, symbolRef.current, tf.granularity)
-    // rebuild chart series for new mode
+    prices.current = []; times.current = []; curCandleRef.current = null
+    const pub = pubRef.current
+    if (pub?.readyState === WebSocket.OPEN) requestHistory(pub, symbolRef.current, tf.gran)
     buildSeries()
   }, [tfIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Chart type / MA change ───────────────────────────────────────────────────
-  useEffect(() => {
-    if (chartRef.current) buildSeries()
-  }, [chartType, maOn, maPeriod, buildSeries])
+  // ── Chart type / MA ───────────────────────────────────────────────────────────
+  useEffect(() => { if (chartRef.current) buildSeries() }, [chartType, maOn, maPeriod, buildSeries])
 
-  // ─── Trade params change → resubscribe proposals ─────────────────────────────
+  // ── Trade params → resubscribe ────────────────────────────────────────────────
   useEffect(() => {
-    setSideA(true)
-    const auth = authWsRef.current
+    const auth = authRef.current
     if (auth?.readyState === WebSocket.OPEN) subscribeProposals(auth)
   }, [ttIdx, stake, dur, barrier, subscribeProposals])
 
-  // ─── Chart init ───────────────────────────────────────────────────────────────
+  // ── Chart init ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!chartContainerRef.current) return
-    const chart = createChart(chartContainerRef.current, {
-      layout:     { background: { color: '#060d1b' }, textColor: 'rgba(229,229,229,0.5)' },
-      grid:       { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
-      crosshair:  { mode: 0 },
-      timeScale:  { borderColor: 'rgba(255,255,255,0.07)', timeVisible: true, secondsVisible: false },
-      rightPriceScale: { borderColor: 'rgba(255,255,255,0.07)' },
+    if (!canvasRef.current) return
+    const chart = createChart(canvasRef.current, {
+      layout:          { background: { color: '#050c18' }, textColor: 'rgba(200,215,235,0.5)' },
+      grid:            { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+      crosshair:       { mode: 0 },
+      timeScale:       { borderColor: 'rgba(255,255,255,0.06)', timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.06)' },
       handleScroll: true, handleScale: true,
     })
     chartRef.current = chart
-    // Initial area series
-    areaRef.current = chart.addAreaSeries({
-      lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.22)',
-      bottomColor: 'rgba(252,163,17,0)', lineWidth: 2,
-    })
-
-    const ro = new ResizeObserver(([e]) => {
-      chart.applyOptions({ width: e.contentRect.width, height: e.contentRect.height })
-    })
-    ro.observe(chartContainerRef.current)
-
-    return () => {
-      ro.disconnect()
-      try { chart.remove() } catch {}
-      chartRef.current = null
-      areaRef.current  = null
-    }
+    areaR.current = chart.addAreaSeries({ lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)', lineWidth: 2 })
+    const ro = new ResizeObserver(([e]) => chart.applyOptions({ width: e.contentRect.width, height: e.contentRect.height }))
+    ro.observe(canvasRef.current)
+    return () => { ro.disconnect(); try { chart.remove() } catch {}; chartRef.current = null; areaR.current = null }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Crosshair toggle ─────────────────────────────────────────────────────────
-  const toggleCrosshair = useCallback(() => {
-    setCrosshair(v => {
-      chartRef.current?.applyOptions({ crosshair: { mode: !v ? 1 : 0 } })
-      return !v
-    })
-  }, [])
-
-  // ─── Zoom ─────────────────────────────────────────────────────────────────────
-  const zoom = useCallback((dir: 'in'|'out') => {
-    const ts = chartRef.current?.timeScale()
-    if (!ts) return
-    const range = ts.getVisibleLogicalRange()
-    if (!range) return
-    const d = (range.to - range.from) * (dir === 'in' ? 0.15 : -0.15)
-    ts.setVisibleLogicalRange({ from: range.from + d, to: range.to - d })
-  }, [])
-
-  // ─── Buy ──────────────────────────────────────────────────────────────────────
-  const doBuy = useCallback(() => {
-    const ws = authWsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN || buying) return
-    const prop = sideA ? propARef.current : propBRef.current
-    if (!prop?.id || prop.err) { setBuyErr('Price not ready — please wait'); return }
+  // ── Buy handler ───────────────────────────────────────────────────────────────
+  const doBuy = useCallback((side: 'A'|'B') => {
+    const ws = authRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (side === 'A' && buyingA) return
+    if (side === 'B' && buyingB) return
+    const prop = side === 'A' ? propARef.current : propBRef.current
+    if (!prop?.id || prop.err) { setBuyErr('Price not ready'); return }
     const ask = Number(prop.ask)
-    if (!ask || isNaN(ask)) { setBuyErr('Invalid price'); return }
-
-    setBuying(true)
+    if (!ask || isNaN(ask)) return
+    side === 'A' ? setBuyingA(true) : setBuyingB(true)
     setBuyErr(null)
-
     const rid = ++reqId.current
-    buyMap.current.set(rid, {
-      side: sideA ? 'A' : 'B',
-      tt: ttRef.current,
-      barrier: ttRef.current.hasBarrier ? String(barrierRef.current) : undefined,
-    })
-
-    // price = max price willing to pay (2% buffer covers minor slippage)
-    const maxPrice = parseFloat((ask * 1.02).toFixed(2))
-    ws.send(JSON.stringify({ buy: prop.id, price: maxPrice, req_id: rid }))
-
-    // Safety timeout
+    const cur = ttRef.current
+    const meta: Pos = {
+      id: 0, ct: side === 'A' ? cur.ctA : cur.ctB, side,
+      ttId: cur.id, lA: cur.lA, lB: cur.lB, cA: cur.cA, cB: cur.cB,
+      stake: 0, payout: 0, bid: 0, profit: 0, status: 'open',
+      barrier: cur.barrier ? String(barrierRef.current) : undefined, ts: 0,
+    }
+    ;(side === 'A' ? buyMapA : buyMapB).current.set(rid, meta)
+    ws.send(JSON.stringify({ buy: prop.id, price: parseFloat((ask * 1.02).toFixed(2)), req_id: rid }))
     setTimeout(() => {
-      if (buyMap.current.has(rid)) {
-        buyMap.current.delete(rid)
-        setBuying(false)
-        setBuyErr('No response from server')
-      }
+      const map = side === 'A' ? buyMapA.current : buyMapB.current
+      if (map.has(rid)) { map.delete(rid); side === 'A' ? setBuyingA(false) : setBuyingB(false); setBuyErr('No response') }
     }, 12_000)
-  }, [buying, sideA])
+  }, [buyingA, buyingB])
 
-  // ─── Style helpers ────────────────────────────────────────────────────────────
-  const priceColor  = priceDir === 'up' ? '#22c55e' : priceDir === 'dn' ? '#ef4444' : '#e5e5e5'
-  const deltaColor  = priceDelta >= 0 ? '#22c55e' : '#ef4444'
-  const activeColor = sideA ? tt.colorA : tt.colorB
-  const inp: React.CSSProperties = {
-    background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '6px', color: '#e5e5e5', padding: '6px 10px',
-    fontSize: '0.78rem', outline: 'none',
+  // ── Market filter ─────────────────────────────────────────────────────────────
+  const filtered = mktQ
+    ? syms.filter(s => s.name.toLowerCase().includes(mktQ.toLowerCase()) || s.symbol.toLowerCase().includes(mktQ.toLowerCase()))
+    : syms
+  const groups = filtered.reduce<Record<string, Sym[]>>((a, s) => {
+    if (!a[s.group]) a[s.group] = []
+    a[s.group].push(s); return a
+  }, {})
+
+  // ── Derived display values ────────────────────────────────────────────────────
+  const priceColor = priceDir === 'up' ? '#22c55e' : priceDir === 'dn' ? '#ef4444' : '#e5e5e5'
+  const totalPL    = [...openPos, ...closed].reduce((s, p) => s + p.profit, 0)
+
+  // ── Proposal card renderer ────────────────────────────────────────────────────
+  function ProposalCard({ side }: { side: 'A'|'B' }) {
+    const prop    = side === 'A' ? propA : propB
+    const buying  = side === 'A' ? buyingA : buyingB
+    const label   = side === 'A' ? tt.lA : tt.lB
+    const color   = side === 'A' ? tt.cA : tt.cB
+    const ok      = !!prop?.id && !prop?.err && authReady
+    return (
+      <div style={{
+        flex: 1, borderRadius: '10px', padding: '12px 10px',
+        border: `1px solid ${ok ? color + '30' : 'rgba(255,255,255,0.07)'}`,
+        background: ok ? color + '08' : 'rgba(255,255,255,0.02)',
+        display: 'flex', flexDirection: 'column', gap: '6px',
+        transition: 'all 0.15s',
+      }}>
+        <div style={{ fontSize: '0.72rem', fontWeight: 800, color: ok ? color : 'rgba(229,229,229,0.35)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+          {label}
+        </div>
+        {prop?.err ? (
+          <div style={{ fontSize: '0.6rem', color: '#ef4444', lineHeight: 1.4 }}>{prop.err.slice(0, 60)}</div>
+        ) : prop?.ask ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)' }}>Stake</span>
+              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#e5e5e5', fontVariantNumeric: 'tabular-nums' }}>{f2(prop.ask)}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)' }}>Payout</span>
+              <span style={{ fontSize: '0.88rem', fontWeight: 800, color: color, fontVariantNumeric: 'tabular-nums' }}>{f2(prop.payout)}</span>
+            </div>
+          </>
+        ) : (
+          <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.2)' }}>{authReady ? 'Fetching…' : '—'}</div>
+        )}
+        <button
+          onClick={() => doBuy(side)}
+          disabled={!ok || buying}
+          style={{
+            marginTop: '2px', padding: '10px 4px', borderRadius: '7px', border: 'none', outline: 'none',
+            background: ok && !buying ? color : 'rgba(255,255,255,0.05)',
+            color:      ok && !buying ? '#fff' : 'rgba(229,229,229,0.2)',
+            cursor:     ok && !buying ? 'pointer' : 'not-allowed',
+            fontWeight: 800, fontSize: '0.78rem', transition: 'all 0.12s',
+          }}
+        >
+          {buying ? '…' : `Buy ${label}`}
+        </button>
+      </div>
+    )
   }
-  const btnTool: React.CSSProperties = {
-    width: '40px', height: '40px', borderRadius: '8px', border: 'none',
-    background: 'transparent', cursor: 'pointer', outline: 'none',
-    display: 'flex', flexDirection: 'column', alignItems: 'center',
-    justifyContent: 'center', gap: '2px', color: 'rgba(200,215,235,0.5)',
-    transition: 'all 0.12s',
-  }
-
-  // ─── Digit signal for OU ──────────────────────────────────────────────────────
-  const ouSignals: Array<{ label: string; barrier: number; side: 'A'|'B'; prob: number }> = [
-    ...[1,2,3,4,5].map(b => {
-      let w = 0; for (let d = b+1; d <= 9; d++) w += digits[d]
-      return { label: `Over ${b}`, barrier: b, side: 'A' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
-    }),
-    ...[4,5,6,7,8].map(b => {
-      let w = 0; for (let d = 0; d < b; d++) w += digits[d]
-      return { label: `Under ${b}`, barrier: b, side: 'B' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
-    }),
-  ]
-
-  const bestSignal = digitTotal >= 25
-    ? ouSignals.reduce((best, s) => s.prob > best.prob ? s : best)
-    : null
-
-  // ─── Total P&L ────────────────────────────────────────────────────────────────
-  const totalPL = [...openPos, ...closedPos].reduce((s, p) => s + p.profit, 0)
 
   // ──────────────────────────────────────────────────────────────────────────────
   // RENDER
   // ──────────────────────────────────────────────────────────────────────────────
   return (
-    <div style={{
-      display: 'flex', width: '100%', height: '100%', overflow: 'hidden',
-      background: '#060d1b', color: '#e5e5e5',
-      fontFamily: 'Inter, system-ui, sans-serif', fontSize: '14px',
-    }}>
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#050c18', color: '#e5e5e5', fontFamily: 'Inter,system-ui,sans-serif', fontSize: '14px', overflow: 'hidden' }}>
 
-      {/* ── POSITIONS SIDEBAR ─────────────────────────────────────────────────── */}
-      <div style={{
-        width: '252px', flexShrink: 0,
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-        background: '#07101f', display: 'flex', flexDirection: 'column',
-      }}>
-        <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-          Positions
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {openPos.length === 0 && closedPos.length === 0 && (
-            <div style={{ padding: '28px 14px', textAlign: 'center', color: 'rgba(229,229,229,0.15)', fontSize: '0.7rem' }}>No positions yet</div>
-          )}
-          {openPos.map(p => (
-            <div key={p.id} style={{ padding: '9px 12px', borderBottom: '1px solid rgba(255,255,255,0.04)', background: 'rgba(255,255,255,0.015)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                <span style={{ fontSize: '0.72rem', fontWeight: 700, color: p.side === 'A' ? p.tt.colorA : p.tt.colorB }}>
-                  {p.side === 'A' ? p.tt.labelA : p.tt.labelB}{p.barrier ? ` ${p.barrier}` : ''}
-                </span>
-                <span style={{ fontSize: '0.72rem', fontWeight: 700, color: p.profit >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
-                  {p.profit >= 0 ? '+' : ''}{d2(p.profit)}
-                </span>
+      {/* ── TOP ROW: chart + trade panel ───────────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+
+        {/* ── CHART COLUMN ─────────────────────────────────────────────────────── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+
+          {/* Chart top bar */}
+          <div style={{
+            height: '52px', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '12px',
+            padding: '0 14px', borderBottom: '1px solid rgba(255,255,255,0.05)',
+            background: '#06101c',
+          }}>
+            {/* Symbol button */}
+            <button
+              onClick={() => { setMktOpen(v => !v); setMktQ('') }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                background: mktOpen ? 'rgba(252,163,17,0.1)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${mktOpen ? 'rgba(252,163,17,0.4)' : 'rgba(255,255,255,0.08)'}`,
+                borderRadius: '8px', padding: '5px 10px', cursor: 'pointer', outline: 'none',
+                transition: 'all 0.12s',
+              }}
+            >
+              <span style={{
+                width: '24px', height: '24px', borderRadius: '50%',
+                background: 'linear-gradient(135deg,#FCA311,#c97000)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '0.45rem', fontWeight: 900, color: '#000', flexShrink: 0,
+              }}>
+                {symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
+              </span>
+              <div>
+                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#e5e5e5', lineHeight: 1.1 }}>{curSym?.name ?? symbol}</div>
+                {price != null && (
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: priceColor, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 }}>
+                    {fdp(price, dp)}
+                    <span style={{ marginLeft: '4px', color: priceDir === 'up' ? '#22c55e' : priceDir === 'dn' ? '#ef4444' : 'rgba(229,229,229,0.3)', fontSize: '0.62rem' }}>
+                      {delta >= 0 ? '+' : ''}{fdp(delta, dp)}
+                    </span>
+                  </div>
+                )}
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.28)' }}>{p.contractType}</span>
-                <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.28)', fontVariantNumeric: 'tabular-nums' }}>
-                  ⏳ {d2(p.bidPrice)}
-                </span>
-              </div>
+              <span style={{ color: 'rgba(229,229,229,0.3)', fontSize: '0.55rem', marginLeft: '2px' }}>▾</span>
+            </button>
+
+            {/* Divider */}
+            <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
+
+            {/* Timeframe chips */}
+            <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
+              {TFS.map((t, i) => (
+                <button key={t.label}
+                  onClick={() => setTfIdx(i)}
+                  style={{
+                    padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                    background: tfIdx === i ? 'rgba(252,163,17,0.15)' : 'transparent',
+                    color:      tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.4)',
+                    fontSize:   '0.7rem', fontWeight: 700, outline: 'none',
+                    transition: 'all 0.1s',
+                  }}
+                >{t.label}</button>
+              ))}
             </div>
-          ))}
-          {closedPos.slice(0, 25).map(p => (
-            <div key={`c-${p.id}`} style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.03)', opacity: 0.55 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
-                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'rgba(229,229,229,0.55)' }}>
-                  {p.side === 'A' ? p.tt.labelA : p.tt.labelB}{p.barrier ? ` ${p.barrier}` : ''}
-                </span>
-                <span style={{ fontSize: '0.7rem', fontWeight: 700, color: p.status === 'won' ? '#22c55e' : p.status === 'lost' ? '#ef4444' : '#888', fontVariantNumeric: 'tabular-nums' }}>
-                  {p.profit >= 0 ? '+' : ''}{d2(p.profit)}
-                </span>
-              </div>
-              <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.22)', textTransform: 'uppercase' }}>{p.status}</span>
-            </div>
-          ))}
-        </div>
-        {(openPos.length + closedPos.length) > 0 && (
-          <div style={{ flexShrink: 0, padding: '7px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.28)' }}>Total P&L</span>
-            <span style={{ fontSize: '0.75rem', fontWeight: 800, color: totalPL >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
-              {totalPL >= 0 ? '+' : ''}{d2(totalPL)}
-            </span>
-          </div>
-        )}
-      </div>
 
-      {/* ── LEFT TOOLBAR ──────────────────────────────────────────────────────────
-          zIndex: 20 establishes a stacking context at root level z=20.
-          All dropdowns/panels inside are at z=25 within this context,
-          which is above the chart backdrop at root z=15. ─────────────────────── */}
-      <div style={{
-        width: '44px', flexShrink: 0, background: '#07101f',
-        borderRight: '1px solid rgba(255,255,255,0.05)',
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        paddingTop: '80px', paddingBottom: '8px',
-        position: 'relative', zIndex: 20,
-      }}>
+            {/* Divider */}
+            <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
 
-        {/* TF + Chart type button */}
-        <div style={{ position: 'relative', width: '100%', display: 'flex', justifyContent: 'center' }}>
-          <button
-            onClick={() => { setShowTfMenu(v => !v); setShowIndicators(false); setShowDrawing(false) }}
-            style={{ ...btnTool, color: showTfMenu ? '#FCA311' : undefined, background: showTfMenu ? 'rgba(252,163,17,0.1)' : 'transparent' }}
-            title="Timeframe & chart type"
-          >
-            <span style={{ fontSize: '0.58rem', fontWeight: 800, lineHeight: 1, color: 'inherit' }}>{tf.label}</span>
-            <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>{isTickMode ? 'Area' : chartType}</span>
-          </button>
-
-          {/* TF / chart-type dropdown — z=25 within toolbar stacking context */}
-          {showTfMenu && (
-            <div style={{
-              position: 'absolute', top: 0, left: '48px',
-              background: '#0c1829', border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '10px', padding: '14px', width: '210px',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.7)', zIndex: 25,
-            }}>
-              <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>Timeframe</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '14px' }}>
-                {TIMEFRAMES.map((t, i) => (
-                  <button key={t.label}
-                    onClick={() => { setTfIdx(i); setShowTfMenu(false) }}
+            {/* Chart type (only for non-tick) */}
+            {!isTick && (
+              <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
+                {(['area','line','candles'] as const).map(ct => (
+                  <button key={ct}
+                    onClick={() => setChartType(ct)}
                     style={{
-                      padding: '5px 9px', borderRadius: '5px', border: 'none', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 700,
-                      background: tfIdx === i ? 'rgba(252,163,17,0.2)' : 'rgba(255,255,255,0.06)',
-                      color:      tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.5)',
-                      outline:    tfIdx === i ? '1px solid rgba(252,163,17,0.4)' : 'none',
+                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                      background: chartType === ct ? 'rgba(59,130,246,0.15)' : 'transparent',
+                      color:      chartType === ct ? '#60a5fa' : 'rgba(229,229,229,0.35)',
+                      fontSize: '0.68rem', fontWeight: 600, outline: 'none', textTransform: 'capitalize',
+                      transition: 'all 0.1s',
                     }}
-                  >
-                    {t.label}
-                  </button>
+                  >{ct}</button>
                 ))}
               </div>
-              {!isTickMode && (
-                <>
-                  <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>Chart type</div>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {(['area','candles','line'] as const).map(ct => (
-                      <button key={ct}
-                        onClick={() => { setChartType(ct); setShowTfMenu(false) }}
-                        style={{
-                          flex: 1, padding: '7px 4px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '0.62rem', fontWeight: 700,
-                          background: chartType === ct ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.05)',
-                          color:      chartType === ct ? '#FCA311' : 'rgba(229,229,229,0.4)',
-                          outline:    chartType === ct ? '1px solid rgba(252,163,17,0.35)' : 'none',
-                          textTransform: 'capitalize',
-                        }}
-                      >
-                        {ct}
-                      </button>
-                    ))}
+            )}
+
+            {/* MA toggle */}
+            {!isTick && (
+              <>
+                <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                  <div
+                    onClick={() => setMaOn(v => !v)}
+                    style={{ width: '30px', height: '16px', borderRadius: '8px', cursor: 'pointer', background: maOn ? '#f59e0b' : 'rgba(255,255,255,0.1)', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}
+                  >
+                    <div style={{ position: 'absolute', top: '2px', width: '12px', height: '12px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s', left: maOn ? '16px' : '2px' }} />
                   </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '4px 0' }} />
-
-        {/* Indicators button */}
-        <div style={{ position: 'relative', width: '100%', display: 'flex', justifyContent: 'center' }}>
-          <button
-            onClick={() => { setShowIndicators(v => !v); setShowTfMenu(false); setShowDrawing(false) }}
-            style={{ ...btnTool, color: showIndicators ? '#3b82f6' : undefined, background: showIndicators ? 'rgba(59,130,246,0.1)' : 'transparent' }}
-            title="Indicators"
-          >
-            <svg width="15" height="13" viewBox="0 0 15 13" fill="none"><path d="M1 10 Q4 3 7 7 Q10 11 13 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-            <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>Indicat.</span>
-          </button>
-
-          {/* Indicators panel */}
-          {showIndicators && (
-            <div style={{
-              position: 'absolute', top: 0, left: '48px',
-              background: '#0c1829', border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '10px', padding: '14px', width: '220px',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 25,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-                <span style={{ fontSize: '0.78rem', fontWeight: 700 }}>Indicators</span>
-                <button onClick={() => setShowIndicators(false)} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1.1rem', lineHeight: 1 }}>×</button>
-              </div>
-              {/* MA toggle */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: '8px' }}>
-                <div>
-                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: maOn ? '#3b82f6' : '#e5e5e5' }}>Moving Average</div>
-                  <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)', marginTop: '2px' }}>Simple MA overlay</div>
-                </div>
-                <div
-                  onClick={() => setMaOn(v => !v)}
-                  style={{ width: '34px', height: '18px', borderRadius: '9px', cursor: 'pointer', flexShrink: 0, background: maOn ? '#3b82f6' : 'rgba(255,255,255,0.1)', position: 'relative', transition: 'background 0.2s' }}
-                >
-                  <div style={{ position: 'absolute', top: '2px', width: '14px', height: '14px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s', left: maOn ? '18px' : '2px' }} />
-                </div>
-              </div>
-              {maOn && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.4)' }}>Period</span>
-                  <input type="number" min={2} max={200} value={maPeriod}
-                    onChange={e => setMaPeriod(Math.max(2, Math.min(200, parseInt(e.target.value) || 20)))}
-                    style={{ ...inp, width: '60px' }}
-                  />
-                  <div style={{ width: '10px', height: '2px', background: '#3b82f6', flexShrink: 0, borderRadius: '1px' }} />
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '4px 0' }} />
-
-        {/* Crosshair */}
-        <button
-          onClick={toggleCrosshair}
-          style={{ ...btnTool, color: crosshair ? '#FCA311' : undefined, background: crosshair ? 'rgba(252,163,17,0.1)' : 'transparent' }}
-          title="Toggle crosshair"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.2"/><line x1="7" y1="0" x2="7" y2="4" stroke="currentColor" strokeWidth="1.2"/><line x1="7" y1="10" x2="7" y2="14" stroke="currentColor" strokeWidth="1.2"/><line x1="0" y1="7" x2="4" y2="7" stroke="currentColor" strokeWidth="1.2"/><line x1="10" y1="7" x2="14" y2="7" stroke="currentColor" strokeWidth="1.2"/></svg>
-          <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>Cross</span>
-        </button>
-
-        {/* Zoom in */}
-        <button onClick={() => zoom('in')} style={btnTool} title="Zoom in">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/><line x1="10" y1="10" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><line x1="4" y1="6" x2="8" y2="6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/><line x1="6" y1="4" x2="6" y2="8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
-          <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>Zoom+</span>
-        </button>
-
-        {/* Zoom out */}
-        <button onClick={() => zoom('out')} style={btnTool} title="Zoom out">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/><line x1="10" y1="10" x2="13.5" y2="13.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><line x1="3.5" y1="6" x2="8.5" y2="6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
-          <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>Zoom−</span>
-        </button>
-
-        {/* Scroll to latest */}
-        <button
-          onClick={() => chartRef.current?.timeScale().scrollToRealTime()}
-          style={btnTool}
-          title="Scroll to latest"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7 H11 M8 4 L11 7 L8 10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          <span style={{ fontSize: '0.44rem', color: 'inherit', opacity: 0.7 }}>Latest</span>
-        </button>
-      </div>
-
-      {/* ── CHART AREA ────────────────────────────────────────────────────────── */}
-      <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-
-        {/* Market selector card */}
-        <div style={{ position: 'absolute', top: '10px', left: '10px', zIndex: 5, display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button
-            onClick={() => { setShowMarketDlg(v => !v); setMktSearch(''); closeAllPanels() }}
-            style={{
-              display: 'flex', alignItems: 'center', gap: '8px',
-              background: 'rgba(6,13,27,0.9)', borderRadius: '9px', padding: '7px 10px',
-              border: showMarketDlg ? '1px solid rgba(252,163,17,0.5)' : '1px solid rgba(255,255,255,0.08)',
-              cursor: 'pointer', outline: 'none', backdropFilter: 'blur(8px)',
-              boxShadow: '0 2px 12px rgba(0,0,0,0.5)',
-            }}
-          >
-            <span style={{ width: '26px', height: '26px', borderRadius: '50%', flexShrink: 0, background: 'linear-gradient(135deg,#FCA311,#c97000)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.48rem', fontWeight: 900, color: '#000' }}>
-              {symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
-            </span>
-            <div>
-              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#e5e5e5', whiteSpace: 'nowrap' }}>
-                {curMarket?.display_name ?? symbol}
-              </div>
-              {livePrice != null && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '1px' }}>
-                  <span style={{ fontSize: '0.82rem', fontWeight: 800, color: priceColor, fontVariantNumeric: 'tabular-nums' }}>
-                    {df(livePrice, dp)}
-                  </span>
-                  <span style={{ fontSize: '0.62rem', color: deltaColor, fontVariantNumeric: 'tabular-nums' }}>
-                    {priceDelta >= 0 ? '+' : ''}{df(priceDelta, dp)}
-                  </span>
-                </div>
-              )}
-            </div>
-            <span style={{ color: 'rgba(229,229,229,0.3)', fontSize: '0.6rem', marginLeft: '2px' }}>▾</span>
-          </button>
-
-          {/* Live dot */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(6,13,27,0.85)', borderRadius: '6px', padding: '4px 8px', border: '1px solid rgba(255,255,255,0.07)' }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: connected ? '#22c55e' : '#555', boxShadow: connected ? '0 0 6px #22c55e88' : 'none', animation: connected ? 'pulse 2s infinite' : 'none' }} />
-            <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.28)' }}>{connected ? 'Live' : 'Connecting…'}</span>
-          </div>
-        </div>
-
-        {/* Chart canvas */}
-        <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
-
-        {/* Market dialog — root z=30 covers toolbar z=20 */}
-        {showMarketDlg && (
-          <>
-            <div onClick={() => setShowMarketDlg(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(0,0,0,0.25)' }} />
-            <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '500px', zIndex: 35, background: '#070f1e', borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', boxShadow: '8px 0 40px rgba(0,0,0,0.7)' }}>
-              <div style={{ width: '140px', flexShrink: 0, borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column' }}>
-                <div style={{ padding: '13px 12px 8px', fontSize: '0.78rem', fontWeight: 700, color: 'rgba(229,229,229,0.7)', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>Markets</div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px', borderLeft: '2px solid #FCA311' }}>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#FCA311' }}>Derived</span>
-                </div>
-              </div>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                <div style={{ padding: '9px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '7px', padding: '7px 10px', border: '1px solid rgba(255,255,255,0.07)' }}>
-                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="5.5" cy="5.5" r="4" stroke="rgba(229,229,229,0.3)" strokeWidth="1.3"/><path d="M8.5 8.5L11.5 11.5" stroke="rgba(229,229,229,0.3)" strokeWidth="1.3" strokeLinecap="round"/></svg>
-                    <input autoFocus type="text" placeholder="Search markets…" value={mktSearch}
-                      onChange={e => setMktSearch(e.target.value)}
-                      style={{ background: 'none', border: 'none', outline: 'none', color: '#e5e5e5', fontSize: '0.78rem', flex: 1 }}
+                  <span style={{ fontSize: '0.64rem', color: maOn ? '#f59e0b' : 'rgba(229,229,229,0.3)', fontWeight: 600 }}>MA</span>
+                  {maOn && (
+                    <input type="number" min={2} max={200} value={maPeriod}
+                      onChange={e => setMaPeriod(Math.max(2, Math.min(200, parseInt(e.target.value)||20)))}
+                      style={{ width: '44px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '5px', color: '#e5e5e5', padding: '3px 6px', fontSize: '0.68rem', outline: 'none' }}
                     />
-                    {mktSearch && <button onClick={() => setMktSearch('')} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', padding: 0, fontSize: '1rem' }}>×</button>}
-                  </div>
-                </div>
-                <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '8px' }}>
-                  {!mktsLoaded && <div style={{ padding: '2.5rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>Loading markets…</div>}
-                  {mktsLoaded && Object.entries(mktGroups).map(([group, syms]) => (
-                    <div key={group}>
-                      <div style={{ padding: '9px 14px 3px', fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{group}</div>
-                      {syms.map(m => {
-                        const sel = m.symbol === symbol
-                        return (
-                          <button key={m.symbol}
-                            onClick={() => { setSymbol(m.symbol); setShowMarketDlg(false) }}
-                            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '9px', padding: '8px 14px', background: sel ? 'rgba(252,163,17,0.07)' : 'transparent', border: 'none', borderLeft: sel ? '2px solid #FCA311' : '2px solid transparent', color: sel ? '#FCA311' : 'rgba(229,229,229,0.7)', cursor: 'pointer', textAlign: 'left', opacity: m.isOpen ? 1 : 0.45 }}
-                          >
-                            <span style={{ width: '26px', height: '26px', borderRadius: '50%', flexShrink: 0, background: sel ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.5rem', fontWeight: 800 }}>
-                              {m.symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
-                            </span>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: '0.73rem', fontWeight: sel ? 700 : 400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.display_name}</div>
-                              {!m.isOpen && <div style={{ fontSize: '0.56rem', color: 'rgba(229,229,229,0.28)' }}>Closed</div>}
-                            </div>
-                            {sel && <span style={{ color: '#FCA311', fontSize: '0.75rem' }}>✓</span>}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ))}
-                  {mktsLoaded && Object.keys(mktGroups).length === 0 && (
-                    <div style={{ padding: '2.5rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>No markets found</div>
                   )}
                 </div>
-              </div>
+              </>
+            )}
+
+            <div style={{ flex: 1 }} />
+
+            {/* Live dot */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+              <span style={{
+                width: '7px', height: '7px', borderRadius: '50%',
+                background: live ? '#22c55e' : '#555',
+                boxShadow: live ? '0 0 6px #22c55e88' : 'none',
+                animation: live ? 'blink 2s infinite' : 'none',
+              }} />
+              <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)' }}>{live ? 'Live' : 'Connecting…'}</span>
             </div>
-          </>
-        )}
-
-        {/* Click-outside backdrop — root z=15, below toolbar z=20 so toolbar panels still receive clicks */}
-        {(showTfMenu || showIndicators || showDrawing) && (
-          <div onClick={closeAllPanels} style={{ position: 'absolute', inset: 0, zIndex: 15 }} />
-        )}
-      </div>
-
-      {/* ── TRADING PANEL ────────────────────────────────────────────────────────── */}
-      <div style={{ width: '268px', flexShrink: 0, background: '#07101f', borderLeft: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column' }}>
-
-        {/* Trade type tabs */}
-        <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
-          {TRADE_TYPES.map((t, i) => (
-            <button key={t.id}
-              onClick={() => { setTtIdx(i); setSideA(true); setPropA(null); setPropB(null) }}
-              style={{ flex: 1, padding: '10px 0', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '0.6rem', fontWeight: 800, outline: 'none', letterSpacing: '0.03em', color: ttIdx === i ? '#FCA311' : 'rgba(229,229,229,0.33)', borderBottom: ttIdx === i ? '2px solid #FCA311' : '2px solid transparent' }}
-            >
-              {t.id}
-            </button>
-          ))}
-        </div>
-
-        {/* Panel body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'rgba(229,229,229,0.55)' }}>{tt.label}</div>
-
-          {/* Side selector */}
-          <div style={{ display: 'flex', gap: '4px' }}>
-            {([true, false] as const).map(isA => {
-              const label = isA ? tt.labelA : tt.labelB
-              const color = isA ? tt.colorA : tt.colorB
-              const active = sideA === isA
-              return (
-                <button key={String(isA)}
-                  onClick={() => setSideA(isA)}
-                  style={{ flex: 1, padding: '10px 4px', borderRadius: '7px', border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700, outline: 'none', transition: 'all 0.12s', background: active ? color : 'rgba(255,255,255,0.05)', color: active ? '#fff' : 'rgba(229,229,229,0.4)' }}
-                >
-                  {label}
-                </button>
-              )
-            })}
           </div>
 
-          {/* OU Signal analyzer */}
-          {tt.id === 'OU' && (
-            <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '9px', padding: '9px 10px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.4)', letterSpacing: '0.05em', marginBottom: '7px' }}>
-                SIGNAL ({digitTotal} ticks)
-              </div>
-              {bestSignal && (
-                <div style={{ background: 'rgba(252,163,17,0.07)', border: '1px solid rgba(252,163,17,0.18)', borderRadius: '7px', padding: '6px 9px', marginBottom: '7px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)' }}>Best signal</div>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#FCA311' }}>{bestSignal.label}</div>
+          {/* Chart canvas */}
+          <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+            <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
+
+            {/* Market drawer — slides over chart */}
+            {mktOpen && (
+              <>
+                <div onClick={() => setMktOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 20, background: 'rgba(0,0,0,0.3)' }} />
+                <div style={{
+                  position: 'absolute', top: 0, left: 0, bottom: 0, width: '480px',
+                  background: '#070f1e', borderRight: '1px solid rgba(255,255,255,0.06)',
+                  display: 'flex', flexDirection: 'column', zIndex: 25,
+                  boxShadow: '8px 0 40px rgba(0,0,0,0.7)',
+                }}>
+                  <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px', color: 'rgba(229,229,229,0.7)' }}>Select Market</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', padding: '8px 12px', border: '1px solid rgba(255,255,255,0.08)' }}>
+                      <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="5.5" cy="5.5" r="4" stroke="rgba(200,215,235,0.35)" strokeWidth="1.3"/><path d="M8.5 8.5L11.5 11.5" stroke="rgba(200,215,235,0.35)" strokeWidth="1.3" strokeLinecap="round"/></svg>
+                      <input autoFocus type="text" placeholder="Search…" value={mktQ}
+                        onChange={e => setMktQ(e.target.value)}
+                        style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e5e5e5', fontSize: '0.8rem' }}
+                      />
+                      {mktQ && <button onClick={() => setMktQ('')} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1rem', lineHeight: 1 }}>×</button>}
+                    </div>
                   </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)' }}>Win rate</div>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: bestSignal.prob > 0.8 ? '#22c55e' : '#FCA311' }}>{(bestSignal.prob * 100).toFixed(1)}%</div>
+                  <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '12px' }}>
+                    {!symsOk && <div style={{ padding: '3rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>Loading…</div>}
+                    {symsOk && Object.entries(groups).map(([g, ms]) => (
+                      <div key={g}>
+                        <div style={{ padding: '10px 16px 4px', fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{g}</div>
+                        {ms.map(m => {
+                          const sel = m.symbol === symbol
+                          return (
+                            <button key={m.symbol}
+                              onClick={() => { setSymbol(m.symbol); setMktOpen(false) }}
+                              style={{
+                                width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
+                                padding: '9px 16px', background: sel ? 'rgba(252,163,17,0.07)' : 'transparent',
+                                border: 'none', borderLeft: `2px solid ${sel ? '#FCA311' : 'transparent'}`,
+                                color: sel ? '#FCA311' : 'rgba(229,229,229,0.7)', cursor: 'pointer',
+                                opacity: m.open ? 1 : 0.4, textAlign: 'left',
+                              }}
+                            >
+                              <span style={{ width: '28px', height: '28px', borderRadius: '50%', background: sel ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.5rem', fontWeight: 800, flexShrink: 0 }}>
+                                {m.symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
+                              </span>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '0.78rem', fontWeight: sel ? 700 : 400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.name}</div>
+                                {!m.open && <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.28)', marginTop: '1px' }}>Closed</div>}
+                              </div>
+                              {sel && <span style={{ color: '#FCA311', fontSize: '0.8rem' }}>✓</span>}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ))}
+                    {symsOk && Object.keys(groups).length === 0 && (
+                      <div style={{ padding: '3rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>No results</div>
+                    )}
                   </div>
                 </div>
-              )}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
-                {ouSignals.map(s => {
-                  const isOver  = s.label.startsWith('Over')
-                  const color   = isOver ? '#22c55e' : '#3b82f6'
-                  const isBest  = bestSignal?.label === s.label
-                  const pct     = digitTotal >= 10 ? `${(s.prob * 100).toFixed(0)}%` : '–'
-                  return (
-                    <button key={s.label}
-                      onClick={() => { setBarrier(s.barrier); setSideA(s.side === 'A') }}
-                      style={{
-                        padding: '4px 6px', borderRadius: '5px', border: 'none', cursor: 'pointer',
-                        background: isBest ? `${color}18` : 'rgba(255,255,255,0.04)',
-                        color: isBest ? color : 'rgba(229,229,229,0.38)',
-                        fontSize: '0.6rem', fontWeight: 700,
-                        outline: isBest ? `1px solid ${color}55` : 'none',
-                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1px',
-                      }}
-                    >
-                      <span>{s.label.split(' ')[1]}{isOver ? '↑' : '↓'}</span>
-                      <span style={{ fontSize: '0.48rem', opacity: 0.75 }}>{pct}</span>
-                    </button>
-                  )
-                })}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ── TRADE PANEL ──────────────────────────────────────────────────────── */}
+        <div style={{
+          width: '286px', flexShrink: 0,
+          borderLeft: '1px solid rgba(255,255,255,0.06)',
+          background: '#060e1c', display: 'flex', flexDirection: 'column',
+        }}>
+
+          {/* Trade type selector */}
+          <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
+            <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>Trade Type</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px' }}>
+              {TT.map((t, i) => (
+                <button key={t.id}
+                  onClick={() => { setTtIdx(i); setPropA(null); setPropB(null) }}
+                  style={{
+                    padding: '8px 6px', borderRadius: '7px', border: 'none', cursor: 'pointer',
+                    background: ttIdx === i ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)',
+                    color:      ttIdx === i ? '#FCA311' : 'rgba(229,229,229,0.4)',
+                    fontSize:   '0.68rem', fontWeight: 700, transition: 'all 0.12s',
+                    outline:    ttIdx === i ? '1px solid rgba(252,163,17,0.35)' : 'none' as any,
+                    textAlign: 'center',
+                  }}
+                >
+                  <div>{t.label.split(' / ')[0]}</div>
+                  <div style={{ fontSize: '0.55rem', opacity: 0.65, marginTop: '1px' }}>/ {t.label.split(' / ')[1]}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Barrier (for OU + MD) */}
+          {tt.barrier && (
+            <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
+              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '6px' }}>Digit ({barrier})</div>
+              <div style={{ display: 'flex', gap: '3px' }}>
+                {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                  <button key={d}
+                    onClick={() => setBarrier(d)}
+                    style={{
+                      flex: 1, padding: '6px 2px', borderRadius: '5px', border: 'none', cursor: 'pointer',
+                      background: barrier === d ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
+                      color:      barrier === d ? '#FCA311' : 'rgba(229,229,229,0.5)',
+                      fontSize: '0.72rem', fontWeight: 700,
+                      outline: barrier === d ? '1px solid rgba(252,163,17,0.35)' : 'none' as any,
+                    }}
+                  >{d}</button>
+                ))}
               </div>
-              {digitTotal < 10 && <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.2)', marginTop: '5px' }}>Collecting data…</div>}
             </div>
           )}
 
-          {/* Digit grid (OU + MD) */}
-          {tt.hasBarrier && (
-            <div>
-              <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '6px' }}>
-                Digit ({barrier})
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: '3px' }}>
-                {[0,1,2,3,4,5,6,7,8,9].map(d => {
-                  const pct  = digitTotal > 0 ? (digits[d] / digitTotal) * 100 : 0
-                  const sel  = barrier === d
-                  const col  = sideA ? tt.colorA : tt.colorB
-                  return (
-                    <button key={d}
-                      onClick={() => setBarrier(d)}
-                      style={{
-                        padding: '8px 2px', borderRadius: '7px', border: `1px solid ${sel ? col : 'rgba(255,255,255,0.06)'}`,
-                        background: sel ? `${col}1a` : 'rgba(255,255,255,0.025)',
-                        color: sel ? col : 'rgba(229,229,229,0.6)', cursor: 'pointer', fontVariantNumeric: 'tabular-nums',
-                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px', outline: 'none', transition: 'all 0.1s',
-                      }}
-                    >
-                      <span style={{ fontSize: '0.85rem', fontWeight: 800, lineHeight: 1 }}>{d}</span>
-                      <span style={{ fontSize: '0.54rem', lineHeight: 1, opacity: 0.8 }}>{pct.toFixed(1)}%</span>
-                    </button>
-                  )
-                })}
+          {/* Duration + Stake */}
+          <div style={{ padding: '12px 14px 0', flexShrink: 0, display: 'flex', gap: '10px' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '5px' }}>Duration</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <input type="number" min={1} max={10} value={dur}
+                  onChange={e => setDur(Math.max(1, Math.min(10, parseInt(e.target.value)||1)))}
+                  style={{ flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', color: '#e5e5e5', padding: '7px 8px', fontSize: '0.78rem', outline: 'none' }}
+                />
+                <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.3)', flexShrink: 0 }}>t</span>
               </div>
             </div>
-          )}
-
-          {/* Duration */}
-          <div>
-            <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '5px' }}>Duration</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input type="number" min={1} max={10} value={dur}
-                onChange={e => setDur(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
-                style={{ ...inp, width: '60px' }}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '5px' }}>Stake ({currency})</div>
+              <input type="number" min="0.35" step="0.01" value={stake}
+                onChange={e => setStake(e.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', color: '#e5e5e5', padding: '7px 8px', fontSize: '0.78rem', outline: 'none' }}
               />
-              <span style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.35)' }}>ticks</span>
             </div>
           </div>
 
-          {/* Stake */}
-          <div>
-            <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '5px' }}>
-              Stake ({currency})
-            </div>
-            <input type="number" min="0.35" step="0.01" value={stake}
-              onChange={e => setStake(e.target.value)}
-              style={{ ...inp, width: '100%' }}
-            />
+          {/* Quick stake buttons */}
+          <div style={{ padding: '6px 14px 0', flexShrink: 0, display: 'flex', gap: '3px' }}>
+            {[0.5,1,2,5,10].map(v => (
+              <button key={v}
+                onClick={() => setStake(v.toFixed(2))}
+                style={{ flex: 1, padding: '4px 2px', borderRadius: '5px', border: 'none', cursor: 'pointer', background: parseFloat(stake) === v ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)', color: parseFloat(stake) === v ? '#FCA311' : 'rgba(229,229,229,0.35)', fontSize: '0.62rem', fontWeight: 700, outline: 'none', transition: 'all 0.1s' }}
+              >{v}</button>
+            ))}
           </div>
 
-          {/* Proposal info */}
-          {activeProp && !activeProp.err && (
-            <div style={{ background: 'rgba(255,255,255,0.025)', borderRadius: '8px', padding: '9px 11px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)' }}>Price</span>
-                <span style={{ fontSize: '0.75rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{d2(activeProp.ask)} {currency}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)' }}>Payout</span>
-                <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{d2(activeProp.payout)} {currency}</span>
-              </div>
-            </div>
-          )}
+          {/* Divider */}
+          <div style={{ margin: '12px 14px 0', height: '1px', background: 'rgba(255,255,255,0.05)' }} />
 
-          {activeProp?.err && (
-            <div style={{ fontSize: '0.65rem', color: '#ef4444', padding: '7px 9px', background: 'rgba(239,68,68,0.07)', borderRadius: '7px', border: '1px solid rgba(239,68,68,0.15)' }}>
-              {activeProp.err.slice(0, 90)}
+          {/* Proposal cards */}
+          <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
+            <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
+              {tt.label}
             </div>
-          )}
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <ProposalCard side="A" />
+              <ProposalCard side="B" />
+            </div>
+          </div>
 
+          {/* Error */}
           {buyErr && (
-            <div style={{ fontSize: '0.65rem', color: '#ef4444', padding: '7px 9px', background: 'rgba(239,68,68,0.07)', borderRadius: '7px', border: '1px solid rgba(239,68,68,0.2)' }}>
+            <div style={{ margin: '10px 14px 0', padding: '8px 10px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '7px', fontSize: '0.65rem', color: '#ef4444' }}>
               ⚠ {buyErr}
             </div>
           )}
 
-          <div style={{ flex: 1 }} />
-
-          {/* Status notes */}
+          {/* Connection warnings */}
           {wsErr === 'login' && (
-            <div style={{ textAlign: 'center', padding: '7px', fontSize: '0.63rem', color: 'rgba(229,229,229,0.3)', background: 'rgba(255,255,255,0.03)', borderRadius: '6px' }}>
+            <div style={{ margin: '10px 14px 0', padding: '8px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: '7px', fontSize: '0.63rem', color: 'rgba(229,229,229,0.3)', textAlign: 'center' }}>
               Login to enable trading
             </div>
           )}
           {wsErr === 'reconnecting' && (
-            <div style={{ textAlign: 'center', fontSize: '0.62rem', color: '#FCA311' }}>Reconnecting…</div>
+            <div style={{ margin: '10px 14px 0', textAlign: 'center', fontSize: '0.62rem', color: '#f59e0b' }}>Reconnecting…</div>
           )}
           {wsErr === 'lost' && (
-            <div style={{ textAlign: 'center', fontSize: '0.62rem', color: '#ef4444' }}>Connection lost — please refresh</div>
+            <div style={{ margin: '10px 14px 0', textAlign: 'center', fontSize: '0.62rem', color: '#ef4444' }}>Connection lost — refresh</div>
           )}
 
-          {/* Buy button */}
-          <button
-            onClick={doBuy}
-            disabled={!authReady || buying || !activeProp?.id || !!activeProp?.err}
-            style={{
-              width: '100%', padding: '14px 8px', borderRadius: '10px', border: 'none', outline: 'none',
-              background: authReady && activeProp?.id && !activeProp?.err ? activeColor : 'rgba(255,255,255,0.06)',
-              color:      authReady && activeProp?.id && !activeProp?.err ? '#fff' : 'rgba(229,229,229,0.18)',
-              cursor:     authReady && activeProp?.id && !activeProp?.err && !buying ? 'pointer' : 'not-allowed',
-              transition: 'all 0.15s', flexShrink: 0,
-            }}
-          >
-            <div style={{ fontSize: '0.9rem', fontWeight: 800 }}>
-              {buying ? 'Placing order…'
-               : wsErr === 'login' ? 'Login to Trade'
-               : `Buy ${sideA ? tt.labelA : tt.labelB}`}
+          <div style={{ flex: 1 }} />
+
+          {/* Auth status */}
+          <div style={{ padding: '10px 14px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '7px' }}>
+            <span style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, background: authReady ? '#22c55e' : wsErr ? '#ef4444' : '#444', boxShadow: authReady ? '0 0 5px #22c55e88' : 'none', animation: authReady ? 'blink 2s infinite' : 'none' }} />
+            <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.25)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {authReady
+                ? `${currency}${balance != null ? ` · ${f2(balance)}` : ''}`
+                : wsErr === 'login' ? 'Not logged in'
+                : wsErr ?? 'Connecting…'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── BOTTOM: POSITIONS / HISTORY ────────────────────────────────────────── */}
+      <div style={{ height: '196px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.06)', background: '#060e1c', display: 'flex', flexDirection: 'column' }}>
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', alignItems: 'center', padding: '0 16px', gap: '0', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+          {([['open','Open'], ['history','History']] as const).map(([id, label]) => {
+            const count = id === 'open' ? openPos.length : closed.length
+            const active = posTabs === id
+            return (
+              <button key={id}
+                onClick={() => setPosTabs(id)}
+                style={{
+                  padding: '10px 14px', background: 'transparent', border: 'none', cursor: 'pointer', outline: 'none',
+                  color:       active ? '#e5e5e5' : 'rgba(229,229,229,0.35)',
+                  borderBottom: active ? '2px solid #FCA311' : '2px solid transparent',
+                  fontWeight:  active ? 700 : 400, fontSize: '0.75rem',
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  transition: 'all 0.12s',
+                }}
+              >
+                {label}
+                {count > 0 && (
+                  <span style={{ background: active ? '#FCA311' : 'rgba(255,255,255,0.12)', color: active ? '#000' : 'rgba(229,229,229,0.5)', borderRadius: '10px', padding: '1px 6px', fontSize: '0.58rem', fontWeight: 700 }}>
+                    {count}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+
+          {/* P&L summary */}
+          {(openPos.length + closed.length) > 0 && (
+            <div style={{ marginLeft: 'auto', fontSize: '0.65rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums', display: 'flex', alignItems: 'center', gap: '5px' }}>
+              Total P&amp;L:
+              <span style={{ fontWeight: 800, color: totalPL >= 0 ? '#22c55e' : '#ef4444' }}>
+                {totalPL >= 0 ? '+' : ''}{f2(totalPL)}
+              </span>
             </div>
-            {activeProp?.payout && !activeProp.err && !buying && (
-              <div style={{ fontSize: '0.68rem', marginTop: '3px', opacity: 0.8 }}>
-                Payout {d2(activeProp.payout)} {currency}
-              </div>
-            )}
-            {!authReady && !wsErr && (
-              <div style={{ fontSize: '0.65rem', marginTop: '3px', opacity: 0.5 }}>Connecting…</div>
-            )}
-          </button>
+          )}
         </div>
 
-        {/* Auth status bar */}
-        <div style={{ flexShrink: 0, padding: '7px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, background: authReady ? '#22c55e' : wsErr ? '#ef4444' : '#555', boxShadow: authReady ? '0 0 5px #22c55e88' : 'none', animation: authReady ? 'pulse 2s infinite' : 'none' }} />
-          <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.22)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {authReady
-              ? `Auth · ${currency}${balance != null ? ` · ${d2(balance)}` : ''}`
-              : wsErr === 'login' ? 'Not logged in'
-              : wsErr ? wsErr
-              : 'Connecting…'}
-          </span>
+        {/* Table */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {posTabs === 'open' && openPos.length === 0 && (
+            <div style={{ padding: '28px', textAlign: 'center', color: 'rgba(229,229,229,0.15)', fontSize: '0.72rem' }}>No open positions</div>
+          )}
+          {posTabs === 'history' && closed.length === 0 && (
+            <div style={{ padding: '28px', textAlign: 'center', color: 'rgba(229,229,229,0.15)', fontSize: '0.72rem' }}>No trade history</div>
+          )}
+          {(posTabs === 'open' ? openPos : closed).length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.72rem' }}>
+              <thead>
+                <tr style={{ background: 'rgba(255,255,255,0.02)', position: 'sticky', top: 0 }}>
+                  {['Contract','Type','Stake','Payout','P&L','Status'].map(h => (
+                    <th key={h} style={{ padding: '6px 14px', textAlign: 'left', fontWeight: 600, color: 'rgba(229,229,229,0.3)', fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(posTabs === 'open' ? openPos : closed).map(p => {
+                  const label  = p.side === 'A' ? p.lA : p.lB
+                  const color  = p.side === 'A' ? p.cA : p.cB
+                  const status = p.status
+                  const sColor = status === 'won' ? '#22c55e' : status === 'lost' ? '#ef4444' : status === 'open' ? '#f59e0b' : 'rgba(229,229,229,0.4)'
+                  return (
+                    <tr key={p.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.4)', fontSize: '0.62rem' }}>#{p.id}</td>
+                      <td style={{ padding: '7px 14px' }}>
+                        <span style={{ fontWeight: 700, color }}>
+                          {label}{p.barrier ? ` ${p.barrier}` : ''}
+                        </span>
+                        <span style={{ marginLeft: '5px', fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)' }}>{p.ttId}</span>
+                      </td>
+                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums' }}>{f2(p.stake)}</td>
+                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', color: '#22c55e' }}>{f2(p.payout)}</td>
+                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: p.profit >= 0 ? '#22c55e' : '#ef4444' }}>
+                        {p.profit >= 0 ? '+' : ''}{f2(p.profit)}
+                      </td>
+                      <td style={{ padding: '7px 14px' }}>
+                        <span style={{ color: sColor, fontWeight: 600, textTransform: 'capitalize', fontSize: '0.65rem' }}>{status}</span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
 
       <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
         input[type=number]::-webkit-inner-spin-button,
-        input[type=number]::-webkit-outer-spin-button { opacity: 0.4 }
-        input::placeholder { color: rgba(229,229,229,0.2) }
-        button:hover:not(:disabled) { filter: brightness(1.12) }
-        ::-webkit-scrollbar { width: 3px }
+        input[type=number]::-webkit-outer-spin-button { opacity: 0.35 }
+        input::placeholder { color: rgba(229,229,229,0.18) }
+        button:hover:not(:disabled) { filter: brightness(1.1) }
+        ::-webkit-scrollbar { width: 3px; height: 3px }
         ::-webkit-scrollbar-track { background: transparent }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 2px }
       `}</style>
     </div>
   )

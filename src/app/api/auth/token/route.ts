@@ -120,8 +120,8 @@ export async function POST(req: NextRequest) {
       console.warn('[Lima Trade] Could not fetch accounts after token exchange:', e)
     }
 
-    // Default to first real account (or first account if all are demo)
-    const primary = accounts.find(a => !a.isDemo) ?? accounts[0]
+    // Default to demo account so charts/trading pages start on demo balance
+    const primary = accounts.find(a => a.isDemo) ?? accounts[0]
 
     // ── Save to session ───────────────────────────────────────────────────
     session.accessToken     = accessToken
