@@ -1121,7 +1121,7 @@ export default function ChartsPage() {
           {/* TF + chart type dropdown */}
           {showChartMenu && (
             <div style={{
-              position: 'absolute', top: 0, left: '48px',
+              position: 'absolute', top: '78px', left: '48px',
               background: '#0a1628', border: '1px solid rgba(255,255,255,0.1)',
               borderRadius: '10px', padding: '14px', width: '200px',
               boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 20,
@@ -1175,8 +1175,8 @@ export default function ChartsPage() {
           )}
         </div>
 
-        {/* Fixed gap — just clears the market selector pill (~66px tall at top:10px) */}
-        <div style={{ height: '22px', flexShrink: 0 }} />
+        {/* Fixed gap — clears the market selector card (card bottom ~130px, TF button ~66px, sep ~13px → need ~60px spacer) */}
+        <div style={{ height: '60px', flexShrink: 0 }} />
 
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
