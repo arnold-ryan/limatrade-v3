@@ -644,7 +644,8 @@ export default function ChartsPage() {
   const resubscribeProposals = useCallback((ws: WebSocket) => {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
-    setPropA(null); setPropB(null)
+    // Do NOT clear propA/propB here — old values stay valid until new proposals arrive,
+    // preventing the race where a stale-but-cancelled ID is used for buy.
 
     const tt      = TRADE_TYPES[tradeTypeIdxRef.current]
     const sym     = symbolRef.current
@@ -766,7 +767,9 @@ export default function ChartsPage() {
               ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1, req_id: 999 }))
             }
           }
-          setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) resubscribeProposals(ws!) }, 300)
+          // Do NOT resubscribe after buy — the live subscription keeps updating prices automatically.
+          // Calling forget_all immediately after buy creates a race where the just-cancelled
+          // subscription ID is still in propARef, causing "Unknown contract proposal" errors.
         }
 
         // Live contract updates — moves position from open→closed when settled
@@ -896,6 +899,8 @@ export default function ChartsPage() {
     if (!ws || ws.readyState !== WebSocket.OPEN || buying) return
     const prop = isA ? propARef.current : propBRef.current
     if (!prop?.id || prop.error) return
+    const askPrice = Number(prop.ask_price)
+    if (!askPrice || isNaN(askPrice)) { setBuyError('Invalid proposal price — please wait and retry'); return }
     setBuying(isA ? 'A' : 'B')
     const rid = ++reqIdRef.current
     const tt  = TRADE_TYPES[tradeTypeIdxRef.current]
@@ -906,7 +911,9 @@ export default function ChartsPage() {
       barrier:      tt.hasDigit ? String(digitRef.current) : undefined,
       duration:     durationRef.current,
     })
-    ws.send(JSON.stringify({ buy: prop.id, price: parseFloat((prop.ask_price * 1.02).toFixed(2)), req_id: rid }))
+    const maxPrice = parseFloat((askPrice * 1.02).toFixed(2))
+    console.log('[Lima buy]', { proposalId: prop.id, maxPrice, askPrice })
+    ws.send(JSON.stringify({ buy: prop.id, price: maxPrice, req_id: rid }))
     // Safety: clear buying state if no response in 10 s
     setTimeout(() => {
       if (buyReqMap.current.has(rid)) { buyReqMap.current.delete(rid); setBuying(null); setBuyError('No response from server — please retry') }
