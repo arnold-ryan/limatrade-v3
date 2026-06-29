@@ -87,6 +87,45 @@ const lastDigit = (p: number, dp: number) => Math.abs(Math.round(p * 10 ** dp)) 
 const sma = (arr: number[], n: number) =>
   arr.map((_, i) => i < n - 1 ? null : arr.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n)
 
+// ─── Digit frequency bar ─────────────────────────────────────────────────────
+function DigitBar({ freqs, last }: { freqs: number[]; last: number | null }) {
+  const total = freqs.reduce((a, b) => a + b, 0)
+  const COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981']
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '6px 16px 2px', height: '100%' }}>
+      {[0,1,2,3,4,5,6,7,8,9].map(d => {
+        const pct = total > 0 ? (freqs[d] / total) * 100 : 0
+        const isLast = d === last
+        const color = COLORS[d]
+        const size = 52
+        const r = 20, stroke = 3
+        const circ = 2 * Math.PI * r
+        const dash = (pct / 100) * circ
+        return (
+          <div key={d} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px', position: 'relative' }}>
+            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: 'rotate(-90deg)' }}>
+              <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} />
+              <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+                strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"
+                style={{ transition: 'stroke-dasharray 0.4s ease' }} />
+            </svg>
+            <div style={{
+              position: 'absolute', top: 0, left: 0, width: size, height: size,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <span style={{ fontSize: '0.75rem', fontWeight: 700, color: isLast ? color : 'rgba(229,229,229,0.85)', lineHeight: 1 }}>{d}</span>
+              <span style={{ fontSize: '0.5rem', color: 'rgba(229,229,229,0.45)', lineHeight: 1.2, fontVariantNumeric: 'tabular-nums' }}>{total > 0 ? pct.toFixed(1)+'%' : '—'}</span>
+            </div>
+            {isLast && (
+              <div style={{ width: 0, height: 0, borderLeft: '5px solid transparent', borderRight: '5px solid transparent', borderTop: `6px solid ${color}`, marginTop: '-2px' }} />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function ChartsPage() {
 
@@ -122,6 +161,8 @@ export default function ChartsPage() {
   // ── Price ───────────────────────────────────────────────────────────────────
   const [price,    setPrice]    = useState<number|null>(null)
   const [priceDir, setPriceDir] = useState<'up'|'dn'|null>(null)
+  const [digitFreq, setDigitFreq] = useState<number[]>(Array(10).fill(0))
+  const [lastDig,   setLastDig]   = useState<number|null>(null)
   const [delta,    setDelta]    = useState(0)
   const prevRef = useRef<number|null>(null)
 
@@ -318,6 +359,9 @@ export default function ChartsPage() {
           if (prev !== null) { setPriceDir(p > prev ? 'up' : p < prev ? 'dn' : null); setDelta(p - prev) }
           prevRef.current = p; setLive(true)
           appendTick(t.epoch, p)
+          const d = lastDigit(p, dpRef.current)
+          setLastDig(d)
+          setDigitFreq(prev => { const n = [...prev]; n[d]++; return n })
         }
         if (msg.msg_type === 'history' && msg.req_id === 3) {
           const h = msg.history as { times: number[]; prices: number[] }
@@ -446,7 +490,7 @@ export default function ChartsPage() {
   // ── Symbol change ─────────────────────────────────────────────────────────────
   useEffect(() => {
     prices.current = []; times.current = []; curCandleRef.current = null
-    setPrice(null); prevRef.current = null
+    setPrice(null); prevRef.current = null; setLastDig(null); setDigitFreq(Array(10).fill(0))
     const pub = pubRef.current, auth = authRef.current
     if (pub?.readyState === WebSocket.OPEN) {
       subscribeTicks(pub, symbol)
@@ -904,6 +948,11 @@ export default function ChartsPage() {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* ── DIGIT FREQUENCY BAR ──────────────────────────────────────────────── */}
+      <div style={{ height: '72px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.05)', background: '#060e1c' }}>
+        <DigitBar freqs={digitFreq} last={lastDig} />
       </div>
 
       {/* ── BOTTOM: POSITIONS / HISTORY ────────────────────────────────────────── */}
