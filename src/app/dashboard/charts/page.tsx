@@ -821,13 +821,16 @@ export default function ChartsPage() {
   }
 
   // ─── Digit signal for OU ──────────────────────────────────────────────────────
-  const ouSignals = [1,2,3,4,5].map(b => {
-    let w = 0; for (let d = b+1; d <= 9; d++) w += digits[d]
-    return { label: `Over ${b}`, barrier: b, side: 'A' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
-  }).concat([4,5,6,7,8].map(b => {
-    let w = 0; for (let d = 0; d < b; d++) w += digits[d]
-    return { label: `Under ${b}`, barrier: b, side: 'B' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
-  }))
+  const ouSignals: Array<{ label: string; barrier: number; side: 'A'|'B'; prob: number }> = [
+    ...[1,2,3,4,5].map(b => {
+      let w = 0; for (let d = b+1; d <= 9; d++) w += digits[d]
+      return { label: `Over ${b}`, barrier: b, side: 'A' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
+    }),
+    ...[4,5,6,7,8].map(b => {
+      let w = 0; for (let d = 0; d < b; d++) w += digits[d]
+      return { label: `Under ${b}`, barrier: b, side: 'B' as const, prob: digitTotal > 0 ? w/digitTotal : 0 }
+    }),
+  ]
 
   const bestSignal = digitTotal >= 25
     ? ouSignals.reduce((best, s) => s.prob > best.prob ? s : best)
