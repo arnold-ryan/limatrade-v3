@@ -644,8 +644,10 @@ export default function ChartsPage() {
   const resubscribeProposals = useCallback((ws: WebSocket) => {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
-    // Do NOT clear propA/propB here — old values stay valid until new proposals arrive,
-    // preventing the race where a stale-but-cancelled ID is used for buy.
+    // Clear proposals so the buy button disables immediately while we wait for fresh UUIDs.
+    // The Deriv API cancels the proposal subscription the moment it is used to buy a contract,
+    // so the old ID is dead and must not be reused.
+    setPropA(null); setPropB(null)
 
     const tt      = TRADE_TYPES[tradeTypeIdxRef.current]
     const sym     = symbolRef.current
@@ -767,9 +769,9 @@ export default function ChartsPage() {
               ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1, req_id: 999 }))
             }
           }
-          // Do NOT resubscribe after buy — the live subscription keeps updating prices automatically.
-          // Calling forget_all immediately after buy creates a race where the just-cancelled
-          // subscription ID is still in propARef, causing "Unknown contract proposal" errors.
+          // The Deriv API automatically cancels the proposal subscription that was used to buy.
+          // Resubscribe immediately so propA/propB get fresh UUIDs for the next purchase.
+          if (ws?.readyState === WebSocket.OPEN) resubscribeProposals(ws)
         }
 
         // Live contract updates — moves position from open→closed when settled
