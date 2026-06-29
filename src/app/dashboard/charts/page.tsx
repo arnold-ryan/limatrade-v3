@@ -60,6 +60,15 @@ interface Pos  {
 const f2  = (n: number) => n.toFixed(2)
 const fdp = (n: number, dp: number) => n.toFixed(dp)
 const lastDigit = (p: number, dp: number) => Math.abs(Math.round(p * 10 ** dp)) % 10
+const normalizeName = (sym: string, raw: string): string => {
+  const s = (raw ?? '').trim()
+  if (s && !/^R_\d+$/.test(s) && !/^1HZ\d+V$/.test(s)) return s
+  const r = sym.match(/^R_(\d+)$/)
+  if (r) return `Volatility ${r[1]} Index`
+  const h = sym.match(/^1HZ(\d+)V$/)
+  if (h) return `Volatility ${h[1]} (1s) Index`
+  return s || sym
+}
 const sma = (arr: number[], n: number) =>
   arr.map((_, i) => i < n - 1 ? null : arr.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n)
 
@@ -97,6 +106,7 @@ export default function ChartsPage() {
 
   // ── Price ───────────────────────────────────────────────────────────────────
   const [price,    setPrice]    = useState<number|null>(null)
+  const [digitSeq, setDigitSeq] = useState<number[]>([])
   const [priceDir, setPriceDir] = useState<'up'|'dn'|null>(null)
   const [delta,    setDelta]    = useState(0)
   const prevRef = useRef<number|null>(null)
@@ -204,7 +214,7 @@ export default function ChartsPage() {
   }, [chartType, clearSeries, addMA])
 
   const appendTick = useCallback((epoch: number, p: number) => {
-    const t = epoch as UTCTimestamp
+    const t = (Date.now() / 1000) as UTCTimestamp
     if (isTickRef.current) {
       prices.current.push(p)
       times.current.push(t)
@@ -212,6 +222,7 @@ export default function ChartsPage() {
       const pt = { time: t, value: p }
       areaR.current?.update(pt as AreaData)
       lineR.current?.update(pt as LineData)
+      chartRef.current?.timeScale().scrollToRealTime()
       if (maR.current && maOnRef.current) {
         const n = maPeriodRef.current
         if (prices.current.length >= n) {
@@ -280,7 +291,7 @@ export default function ChartsPage() {
         let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
         if (msg.msg_type === 'active_symbols') {
           const list: Sym[] = (msg.active_symbols as any[]).map((s: any) => ({
-            symbol: s.symbol, name: s.display_name,
+            symbol: s.symbol, name: normalizeName(s.symbol, s.display_name),
             pip: s.pip, dp: Math.round(-Math.log10(s.pip)),
             group: s.submarket_display_name, open: !!s.exchange_is_open,
           }))
@@ -294,6 +305,7 @@ export default function ChartsPage() {
           if (prev !== null) { setPriceDir(p > prev ? 'up' : p < prev ? 'dn' : null); setDelta(p - prev) }
           prevRef.current = p; setLive(true)
           appendTick(t.epoch, p)
+          setDigitSeq(prev => { const d = lastDigit(p, dpRef.current); const n2 = [...prev, d]; return n2.length > 30 ? n2.slice(-30) : n2 })
         }
         if (msg.msg_type === 'history' && msg.req_id === 3) {
           const h = msg.history as { times: number[]; prices: number[] }
@@ -422,7 +434,7 @@ export default function ChartsPage() {
   // ── Symbol change ─────────────────────────────────────────────────────────────
   useEffect(() => {
     prices.current = []; times.current = []; curCandleRef.current = null
-    setPrice(null); prevRef.current = null
+    setPrice(null); prevRef.current = null; setDigitSeq([])
     const pub = pubRef.current, auth = authRef.current
     if (pub?.readyState === WebSocket.OPEN) {
       subscribeTicks(pub, symbol)
@@ -881,6 +893,35 @@ export default function ChartsPage() {
           </div>
         </div>
       </div>
+
+      {/* ── DIGIT CIRCLES STRIP ────────────────────────────────────────────── */}
+      {digitSeq.length > 0 && (
+        <div style={{
+          height: '44px', flexShrink: 0, display: 'flex', alignItems: 'center',
+          padding: '0 14px', gap: '4px', borderTop: '1px solid rgba(255,255,255,0.05)',
+          background: '#06101c', overflowX: 'auto',
+        }}>
+          {digitSeq.slice(-20).map((d, i, arr) => {
+            const isLast = i === arr.length - 1
+            const isEven = d % 2 === 0
+            const bg  = isEven ? 'rgba(34,197,94,0.15)'  : 'rgba(239,68,68,0.15)'
+            const bdr = isEven ? '#22c55e' : '#ef4444'
+            const txt = isEven ? '#22c55e' : '#ef4444'
+            return (
+              <div key={i} style={{
+                width: isLast ? '30px' : '26px', height: isLast ? '30px' : '26px',
+                borderRadius: '50%', flexShrink: 0,
+                fontSize: isLast ? '0.72rem' : '0.65rem', fontWeight: 700,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: isLast ? bg.replace('0.15', '0.28') : bg,
+                border: `1.5px solid ${isLast ? bdr : bdr + '80'}`,
+                color: txt, transition: 'all 0.15s',
+                transform: isLast ? 'scale(1.1)' : 'scale(1)',
+              }}>{d}</div>
+            )
+          })}
+        </div>
+      )}
 
       {/* ── BOTTOM: POSITIONS / HISTORY ────────────────────────────────────────── */}
       <div style={{ height: '196px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.06)', background: '#060e1c', display: 'flex', flexDirection: 'column' }}>
