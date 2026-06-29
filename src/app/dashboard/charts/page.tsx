@@ -1112,7 +1112,7 @@ export default function ChartsPage() {
         {/* TF + chart type button */}
         <div style={{ position: 'relative', width: '100%' }}>
           <button
-            onClick={() => { setShowChartMenu(v => !v); setShowMkt(false) }}
+            onClick={() => { setShowChartMenu(v => !v); setShowMkt(false); setShowIndicators(false); setShowDrawingPanel(false) }}
             style={{
               ...toolbarBtn, width: '100%',
               color:      showChartMenu ? '#FCA311' : 'rgba(200,215,235,0.55)',
@@ -1130,7 +1130,7 @@ export default function ChartsPage() {
           {/* TF + chart type dropdown */}
           {showChartMenu && (
             <div style={{
-              position: 'absolute', top: '78px', left: '48px',
+              position: 'absolute', top: '48px', left: '48px',
               background: '#0a1628', border: '1px solid rgba(255,255,255,0.1)',
               borderRadius: '10px', padding: '14px', width: '200px',
               boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 20,
@@ -1187,7 +1187,7 @@ export default function ChartsPage() {
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
         <button
-          onClick={() => { setShowIndicators(v => !v); setShowDrawingPanel(false) }}
+          onClick={() => { setShowIndicators(v => !v); setShowDrawingPanel(false); setShowChartMenu(false) }}
           style={{
             ...toolbarBtn,
             color:      showIndicators ? '#3b82f6' : 'rgba(200,215,235,0.55)',
@@ -1200,7 +1200,7 @@ export default function ChartsPage() {
         </button>
 
         <button
-          onClick={() => { setShowDrawingPanel(v => !v); setShowIndicators(false) }}
+          onClick={() => { setShowDrawingPanel(v => !v); setShowIndicators(false); setShowChartMenu(false) }}
           style={{
             ...toolbarBtn,
             color:      showDrawingPanel ? '#a855f7' : 'rgba(200,215,235,0.55)',
