@@ -1,21 +1,27 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v82
+ * Lima Trade — Charts Page v83
  *
- * Brand-new layout (nothing reused from v77-v81 UI):
+ * Layout (dtrader-style, cloned from exwager.com manual trading UI):
  *
- *   ┌──────────────────────────────────────────┬────────────────┐
- *   │  chart overlay bar (symbol, price, TF)   │                │
- *   │                                          │   TRADE PANEL  │
- *   │         LIGHTWEIGHT-CHARTS CANVAS        │  (type, dur,   │
- *   │                                          │   stake, both  │
- *   │                                          │   proposals)   │
- *   ├──────────────────────────────────────────┴────────────────┤
- *   │             POSITIONS / HISTORY  (bottom panel)           │
- *   └───────────────────────────────────────────────────────────┘
+ *   ┌──────────────────────┬───────────────────────────────────────────────┐
+ *   │                      │  [Area][Line][Candles]  [1T][1m][5m][15m]... │
+ *   │   LEFT TRADE PANEL   │                                               │
+ *   │   (240px fixed)      │           L I G H T W E I G H T              │
+ *   │                      │              C H A R T S                      │
+ *   │  • Trade type tabs   │                                               │
+ *   │  • Asset selector    │                                               │
+ *   │  • Barrier row       │                                               │
+ *   │  • Duration          ├───────────────────────────────────────────────┤
+ *   │  • Stake             │        OPEN POSITIONS / HISTORY (bottom)      │
+ *   │  • Quick picks       │                                               │
+ *   │  • Payout preview    └───────────────────────────────────────────────┘
+ *   │  • BUY A / BUY B
+ *   │  • Balance display
+ *   └──────────────────────
  *
- * Two-WebSocket architecture (unchanged from v80/v81 — confirmed correct):
+ * Two-WebSocket architecture:
  *   PUBLIC  wss://api.derivws.com/trading/v1/options/ws/public  → ticks, history, symbols
  *   AUTH    OTP URL from /api/user/ws-url                       → balance, proposals, buy, POC
  */
@@ -29,22 +35,26 @@ import {
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PUB_WS = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
-const TT = [
-  { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', lA: 'Over',  lB: 'Under',  cA: '#22c55e', cB: '#3b82f6', barrier: true  },
-  { id: 'EO', label: 'Even / Odd',     ctA: 'DIGITEVEN',  ctB: 'DIGITODD',   lA: 'Even',  lB: 'Odd',    cA: '#22c55e', cB: '#a855f7', barrier: false },
-  { id: 'MD', label: 'Match / Differ', ctA: 'DIGITMATCH', ctB: 'DIGITDIFF',  lA: 'Match', lB: 'Differ', cA: '#22c55e', cB: '#ef4444', barrier: true  },
-  { id: 'RF', label: 'Rise / Fall',    ctA: 'CALL',       ctB: 'PUT',        lA: 'Rise',  lB: 'Fall',   cA: '#22c55e', cB: '#ef4444', barrier: false },
+const TRADE_TYPES = [
+  { id: 'RF', label: 'Rise / Fall',    ctA: 'CALL',       ctB: 'PUT',        lA: 'Rise',  lB: 'Fall',   cA: '#16a34a', cB: '#dc2626', barrier: false },
+  { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', lA: 'Over',  lB: 'Under',  cA: '#16a34a', cB: '#2563eb', barrier: true  },
+  { id: 'EO', label: 'Even / Odd',     ctA: 'DIGITEVEN',  ctB: 'DIGITODD',   lA: 'Even',  lB: 'Odd',    cA: '#16a34a', cB: '#7c3aed', barrier: false },
+  { id: 'MD', label: 'Match / Differ', ctA: 'DIGITMATCH', ctB: 'DIGITDIFF',  lA: 'Match', lB: 'Differ', cA: '#16a34a', cB: '#dc2626', barrier: true  },
 ]
 
 const TFS = [
-  { label: '1T', gran: 0     },
-  { label: '1m', gran: 60    },
-  { label: '5m', gran: 300   },
-  { label: '15m',gran: 900   },
-  { label: '1h', gran: 3600  },
-  { label: '4h', gran: 14400 },
-  { label: '1D', gran: 86400 },
+  { label: '1T',  gran: 0     },
+  { label: '1m',  gran: 60    },
+  { label: '5m',  gran: 300   },
+  { label: '15m', gran: 900   },
+  { label: '1h',  gran: 3600  },
+  { label: '4h',  gran: 14400 },
+  { label: '1D',  gran: 86400 },
 ]
+
+const DUR_TICKS   = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+const DUR_MINUTES = [1, 2, 3, 5, 10, 15, 30, 60]
+const STAKE_PICKS = [0.5, 1, 2, 5, 10]
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Sym  { symbol: string; name: string; pip: number; dp: number; group: string; open: boolean }
@@ -57,21 +67,19 @@ interface Pos  {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const f2  = (n: number) => n.toFixed(2)
-const fdp = (n: number, dp: number) => n.toFixed(dp)
-const lastDigit = (p: number, dp: number) => Math.abs(Math.round(p * 10 ** dp)) % 10
-const sma = (arr: number[], n: number) =>
+const f2      = (n: number) => n.toFixed(2)
+const fdp     = (n: number, dp: number) => n.toFixed(dp)
+const sma     = (arr: number[], n: number) =>
   arr.map((_, i) => i < n - 1 ? null : arr.slice(i - n + 1, i + 1).reduce((a, b) => a + b, 0) / n)
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function ChartsPage() {
 
   // ── Market ──────────────────────────────────────────────────────────────────
-  const [symbol,  setSymbol]  = useState('R_100')
-  const [syms,    setSyms]    = useState<Sym[]>([])
-  const [symsOk,  setSymsOk]  = useState(false)
-  const [mktOpen, setMktOpen] = useState(false)
-  const [mktQ,    setMktQ]    = useState('')
+  const [symbol,    setSymbol]    = useState('R_100')
+  const [syms,      setSyms]      = useState<Sym[]>([])
+  const [symOpen,   setSymOpen]   = useState(false)
+  const [symQ,      setSymQ]      = useState('')
   const symbolRef = useRef(symbol)
   useEffect(() => { symbolRef.current = symbol }, [symbol])
   const curSym = syms.find(s => s.symbol === symbol)
@@ -83,80 +91,59 @@ export default function ChartsPage() {
   const [tfIdx,     setTfIdx]     = useState(0)
   const [chartType, setChartType] = useState<'area'|'line'|'candles'>('area')
   const [maOn,      setMaOn]      = useState(false)
-  const [maPeriod,  setMaPeriod]  = useState(20)
-  const tf      = TFS[tfIdx]
-  const isTick  = tf.gran === 0
-  const tfIdxRef    = useRef(tfIdx)
-  const maOnRef     = useRef(maOn)
-  const maPeriodRef = useRef(maPeriod)
-  const isTickRef   = useRef(isTick)
-  useEffect(() => { tfIdxRef.current    = tfIdx     }, [tfIdx])
-  useEffect(() => { maOnRef.current     = maOn      }, [maOn])
-  useEffect(() => { maPeriodRef.current = maPeriod  }, [maPeriod])
-  useEffect(() => { isTickRef.current   = isTick    }, [isTick])
+  const tf     = TFS[tfIdx]
+  const isTick = tf.gran === 0
+  const tfIdxRef  = useRef(tfIdx)
+  const maOnRef   = useRef(maOn)
+  const isTickRef = useRef(isTick)
+  useEffect(() => { tfIdxRef.current  = tfIdx  }, [tfIdx])
+  useEffect(() => { maOnRef.current   = maOn   }, [maOn])
+  useEffect(() => { isTickRef.current = isTick }, [isTick])
 
   // ── Price ───────────────────────────────────────────────────────────────────
   const [price,    setPrice]    = useState<number|null>(null)
   const [priceDir, setPriceDir] = useState<'up'|'dn'|null>(null)
-  const [delta,    setDelta]    = useState(0)
-  const prevRef = useRef<number|null>(null)
+  const prevPriceRef = useRef<number|null>(null)
 
-  // ── Trading state ────────────────────────────────────────────────────────────
+  // ── Trade state ─────────────────────────────────────────────────────────────
   const [ttIdx,   setTtIdx]   = useState(0)
-  const [dur,     setDur]     = useState(5)
-  const [stake,   setStake]   = useState('1.00')
   const [barrier, setBarrier] = useState(5)
-  const [propA,   setPropA]   = useState<Prop|null>(null)
-  const [propB,   setPropB]   = useState<Prop|null>(null)
+  const [useTick, setUseTick] = useState(true)
+  const [tickDur, setTickDur] = useState(5)
+  const [minDur,  setMinDur]  = useState(1)
+  const [stake,   setStake]   = useState('1.00')
+  const tt = TRADE_TYPES[ttIdx]
+
+  // ── Proposals ───────────────────────────────────────────────────────────────
+  const [propA, setPropA] = useState<Prop|null>(null)
+  const [propB, setPropB] = useState<Prop|null>(null)
   const [buyingA, setBuyingA] = useState(false)
   const [buyingB, setBuyingB] = useState(false)
-  const [buyErr,  setBuyErr]  = useState<string|null>(null)
-  const [openPos, setOpenPos] = useState<Pos[]>([])
-  const [closed,  setClosed]  = useState<Pos[]>([])
-  const [posTabs, setPosTabs] = useState<'open'|'history'>('open')
-  const tt = TT[ttIdx]
-  const ttRef      = useRef(tt)
-  const stakeRef   = useRef(stake)
-  const durRef     = useRef(dur)
-  const barrierRef = useRef(barrier)
-  const propARef   = useRef<Prop|null>(null)
-  const propBRef   = useRef<Prop|null>(null)
-  useEffect(() => { ttRef.current      = tt      }, [tt])
-  useEffect(() => { stakeRef.current   = stake   }, [stake])
-  useEffect(() => { durRef.current     = dur     }, [dur])
-  useEffect(() => { barrierRef.current = barrier }, [barrier])
-  useEffect(() => { propARef.current   = propA   }, [propA])
-  useEffect(() => { propBRef.current   = propB   }, [propB])
 
-  // ── Auth WS state ────────────────────────────────────────────────────────────
-  const [authKey,   setAuthKey]   = useState(0)
-  const [authReady, setAuthReady] = useState(false)
+  // ── Auth / Balance ──────────────────────────────────────────────────────────
   const [balance,   setBalance]   = useState<number|null>(null)
   const [currency,  setCurrency]  = useState('USD')
-  const [wsErr,     setWsErr]     = useState<string|null>(null)
-  const currencyRef = useRef('USD')
-  useEffect(() => { currencyRef.current = currency }, [currency])
+  const [authReady, setAuthReady] = useState(false)
+  const [authErr,   setAuthErr]   = useState<string|null>(null)
+  const [authKey,   setAuthKey]   = useState(0)
 
-  // ── Pub WS state ─────────────────────────────────────────────────────────────
-  const [live, setLive] = useState(false)
+  // ── Positions ───────────────────────────────────────────────────────────────
+  const [positions, setPositions] = useState<Pos[]>([])
+  const [posTab,    setPosTab]    = useState<'open'|'history'>('open')
+  const [posOpen,   setPosOpen]   = useState(true)
 
-  // ── WS + Chart refs ──────────────────────────────────────────────────────────
+  // ── Refs ─────────────────────────────────────────────────────────────────────
+  const chartEl   = useRef<HTMLDivElement>(null)
+  const chartRef  = useRef<IChartApi|null>(null)
+  const seriesRef = useRef<ISeriesApi<any>|null>(null)
+  const maRef     = useRef<ISeriesApi<'Line'>|null>(null)
   const pubRef    = useRef<WebSocket|null>(null)
   const authRef   = useRef<WebSocket|null>(null)
-  const chartRef  = useRef<IChartApi|null>(null)
-  const canvasRef = useRef<HTMLDivElement>(null)
-  const areaR     = useRef<ISeriesApi<'Area'>|null>(null)
-  const lineR     = useRef<ISeriesApi<'Line'>|null>(null)
-  const candleR   = useRef<ISeriesApi<'Candlestick'>|null>(null)
-  const maR       = useRef<ISeriesApi<'Line'>|null>(null)
-  const prices    = useRef<number[]>([])
-  const times     = useRef<UTCTimestamp[]>([])
-  const curCandleRef = useRef<CandlestickData|null>(null)
-  const reqId     = useRef(100)
-  const buyMapA   = useRef<Map<number, Pos>>(new Map())
-  const buyMapB   = useRef<Map<number, Pos>>(new Map())
+  const pricesRef = useRef<number[]>([])
+  const tsRef     = useRef<number[]>([])
+  const propTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null)
 
-  // ── Account switch listener ──────────────────────────────────────────────────
+  // ── Account-switch listener ──────────────────────────────────────────────────
   useEffect(() => {
     const h = () => {
       setPropA(null); setPropB(null)
@@ -168,823 +155,875 @@ export default function ChartsPage() {
     return () => window.removeEventListener('deriv-account-switch', h)
   }, [])
 
-  // ── Chart helpers ────────────────────────────────────────────────────────────
-  const clearSeries = useCallback(() => {
-    const c = chartRef.current; if (!c) return
-    ;[areaR, lineR, candleR, maR].forEach(r => {
-      if (r.current) { try { c.removeSeries(r.current) } catch {} ; r.current = null }
-    })
-  }, [])
-
-  const addMA = useCallback(() => {
-    if (!chartRef.current || !maOnRef.current) return
-    maR.current = chartRef.current.addLineSeries({ color: '#f59e0b', lineWidth: 1, lastValueVisible: false, priceLineVisible: false })
-    const vs = sma(prices.current, maPeriodRef.current)
-    const d  = vs.map((v, i) => v !== null ? { time: times.current[i], value: v } as LineData : null).filter(Boolean) as LineData[]
-    if (d.length) maR.current.setData(d)
-  }, [])
-
-  const buildSeries = useCallback(() => {
-    clearSeries()
-    const c = chartRef.current; if (!c) return
-    const type = isTickRef.current ? 'area' : chartType
-    if (type === 'area') {
-      areaR.current = c.addAreaSeries({ lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)', lineWidth: 2 })
-      const d = times.current.map((t, i) => ({ time: t, value: prices.current[i] })) as AreaData[]
-      if (d.length) areaR.current.setData(d)
-      addMA()
-    } else if (type === 'line') {
-      lineR.current = c.addLineSeries({ color: '#FCA311', lineWidth: 2 })
-      const d = times.current.map((t, i) => ({ time: t, value: prices.current[i] })) as LineData[]
-      if (d.length) lineR.current.setData(d)
-      addMA()
-    } else {
-      candleR.current = c.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444' })
-    }
-  }, [chartType, clearSeries, addMA])
-
-  const appendTick = useCallback((epoch: number, p: number) => {
-    const t = epoch as UTCTimestamp
-    if (isTickRef.current) {
-      prices.current.push(p)
-      times.current.push(t)
-      if (prices.current.length > 2000) { prices.current.shift(); times.current.shift() }
-      const pt = { time: t, value: p }
-      areaR.current?.update(pt as AreaData)
-      lineR.current?.update(pt as LineData)
-      if (maR.current && maOnRef.current) {
-        const n = maPeriodRef.current
-        if (prices.current.length >= n) {
-          const sl = prices.current.slice(-n)
-          maR.current.update({ time: t, value: sl.reduce((a, b) => a + b, 0) / n } as LineData)
-        }
-      }
-    } else {
-      const gran = TFS[tfIdxRef.current].gran
-      const bkt  = (Math.floor(epoch / gran) * gran) as UTCTimestamp
-      const cur  = curCandleRef.current
-      if (cur && cur.time === bkt) {
-        const u: CandlestickData = { time: bkt, open: cur.open, high: Math.max(cur.high, p), low: Math.min(cur.low, p), close: p }
-        curCandleRef.current = u; candleR.current?.update(u)
-      } else {
-        const nc: CandlestickData = { time: bkt, open: p, high: p, low: p, close: p }
-        curCandleRef.current = nc; candleR.current?.update(nc)
-      }
-    }
-  }, [])
-
-  // ── subscribeProposals ───────────────────────────────────────────────────────
-  const subscribeProposals = useCallback((ws: WebSocket) => {
-    if (ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
-    setPropA(null); setPropB(null)
-    const amt = parseFloat(stakeRef.current) || 1
-    const cur = ttRef.current
-    const bar = cur.barrier ? String(barrierRef.current) : undefined
-    const base = { proposal: 1, subscribe: 1, basis: 'stake', amount: amt, currency: currencyRef.current, underlying_symbol: symbolRef.current, duration: durRef.current, duration_unit: 't' }
-    ws.send(JSON.stringify({ ...base, contract_type: cur.ctA, ...(bar ? { barrier: bar } : {}), req_id: 10 }))
-    ws.send(JSON.stringify({ ...base, contract_type: cur.ctB, ...(bar ? { barrier: bar } : {}), req_id: 11 }))
-  }, [])
-
-  const requestHistory = useCallback((ws: WebSocket, sym: string, gran: number) => {
-    if (ws.readyState !== WebSocket.OPEN) return
-    if (gran === 0) {
-      ws.send(JSON.stringify({ ticks_history: sym, count: 1000, end: 'latest', style: 'ticks', req_id: 3 }))
-    } else {
-      ws.send(JSON.stringify({ ticks_history: sym, count: 500, end: 'latest', style: 'candles', granularity: gran, req_id: 3 }))
-    }
-  }, [])
-
-  const subscribeTicks = useCallback((ws: WebSocket, sym: string) => {
-    if (ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 999 }))
-    ws.send(JSON.stringify({ ticks: sym, subscribe: 1, req_id: 2 }))
-  }, [])
-
-  // ── PUBLIC WebSocket ──────────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Chart setup
+  // ══════════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    let ws: WebSocket, ping: ReturnType<typeof setInterval>, dead = false
-    function connect() {
-      ws = new WebSocket(PUB_WS)
-      pubRef.current = ws
-      ws.onopen = () => {
-        if (dead) return
-        setLive(true)
-        ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic', req_id: 1 }))
-        subscribeTicks(ws, symbolRef.current)
-        requestHistory(ws, symbolRef.current, TFS[tfIdxRef.current].gran)
-        ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 900 })) }, 25_000)
-      }
-      ws.onmessage = ev => {
-        if (dead) return
-        let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
-        if (msg.msg_type === 'active_symbols') {
-          const list: Sym[] = (msg.active_symbols as any[]).map((s: any) => ({
-            symbol: s.symbol, name: s.display_name,
-            pip: s.pip, dp: Math.round(-Math.log10(s.pip)),
-            group: s.submarket_display_name, open: !!s.exchange_is_open,
-          }))
-          setSyms(list); setSymsOk(true)
-        }
-        if (msg.msg_type === 'tick') {
-          const t = msg.tick as { symbol: string; quote: number; epoch: number }
-          if (t.symbol !== symbolRef.current) return
-          const p = t.quote, prev = prevRef.current
-          setPrice(p)
-          if (prev !== null) { setPriceDir(p > prev ? 'up' : p < prev ? 'dn' : null); setDelta(p - prev) }
-          prevRef.current = p; setLive(true)
-          appendTick(t.epoch, p)
-        }
-        if (msg.msg_type === 'history' && msg.req_id === 3) {
-          const h = msg.history as { times: number[]; prices: number[] }
-          if (!h?.times?.length) return
-          prices.current = [...h.prices]
-          times.current  = h.times.map(t => t as UTCTimestamp)
-          const d = h.times.map((t, i) => ({ time: t as UTCTimestamp, value: h.prices[i] }))
-          areaR.current?.setData(d as AreaData[])
-          lineR.current?.setData(d as LineData[])
-          if (maOnRef.current && maR.current) {
-            const vs = sma(h.prices, maPeriodRef.current)
-            const md = vs.map((v, i) => v !== null ? { time: h.times[i] as UTCTimestamp, value: v } as LineData : null).filter(Boolean) as LineData[]
-            maR.current.setData(md)
-          }
-        }
-        if (msg.msg_type === 'candles' && msg.req_id === 3) {
-          const cs = msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>
-          if (!cs?.length) return
-          const d: CandlestickData[] = cs.map(c => ({ time: c.epoch as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }))
-          candleR.current?.setData(d)
-          curCandleRef.current = d[d.length - 1]
-          prices.current = cs.map(c => c.close)
-          times.current  = cs.map(c => c.epoch as UTCTimestamp)
-        }
-      }
-      ws.onerror = () => setLive(false)
-      ws.onclose = () => { setLive(false); if (!dead) setTimeout(connect, 3000) }
-    }
-    connect()
-    return () => { dead = true; clearInterval(ping); ws?.close(); pubRef.current = null }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── AUTH WebSocket ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    let ws: WebSocket|null = null, ping: ReturnType<typeof setInterval>, dead = false, retries = 0
-    async function connect() {
-      try {
-        const r = await fetch('/api/user/ws-url', { cache: 'no-store' })
-        if (!r.ok) { setWsErr('login'); return }
-        const { wsUrl } = await r.json()
-        if (!wsUrl) { setWsErr('login'); return }
-        ws = new WebSocket(wsUrl)
-        authRef.current = ws
-        ws.onopen = () => {
-          if (dead) return
-          retries = 0; setAuthReady(true); setWsErr(null)
-          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-          subscribeProposals(ws!)
-          ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1, req_id: 901 })) }, 25_000)
-        }
-        ws.onmessage = ev => {
-          if (dead) return
-          let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
-          if (msg.error?.code === 'AuthorizationRequired' || msg.error?.code === 'InvalidToken') { setWsErr('login'); ws?.close(); return }
-          if (msg.msg_type === 'balance') {
-            const b = msg.balance as { balance: number; currency: string }
-            setBalance(b.balance); if (b.currency) setCurrency(b.currency)
-            window.dispatchEvent(new CustomEvent('deriv-balance', { detail: { balance: b.balance, currency: b.currency } }))
-          }
-          if (msg.msg_type === 'proposal') {
-            if (msg.error) {
-              const e = msg.error.message ?? 'Error'
-              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: e })
-              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: e })
-              return
-            }
-            const p = msg.proposal as { id: string; ask_price: number; payout: number }
-            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
-            if (msg.req_id === 10) setPropA(prop)
-            if (msg.req_id === 11) setPropB(prop)
-          }
-          if (msg.msg_type === 'buy') {
-            const rid = msg.req_id as number
-            const isA = buyMapA.current.has(rid)
-            const map = isA ? buyMapA.current : buyMapB.current
-            if (msg.error) {
-              map.delete(rid)
-              isA ? setBuyingA(false) : setBuyingB(false)
-              setBuyErr(msg.error.message ?? 'Buy failed')
-              if (ws?.readyState === WebSocket.OPEN) subscribeProposals(ws)
-              return
-            }
-            const b = msg.buy as { contract_id: number; buy_price: number; payout: number; balance_after: number; purchase_time: number }
-            const meta = map.get(rid)!; map.delete(rid)
-            isA ? setBuyingA(false) : setBuyingB(false)
-            setBuyErr(null); setBalance(b.balance_after)
-            if (meta) {
-              const pos: Pos = { ...meta, id: b.contract_id, stake: b.buy_price, payout: b.payout, bid: b.buy_price, profit: 0, status: 'open', ts: b.purchase_time }
-              setOpenPos(prev => [pos, ...prev])
-              if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1, req_id: ++reqId.current }))
-            }
-            if (ws?.readyState === WebSocket.OPEN) subscribeProposals(ws)
-          }
-          if (msg.msg_type === 'proposal_open_contract' && msg.proposal_open_contract) {
-            const poc = msg.proposal_open_contract as { contract_id: number; is_sold: number; status: string; bid_price: string; profit: string }
-            const cid = poc.contract_id, settled = poc.is_sold === 1
-            const bid = parseFloat(poc.bid_price ?? '0'), profit = parseFloat(poc.profit ?? '0')
-            if (settled) {
-              setOpenPos(prev => prev.filter(p => p.id !== cid))
-              setClosed(prev => {
-                const orig = prev.find(p => p.id === cid)
-                const u: Pos = orig ? { ...orig, bid, profit, status: poc.status as Pos['status'] }
-                  : { id: cid, ct: '', side: 'A', ttId: '', lA: '', lB: '', cA: '#22c55e', cB: '#ef4444', stake: 0, payout: 0, bid, profit, status: poc.status as Pos['status'], ts: 0 }
-                return [u, ...prev.filter(p => p.id !== cid)].slice(0, 50)
-              })
-            } else {
-              setOpenPos(prev => prev.map(p => p.id === cid ? { ...p, bid, profit, status: poc.status as Pos['status'] } : p))
-            }
-          }
-        }
-        ws.onerror = () => setAuthReady(false)
-        ws.onclose = () => {
-          setAuthReady(false); authRef.current = null
-          if (dead) return
-          retries++
-          if (retries > 5) { setWsErr('lost'); return }
-          setWsErr('reconnecting')
-          setTimeout(connect, Math.min(retries * 2000, 10_000))
-        }
-      } catch { if (!dead) setTimeout(connect, 5000) }
-    }
-    connect()
-    return () => { dead = true; clearInterval(ping); ws?.close(); authRef.current = null }
-  }, [subscribeProposals, authKey]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Symbol change ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    prices.current = []; times.current = []; curCandleRef.current = null
-    setPrice(null); prevRef.current = null
-    const pub = pubRef.current, auth = authRef.current
-    if (pub?.readyState === WebSocket.OPEN) {
-      subscribeTicks(pub, symbol)
-      requestHistory(pub, symbol, TFS[tfIdxRef.current].gran)
-    }
-    if (auth?.readyState === WebSocket.OPEN) subscribeProposals(auth)
-  }, [symbol]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── TF change ─────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    prices.current = []; times.current = []; curCandleRef.current = null
-    const pub = pubRef.current
-    if (pub?.readyState === WebSocket.OPEN) requestHistory(pub, symbolRef.current, tf.gran)
-    buildSeries()
-  }, [tfIdx]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Chart type / MA ───────────────────────────────────────────────────────────
-  useEffect(() => { if (chartRef.current) buildSeries() }, [chartType, maOn, maPeriod, buildSeries])
-
-  // ── Trade params → resubscribe ────────────────────────────────────────────────
-  useEffect(() => {
-    const auth = authRef.current
-    if (auth?.readyState === WebSocket.OPEN) subscribeProposals(auth)
-  }, [ttIdx, stake, dur, barrier, subscribeProposals])
-
-  // ── Chart init ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!canvasRef.current) return
-    const chart = createChart(canvasRef.current, {
-      layout:          { background: { color: '#050c18' }, textColor: 'rgba(200,215,235,0.5)' },
-      grid:            { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
-      crosshair:       { mode: 0 },
-      timeScale:       { borderColor: 'rgba(255,255,255,0.06)', timeVisible: true, secondsVisible: false },
-      rightPriceScale: { borderColor: 'rgba(255,255,255,0.06)' },
-      handleScroll: true, handleScale: true,
+    if (!chartEl.current) return
+    const chart = createChart(chartEl.current, {
+      layout: { background: { color: '#0f172a' }, textColor: '#94a3b8' },
+      grid:   { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
+      crosshair: { mode: 1 },
+      rightPriceScale: { borderColor: '#334155' },
+      timeScale: { borderColor: '#334155', timeVisible: true, secondsVisible: false },
     })
     chartRef.current = chart
-    areaR.current = chart.addAreaSeries({ lineColor: '#FCA311', topColor: 'rgba(252,163,17,0.18)', bottomColor: 'rgba(252,163,17,0)', lineWidth: 2 })
-    const ro = new ResizeObserver(([e]) => chart.applyOptions({ width: e.contentRect.width, height: e.contentRect.height }))
-    ro.observe(canvasRef.current)
-    return () => { ro.disconnect(); try { chart.remove() } catch {}; chartRef.current = null; areaR.current = null }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    const obs = new ResizeObserver(() => {
+      if (chartEl.current) chart.resize(chartEl.current.offsetWidth, chartEl.current.offsetHeight)
+    })
+    obs.observe(chartEl.current)
+    return () => { obs.disconnect(); chart.remove(); chartRef.current = null }
+  }, [])
 
-  // ── Buy handler ───────────────────────────────────────────────────────────────
-  const doBuy = useCallback((side: 'A'|'B') => {
-    const ws = authRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    if (side === 'A' && buyingA) return
-    if (side === 'B' && buyingB) return
-    const prop = side === 'A' ? propARef.current : propBRef.current
-    if (!prop?.id || prop.err) { setBuyErr('Price not ready'); return }
-    const ask = Number(prop.ask)
-    if (!ask || isNaN(ask)) return
-    side === 'A' ? setBuyingA(true) : setBuyingB(true)
-    setBuyErr(null)
-    const rid = ++reqId.current
-    const cur = ttRef.current
-    const meta: Pos = {
-      id: 0, ct: side === 'A' ? cur.ctA : cur.ctB, side,
-      ttId: cur.id, lA: cur.lA, lB: cur.lB, cA: cur.cA, cB: cur.cB,
-      stake: 0, payout: 0, bid: 0, profit: 0, status: 'open',
-      barrier: cur.barrier ? String(barrierRef.current) : undefined, ts: 0,
+  // ── Rebuild series when chart type changes ────────────────────────────────
+  const rebuildSeries = useCallback((type: 'area'|'line'|'candles', ma: boolean, period: number, prices: number[], times: number[], curDp: number) => {
+    const chart = chartRef.current
+    if (!chart) return
+    if (seriesRef.current) { try { chart.removeSeries(seriesRef.current) } catch {} seriesRef.current = null }
+    if (maRef.current)     { try { chart.removeSeries(maRef.current)     } catch {} maRef.current     = null }
+
+    if (type === 'candles') {
+      const s = chart.addCandlestickSeries({
+        upColor: '#16a34a', downColor: '#dc2626',
+        borderUpColor: '#16a34a', borderDownColor: '#dc2626',
+        wickUpColor: '#16a34a', wickDownColor: '#dc2626',
+      })
+      seriesRef.current = s
+    } else if (type === 'area') {
+      const s = chart.addAreaSeries({
+        lineColor: '#6366f1', topColor: 'rgba(99,102,241,0.35)', bottomColor: 'rgba(99,102,241,0)',
+        lineWidth: 2,
+      })
+      seriesRef.current = s
+    } else {
+      const s = chart.addLineSeries({ color: '#6366f1', lineWidth: 2 })
+      seriesRef.current = s
     }
-    ;(side === 'A' ? buyMapA : buyMapB).current.set(rid, meta)
-    ws.send(JSON.stringify({ buy: prop.id, price: parseFloat((ask * 1.02).toFixed(2)), req_id: rid }))
-    setTimeout(() => {
-      const map = side === 'A' ? buyMapA.current : buyMapB.current
-      if (map.has(rid)) { map.delete(rid); side === 'A' ? setBuyingA(false) : setBuyingB(false); setBuyErr('No response') }
-    }, 12_000)
-  }, [buyingA, buyingB])
 
-  // ── Market filter ─────────────────────────────────────────────────────────────
-  const filtered = mktQ
-    ? syms.filter(s => s.name.toLowerCase().includes(mktQ.toLowerCase()) || s.symbol.toLowerCase().includes(mktQ.toLowerCase()))
-    : syms
-  const groups = filtered.reduce<Record<string, Sym[]>>((a, s) => {
-    if (!a[s.group]) a[s.group] = []
-    a[s.group].push(s); return a
+    if (ma && prices.length >= period) {
+      const maS = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, lineStyle: 1 })
+      maRef.current = maS
+      const maVals = sma(prices, period)
+      const maData = maVals
+        .map((v, i) => v !== null ? { time: times[i] as UTCTimestamp, value: v } : null)
+        .filter(Boolean) as LineData[]
+      maS.setData(maData)
+    }
+  }, [])
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Public WS — market data
+  // ══════════════════════════════════════════════════════════════════════════════
+  const loadHistory = useCallback((sym: string, gran: number) => {
+    const ws = pubRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const end   = Math.floor(Date.now() / 1000)
+    const start = end - (gran > 0 ? gran * 500 : 3600)
+    if (gran > 0) {
+      ws.send(JSON.stringify({ ticks_history: sym, granularity: gran, style: 'candles', start, end, count: 500 }))
+    } else {
+      ws.send(JSON.stringify({ ticks_history: sym, style: 'ticks', start, end, count: 500 }))
+    }
+  }, [])
+
+  useEffect(() => {
+    let ws: WebSocket
+    let alive = true
+
+    const connect = () => {
+      ws = new WebSocket(PUB_WS)
+      pubRef.current = ws
+
+      ws.onopen = () => {
+        if (!alive) return
+        ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic' }))
+        ws.send(JSON.stringify({ ticks: symbolRef.current, subscribe: 1 }))
+        loadHistory(symbolRef.current, TFS[tfIdxRef.current].gran)
+      }
+
+      ws.onmessage = (e) => {
+        if (!alive) return
+        const msg = JSON.parse(e.data)
+        const sym = symbolRef.current
+
+        if (msg.active_symbols) {
+          const list: Sym[] = (msg.active_symbols as any[]).map(s => ({
+            symbol: s.symbol, name: s.display_name ?? s.symbol,
+            pip: s.pip ?? 0.01, dp: s.pip ? String(s.pip).split('.')[1]?.length ?? 2 : 2,
+            group: s.submarket_display_name ?? s.market_display_name ?? '',
+            open: s.exchange_is_open === 1,
+          }))
+          setSyms(list)
+        }
+
+        if (msg.tick && msg.tick.symbol === sym) {
+          const p = msg.tick.quote
+          setPrice(prev => {
+            setPriceDir(prev === null ? null : p > prev ? 'up' : p < prev ? 'dn' : null)
+            return p
+          })
+          if (isTickRef.current && seriesRef.current) {
+            const t = msg.tick.epoch as UTCTimestamp
+            pricesRef.current.push(p)
+            tsRef.current.push(t)
+            const pt = seriesRef.current as ISeriesApi<'Area'|'Line'>
+            pt.update({ time: t, value: p })
+            if (maOnRef.current && maRef.current && pricesRef.current.length >= 20) {
+              const vals = pricesRef.current
+              const avg  = vals.slice(-20).reduce((a, b) => a + b, 0) / 20
+              maRef.current.update({ time: t, value: avg })
+            }
+          }
+        }
+
+        if (msg.candles && !isTickRef.current && seriesRef.current) {
+          const data = (msg.candles as any[]).map(c => ({
+            time:  c.epoch as UTCTimestamp,
+            open:  c.open, high: c.high, low: c.low, close: c.close,
+          }))
+          pricesRef.current = data.map(c => c.close)
+          tsRef.current     = data.map(c => c.time)
+          const cType = chartType
+          if (cType === 'candles') {
+            (seriesRef.current as ISeriesApi<'Candlestick'>).setData(data as CandlestickData[])
+          } else {
+            const lineData = data.map(c => ({ time: c.time, value: c.close }))
+            ;(seriesRef.current as ISeriesApi<'Area'|'Line'>).setData(lineData)
+          }
+          if (maOnRef.current && maRef.current && pricesRef.current.length >= 20) {
+            const maVals = sma(pricesRef.current, 20)
+            const maData = maVals
+              .map((v, i) => v !== null ? { time: tsRef.current[i] as UTCTimestamp, value: v } : null)
+              .filter(Boolean) as LineData[]
+            maRef.current.setData(maData)
+          }
+        }
+
+        if (msg.history && isTickRef.current && seriesRef.current) {
+          const prices = (msg.history.prices as number[]) ?? []
+          const times  = (msg.history.times  as number[]) ?? []
+          pricesRef.current = prices
+          tsRef.current     = times
+          const lineData = prices.map((p, i) => ({ time: times[i] as UTCTimestamp, value: p }))
+          ;(seriesRef.current as ISeriesApi<'Area'|'Line'>).setData(lineData)
+          if (maOnRef.current && maRef.current && prices.length >= 20) {
+            const maVals = sma(prices, 20)
+            const maData = maVals
+              .map((v, i) => v !== null ? { time: times[i] as UTCTimestamp, value: v } : null)
+              .filter(Boolean) as LineData[]
+            maRef.current.setData(maData)
+          }
+        }
+      }
+
+      ws.onclose = () => { if (alive) setTimeout(connect, 2000) }
+    }
+
+    connect()
+    return () => { alive = false; ws?.close() }
+  }, [loadHistory, chartType])
+
+  // ── Re-subscribe ticks when symbol changes ────────────────────────────────
+  useEffect(() => {
+    const ws = pubRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ forget_all: 'ticks' }))
+    ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }))
+    pricesRef.current = []; tsRef.current = []
+    loadHistory(symbol, TFS[tfIdx].gran)
+    rebuildSeries(chartType, maOn, 20, [], [], dp)
+  }, [symbol, tfIdx, chartType, maOn, dp, loadHistory, rebuildSeries])
+
+  // ── Rebuild series when chart type / MA changes ──────────────────────────
+  useEffect(() => {
+    rebuildSeries(chartType, maOn, 20, pricesRef.current, tsRef.current, dp)
+    loadHistory(symbol, TFS[tfIdx].gran)
+  }, [chartType, maOn]) // eslint-disable-line
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Auth WS — balance, proposals, buy
+  // ══════════════════════════════════════════════════════════════════════════════
+  const subscribeProposals = useCallback(() => {
+    const ws   = authRef.current
+    const stk  = parseFloat(stake) || 1
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ forget_all: 'proposal' }))
+
+    const dur   = useTick ? tickDur : minDur * 60
+    const durUnit = useTick ? 't' : 's'
+
+    const base: Record<string, unknown> = {
+      proposal: 1, subscribe: 1,
+      amount: stk, basis: 'stake',
+      currency: currency || 'USD',
+      symbol,
+      duration: useTick ? tickDur : minDur,
+      duration_unit: useTick ? 't' : 'm',
+    }
+    if (tt.barrier) base.barrier = barrier
+
+    ws.send(JSON.stringify({ ...base, contract_type: tt.ctA }))
+    ws.send(JSON.stringify({ ...base, contract_type: tt.ctB }))
+  }, [stake, symbol, tt, barrier, useTick, tickDur, minDur, currency])
+
+  useEffect(() => {
+    let ws: WebSocket
+    let alive = true
+
+    const connect = async () => {
+      try {
+        const r = await fetch('/api/user/ws-url')
+        if (!r.ok) { setAuthErr('Not logged in'); return }
+        const { wsUrl } = await r.json()
+        ws = new WebSocket(wsUrl)
+        authRef.current = ws
+
+        ws.onopen = () => {
+          if (!alive) return
+          ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+          setAuthReady(true); setAuthErr(null)
+        }
+
+        ws.onmessage = (e) => {
+          if (!alive) return
+          const msg = JSON.parse(e.data)
+
+          if (msg.balance) {
+            setBalance(msg.balance.balance)
+            setCurrency(msg.balance.currency ?? 'USD')
+          }
+
+          if (msg.proposal) {
+            const p = msg.proposal
+            const isA = p.contract_type === tt.ctA || ['CALL','DIGITOVER','DIGITEVEN','DIGITMATCH'].includes(p.contract_type)
+            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout, err: undefined }
+            if (isA) setPropA(prop); else setPropB(prop)
+          }
+
+          if (msg.error?.code === 'ProposalArrayInteger' || msg.error?.code === 'ContractBuyValidationError') {
+            /* ignore proposal errors silently */
+          }
+
+          if (msg.buy) {
+            const b = msg.buy
+            ws.send(JSON.stringify({ forget_all: 'proposal' }))
+            const newPos: Pos = {
+              id: b.contract_id, ct: b.contract_type,
+              side: buyingA ? 'A' : 'B', ttId: tt.id,
+              lA: tt.lA, lB: tt.lB, cA: tt.cA, cB: tt.cB,
+              stake: parseFloat(stake), payout: b.buy_price ?? 0,
+              bid: b.buy_price ?? 0, profit: 0,
+              status: 'open', barrier: tt.barrier ? String(barrier) : undefined,
+              ts: Date.now(),
+            }
+            setPositions(ps => [...ps, newPos])
+            setBuyingA(false); setBuyingB(false)
+            setTimeout(() => subscribeProposals(), 300)
+            ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1 }))
+          }
+
+          if (msg.proposal_open_contract) {
+            const poc = msg.proposal_open_contract
+            if (poc.is_sold || poc.status === 'sold') {
+              const status = poc.profit >= 0 ? 'won' : 'lost'
+              setPositions(ps => ps.map(p => p.id === poc.contract_id
+                ? { ...p, status, profit: poc.profit ?? 0, bid: poc.bid_price ?? p.bid }
+                : p))
+            } else {
+              setPositions(ps => ps.map(p => p.id === poc.contract_id
+                ? { ...p, profit: poc.profit ?? p.profit, bid: poc.bid_price ?? p.bid }
+                : p))
+            }
+          }
+        }
+
+        ws.onclose = () => { if (alive) { setAuthReady(false); setTimeout(connect, 3000) } }
+      } catch { setAuthErr('Auth WS error') }
+    }
+
+    connect()
+    return () => { alive = false; ws?.close() }
+  }, [authKey]) // eslint-disable-line
+
+  // ── Subscribe proposals when ready / params change ────────────────────────
+  useEffect(() => {
+    if (!authReady) return
+    if (propTimerRef.current) clearTimeout(propTimerRef.current)
+    propTimerRef.current = setTimeout(subscribeProposals, 400)
+  }, [authReady, subscribeProposals])
+
+  // ── Buy ───────────────────────────────────────────────────────────────────
+  const buy = useCallback((side: 'A'|'B') => {
+    const ws   = authRef.current
+    const prop = side === 'A' ? propA : propB
+    if (!ws || !prop || buyingA || buyingB) return
+    if (side === 'A') setBuyingA(true); else setBuyingB(true)
+    ws.send(JSON.stringify({ buy: prop.id, price: +(prop.ask * 1.02).toFixed(2) }))
+  }, [propA, propB, buyingA, buyingB])
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const openPos   = positions.filter(p => p.status === 'open')
+  const closedPos = positions.filter(p => p.status !== 'open')
+  const totalPnl  = closedPos.reduce((a, p) => a + p.profit, 0)
+  const stakeNum  = parseFloat(stake) || 0
+  const filteredSyms = syms.filter(s =>
+    symQ ? s.name.toLowerCase().includes(symQ.toLowerCase()) || s.symbol.toLowerCase().includes(symQ.toLowerCase()) : true
+  )
+  // group by market
+  const symGroups = filteredSyms.reduce<Record<string, Sym[]>>((acc, s) => {
+    ;(acc[s.group] = acc[s.group] || []).push(s)
+    return acc
   }, {})
 
-  // ── Derived display values ────────────────────────────────────────────────────
-  const priceColor = priceDir === 'up' ? '#22c55e' : priceDir === 'dn' ? '#ef4444' : '#e5e5e5'
-  const totalPL    = [...openPos, ...closed].reduce((s, p) => s + p.profit, 0)
+  // ── CSS helpers ───────────────────────────────────────────────────────────
+  const panelBg  = '#0f172a'
+  const panelBdr = '#1e293b'
+  const textMain = '#f1f5f9'
+  const textMid  = '#94a3b8'
+  const textDim  = '#475569'
+  const accent   = '#6366f1'
+  const green    = '#16a34a'
+  const red      = '#dc2626'
 
-  // ── Proposal card renderer ────────────────────────────────────────────────────
-  function ProposalCard({ side }: { side: 'A'|'B' }) {
-    const prop    = side === 'A' ? propA : propB
-    const buying  = side === 'A' ? buyingA : buyingB
-    const label   = side === 'A' ? tt.lA : tt.lB
-    const color   = side === 'A' ? tt.cA : tt.cB
-    const ok      = !!prop?.id && !prop?.err && authReady
-    return (
-      <div style={{
-        flex: 1, borderRadius: '10px', padding: '12px 10px',
-        border: `1px solid ${ok ? color + '30' : 'rgba(255,255,255,0.07)'}`,
-        background: ok ? color + '08' : 'rgba(255,255,255,0.02)',
-        display: 'flex', flexDirection: 'column', gap: '6px',
-        transition: 'all 0.15s',
-      }}>
-        <div style={{ fontSize: '0.72rem', fontWeight: 800, color: ok ? color : 'rgba(229,229,229,0.35)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-          {label}
-        </div>
-        {prop?.err ? (
-          <div style={{ fontSize: '0.6rem', color: '#ef4444', lineHeight: 1.4 }}>{prop.err.slice(0, 60)}</div>
-        ) : prop?.ask ? (
-          <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)' }}>Stake</span>
-              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#e5e5e5', fontVariantNumeric: 'tabular-nums' }}>{f2(prop.ask)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)' }}>Payout</span>
-              <span style={{ fontSize: '0.88rem', fontWeight: 800, color: color, fontVariantNumeric: 'tabular-nums' }}>{f2(prop.payout)}</span>
-            </div>
-          </>
-        ) : (
-          <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.2)' }}>{authReady ? 'Fetching…' : '—'}</div>
-        )}
-        <button
-          onClick={() => doBuy(side)}
-          disabled={!ok || buying}
-          style={{
-            marginTop: '2px', padding: '10px 4px', borderRadius: '7px', border: 'none', outline: 'none',
-            background: ok && !buying ? color : 'rgba(255,255,255,0.05)',
-            color:      ok && !buying ? '#fff' : 'rgba(229,229,229,0.2)',
-            cursor:     ok && !buying ? 'pointer' : 'not-allowed',
-            fontWeight: 800, fontSize: '0.78rem', transition: 'all 0.12s',
-          }}
-        >
-          {buying ? '…' : `Buy ${label}`}
-        </button>
-      </div>
-    )
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ──────────────────────────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Render
+  // ═══════════════════════════════════════════════════════════════════════════
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#050c18', color: '#e5e5e5', fontFamily: 'Inter,system-ui,sans-serif', fontSize: '14px', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', height: '100vh', background: panelBg, fontFamily: 'Inter, system-ui, sans-serif', overflow: 'hidden' }}>
 
-      {/* ── TOP ROW: chart + trade panel ───────────────────────────────────────── */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* ── LEFT TRADE PANEL ──────────────────────────────────────────── */}
+      <aside style={{
+        width: 248, minWidth: 248, maxWidth: 248,
+        background: '#080f1e',
+        borderRight: `1px solid ${panelBdr}`,
+        display: 'flex', flexDirection: 'column',
+        overflowY: 'auto', overflowX: 'hidden',
+      }}>
 
-        {/* ── CHART COLUMN ─────────────────────────────────────────────────────── */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-
-          {/* Chart top bar */}
-          <div style={{
-            height: '52px', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '12px',
-            padding: '0 14px', borderBottom: '1px solid rgba(255,255,255,0.05)',
-            background: '#06101c',
-          }}>
-            {/* Symbol button */}
-            <button
-              onClick={() => { setMktOpen(v => !v); setMktQ('') }}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '8px',
-                background: mktOpen ? 'rgba(252,163,17,0.1)' : 'rgba(255,255,255,0.04)',
-                border: `1px solid ${mktOpen ? 'rgba(252,163,17,0.4)' : 'rgba(255,255,255,0.08)'}`,
-                borderRadius: '8px', padding: '5px 10px', cursor: 'pointer', outline: 'none',
-                transition: 'all 0.12s',
-              }}
-            >
-              <span style={{
-                width: '24px', height: '24px', borderRadius: '50%',
-                background: 'linear-gradient(135deg,#FCA311,#c97000)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: '0.45rem', fontWeight: 900, color: '#000', flexShrink: 0,
-              }}>
-                {symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
-              </span>
-              <div>
-                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#e5e5e5', lineHeight: 1.1 }}>{curSym?.name ?? symbol}</div>
-                {price != null && (
-                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: priceColor, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 }}>
-                    {fdp(price, dp)}
-                    <span style={{ marginLeft: '4px', color: priceDir === 'up' ? '#22c55e' : priceDir === 'dn' ? '#ef4444' : 'rgba(229,229,229,0.3)', fontSize: '0.62rem' }}>
-                      {delta >= 0 ? '+' : ''}{fdp(delta, dp)}
-                    </span>
-                  </div>
-                )}
+        {/* Balance strip */}
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}`, background: '#0a1628' }}>
+          <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>Balance</div>
+          {balance !== null
+            ? <div style={{ fontSize: 20, fontWeight: 700, color: textMain, letterSpacing: '-0.01em' }}>
+                {currency} {f2(balance)}
               </div>
-              <span style={{ color: 'rgba(229,229,229,0.3)', fontSize: '0.55rem', marginLeft: '2px' }}>▾</span>
-            </button>
+            : <div style={{ fontSize: 13, color: textDim }}>{authErr ?? 'Connecting…'}</div>
+          }
+        </div>
 
-            {/* Divider */}
-            <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
+        {/* Asset selector */}
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}` }}>
+          <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Asset</div>
+          <button
+            onClick={() => setSymOpen(v => !v)}
+            style={{
+              width: '100%', padding: '8px 10px',
+              background: '#0f172a', border: `1px solid ${panelBdr}`,
+              borderRadius: 6, color: textMain, fontSize: 13,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>{curSym?.name ?? symbol}</span>
+            <span style={{ color: textDim, fontSize: 11 }}>{symOpen ? '▲' : '▼'}</span>
+          </button>
 
-            {/* Timeframe chips */}
-            <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
-              {TFS.map((t, i) => (
-                <button key={t.label}
-                  onClick={() => setTfIdx(i)}
+          {symOpen && (
+            <div style={{
+              position: 'absolute', zIndex: 100,
+              width: 220, background: '#0a1628',
+              border: `1px solid ${panelBdr}`, borderRadius: 8,
+              marginTop: 4, maxHeight: 320, overflowY: 'auto',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            }}>
+              <div style={{ padding: '8px 10px', borderBottom: `1px solid ${panelBdr}` }}>
+                <input
+                  value={symQ}
+                  onChange={e => setSymQ(e.target.value)}
+                  placeholder="Search markets…"
+                  autoFocus
                   style={{
-                    padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
-                    background: tfIdx === i ? 'rgba(252,163,17,0.15)' : 'transparent',
-                    color:      tfIdx === i ? '#FCA311' : 'rgba(229,229,229,0.4)',
-                    fontSize:   '0.7rem', fontWeight: 700, outline: 'none',
-                    transition: 'all 0.1s',
+                    width: '100%', background: '#0f172a', border: `1px solid ${panelBdr}`,
+                    borderRadius: 4, padding: '5px 8px', color: textMain,
+                    fontSize: 12, outline: 'none', boxSizing: 'border-box',
                   }}
-                >{t.label}</button>
+                />
+              </div>
+              {Object.entries(symGroups).map(([grp, items]) => (
+                <div key={grp}>
+                  <div style={{ padding: '6px 10px', fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{grp}</div>
+                  {items.map(s => (
+                    <button
+                      key={s.symbol}
+                      onClick={() => { setSymbol(s.symbol); setSymOpen(false); setSymQ('') }}
+                      style={{
+                        width: '100%', padding: '7px 10px', textAlign: 'left',
+                        background: s.symbol === symbol ? '#1e293b' : 'transparent',
+                        border: 'none', color: s.open ? textMain : textDim,
+                        fontSize: 12, cursor: 'pointer',
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      }}
+                    >
+                      <span>{s.name}</span>
+                      {!s.open && <span style={{ fontSize: 10, color: red }}>closed</span>}
+                    </button>
+                  ))}
+                </div>
               ))}
             </div>
+          )}
 
-            {/* Divider */}
-            <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
-
-            {/* Chart type (only for non-tick) */}
-            {!isTick && (
-              <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
-                {(['area','line','candles'] as const).map(ct => (
-                  <button key={ct}
-                    onClick={() => setChartType(ct)}
-                    style={{
-                      padding: '4px 8px', borderRadius: '5px', border: 'none', cursor: 'pointer',
-                      background: chartType === ct ? 'rgba(59,130,246,0.15)' : 'transparent',
-                      color:      chartType === ct ? '#60a5fa' : 'rgba(229,229,229,0.35)',
-                      fontSize: '0.68rem', fontWeight: 600, outline: 'none', textTransform: 'capitalize',
-                      transition: 'all 0.1s',
-                    }}
-                  >{ct}</button>
-                ))}
-              </div>
-            )}
-
-            {/* MA toggle */}
-            {!isTick && (
-              <>
-                <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.07)', flexShrink: 0 }} />
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                  <div
-                    onClick={() => setMaOn(v => !v)}
-                    style={{ width: '30px', height: '16px', borderRadius: '8px', cursor: 'pointer', background: maOn ? '#f59e0b' : 'rgba(255,255,255,0.1)', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}
-                  >
-                    <div style={{ position: 'absolute', top: '2px', width: '12px', height: '12px', borderRadius: '50%', background: '#fff', transition: 'left 0.2s', left: maOn ? '16px' : '2px' }} />
-                  </div>
-                  <span style={{ fontSize: '0.64rem', color: maOn ? '#f59e0b' : 'rgba(229,229,229,0.3)', fontWeight: 600 }}>MA</span>
-                  {maOn && (
-                    <input type="number" min={2} max={200} value={maPeriod}
-                      onChange={e => setMaPeriod(Math.max(2, Math.min(200, parseInt(e.target.value)||20)))}
-                      style={{ width: '44px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '5px', color: '#e5e5e5', padding: '3px 6px', fontSize: '0.68rem', outline: 'none' }}
-                    />
-                  )}
-                </div>
-              </>
-            )}
-
-            <div style={{ flex: 1 }} />
-
-            {/* Live dot */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+          {/* Live price */}
+          {price !== null && (
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'baseline', gap: 6 }}>
               <span style={{
-                width: '7px', height: '7px', borderRadius: '50%',
-                background: live ? '#22c55e' : '#555',
-                boxShadow: live ? '0 0 6px #22c55e88' : 'none',
-                animation: live ? 'blink 2s infinite' : 'none',
-              }} />
-              <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)' }}>{live ? 'Live' : 'Connecting…'}</span>
+                fontSize: 18, fontWeight: 700, letterSpacing: '-0.01em',
+                color: priceDir === 'up' ? '#4ade80' : priceDir === 'dn' ? '#f87171' : textMain,
+                transition: 'color 0.2s',
+              }}>
+                {fdp(price, dp)}
+              </span>
+              {priceDir && (
+                <span style={{ fontSize: 13, color: priceDir === 'up' ? '#4ade80' : '#f87171' }}>
+                  {priceDir === 'up' ? '▲' : '▼'}
+                </span>
+              )}
             </div>
-          </div>
+          )}
+        </div>
 
-          {/* Chart canvas */}
-          <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-            <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
-
-            {/* Market drawer — slides over chart */}
-            {mktOpen && (
-              <>
-                <div onClick={() => setMktOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 20, background: 'rgba(0,0,0,0.3)' }} />
-                <div style={{
-                  position: 'absolute', top: 0, left: 0, bottom: 0, width: '480px',
-                  background: '#070f1e', borderRight: '1px solid rgba(255,255,255,0.06)',
-                  display: 'flex', flexDirection: 'column', zIndex: 25,
-                  boxShadow: '8px 0 40px rgba(0,0,0,0.7)',
-                }}>
-                  <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
-                    <div style={{ fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px', color: 'rgba(229,229,229,0.7)' }}>Select Market</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', padding: '8px 12px', border: '1px solid rgba(255,255,255,0.08)' }}>
-                      <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="5.5" cy="5.5" r="4" stroke="rgba(200,215,235,0.35)" strokeWidth="1.3"/><path d="M8.5 8.5L11.5 11.5" stroke="rgba(200,215,235,0.35)" strokeWidth="1.3" strokeLinecap="round"/></svg>
-                      <input autoFocus type="text" placeholder="Search…" value={mktQ}
-                        onChange={e => setMktQ(e.target.value)}
-                        style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e5e5e5', fontSize: '0.8rem' }}
-                      />
-                      {mktQ && <button onClick={() => setMktQ('')} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1rem', lineHeight: 1 }}>×</button>}
-                    </div>
-                  </div>
-                  <div style={{ flex: 1, overflowY: 'auto', paddingBottom: '12px' }}>
-                    {!symsOk && <div style={{ padding: '3rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>Loading…</div>}
-                    {symsOk && Object.entries(groups).map(([g, ms]) => (
-                      <div key={g}>
-                        <div style={{ padding: '10px 16px 4px', fontSize: '0.6rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{g}</div>
-                        {ms.map(m => {
-                          const sel = m.symbol === symbol
-                          return (
-                            <button key={m.symbol}
-                              onClick={() => { setSymbol(m.symbol); setMktOpen(false) }}
-                              style={{
-                                width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
-                                padding: '9px 16px', background: sel ? 'rgba(252,163,17,0.07)' : 'transparent',
-                                border: 'none', borderLeft: `2px solid ${sel ? '#FCA311' : 'transparent'}`,
-                                color: sel ? '#FCA311' : 'rgba(229,229,229,0.7)', cursor: 'pointer',
-                                opacity: m.open ? 1 : 0.4, textAlign: 'left',
-                              }}
-                            >
-                              <span style={{ width: '28px', height: '28px', borderRadius: '50%', background: sel ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.5rem', fontWeight: 800, flexShrink: 0 }}>
-                                {m.symbol.replace(/[^A-Z0-9]/gi,'').slice(0,3).toUpperCase()}
-                              </span>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: '0.78rem', fontWeight: sel ? 700 : 400, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.name}</div>
-                                {!m.open && <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.28)', marginTop: '1px' }}>Closed</div>}
-                              </div>
-                              {sel && <span style={{ color: '#FCA311', fontSize: '0.8rem' }}>✓</span>}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    ))}
-                    {symsOk && Object.keys(groups).length === 0 && (
-                      <div style={{ padding: '3rem', textAlign: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>No results</div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
+        {/* Trade type tabs */}
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}` }}>
+          <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Trade Type</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            {TRADE_TYPES.map((t, i) => (
+              <button
+                key={t.id}
+                onClick={() => { setTtIdx(i); setPropA(null); setPropB(null) }}
+                style={{
+                  padding: '6px 4px', fontSize: 11, fontWeight: 600,
+                  background: ttIdx === i ? accent : '#0f172a',
+                  border: `1px solid ${ttIdx === i ? accent : panelBdr}`,
+                  borderRadius: 5, color: ttIdx === i ? '#fff' : textMid,
+                  cursor: 'pointer', textAlign: 'center', lineHeight: 1.3,
+                }}
+              >
+                {t.lA} / {t.lB}
+              </button>
+            ))}
           </div>
         </div>
 
-        {/* ── TRADE PANEL ──────────────────────────────────────────────────────── */}
-        <div style={{
-          width: '286px', flexShrink: 0,
-          borderLeft: '1px solid rgba(255,255,255,0.06)',
-          background: '#060e1c', display: 'flex', flexDirection: 'column',
-        }}>
-
-          {/* Trade type selector */}
-          <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
-            <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>Trade Type</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px' }}>
-              {TT.map((t, i) => (
-                <button key={t.id}
-                  onClick={() => { setTtIdx(i); setPropA(null); setPropB(null) }}
+        {/* Barrier (digits) */}
+        {tt.barrier && (
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}` }}>
+            <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+              Digit ({tt.id === 'OU' ? 'over/under' : 'match/differ'})
+            </div>
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+              {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                <button
+                  key={d}
+                  onClick={() => setBarrier(d)}
                   style={{
-                    padding: '8px 6px', borderRadius: '7px', border: 'none', cursor: 'pointer',
-                    background: ttIdx === i ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)',
-                    color:      ttIdx === i ? '#FCA311' : 'rgba(229,229,229,0.4)',
-                    fontSize:   '0.68rem', fontWeight: 700, transition: 'all 0.12s',
-                    outline:    ttIdx === i ? '1px solid rgba(252,163,17,0.35)' : 'none' as any,
-                    textAlign: 'center',
+                    width: 28, height: 28, fontSize: 12, fontWeight: 700,
+                    background: barrier === d ? accent : '#0f172a',
+                    border: `1px solid ${barrier === d ? accent : panelBdr}`,
+                    borderRadius: 4, color: barrier === d ? '#fff' : textMid,
+                    cursor: 'pointer',
                   }}
                 >
-                  <div>{t.label.split(' / ')[0]}</div>
-                  <div style={{ fontSize: '0.55rem', opacity: 0.65, marginTop: '1px' }}>/ {t.label.split(' / ')[1]}</div>
+                  {d}
                 </button>
               ))}
             </div>
           </div>
+        )}
 
-          {/* Barrier (for OU + MD) */}
-          {tt.barrier && (
-            <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
-              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '6px' }}>Digit ({barrier})</div>
-              <div style={{ display: 'flex', gap: '3px' }}>
-                {[0,1,2,3,4,5,6,7,8,9].map(d => (
-                  <button key={d}
-                    onClick={() => setBarrier(d)}
-                    style={{
-                      flex: 1, padding: '6px 2px', borderRadius: '5px', border: 'none', cursor: 'pointer',
-                      background: barrier === d ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
-                      color:      barrier === d ? '#FCA311' : 'rgba(229,229,229,0.5)',
-                      fontSize: '0.72rem', fontWeight: 700,
-                      outline: barrier === d ? '1px solid rgba(252,163,17,0.35)' : 'none' as any,
-                    }}
-                  >{d}</button>
-                ))}
-              </div>
+        {/* Duration */}
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}` }}>
+          <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Duration</div>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+            {['Ticks', 'Minutes'].map((l, i) => (
+              <button
+                key={l}
+                onClick={() => setUseTick(i === 0)}
+                style={{
+                  flex: 1, padding: '5px 0', fontSize: 11, fontWeight: 600,
+                  background: useTick === (i === 0) ? accent : '#0f172a',
+                  border: `1px solid ${useTick === (i === 0) ? accent : panelBdr}`,
+                  borderRadius: 4, color: useTick === (i === 0) ? '#fff' : textMid,
+                  cursor: 'pointer',
+                }}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+          {useTick ? (
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+              {DUR_TICKS.map(d => (
+                <button
+                  key={d}
+                  onClick={() => setTickDur(d)}
+                  style={{
+                    width: 30, height: 28, fontSize: 12, fontWeight: 600,
+                    background: tickDur === d ? '#1e293b' : '#0f172a',
+                    border: `1px solid ${tickDur === d ? accent : panelBdr}`,
+                    borderRadius: 4, color: tickDur === d ? textMain : textMid,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+              {DUR_MINUTES.map(d => (
+                <button
+                  key={d}
+                  onClick={() => setMinDur(d)}
+                  style={{
+                    padding: '4px 8px', fontSize: 11, fontWeight: 600,
+                    background: minDur === d ? '#1e293b' : '#0f172a',
+                    border: `1px solid ${minDur === d ? accent : panelBdr}`,
+                    borderRadius: 4, color: minDur === d ? textMain : textMid,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {d}m
+                </button>
+              ))}
             </div>
           )}
+        </div>
 
-          {/* Duration + Stake */}
-          <div style={{ padding: '12px 14px 0', flexShrink: 0, display: 'flex', gap: '10px' }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '5px' }}>Duration</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <input type="number" min={1} max={10} value={dur}
-                  onChange={e => setDur(Math.max(1, Math.min(10, parseInt(e.target.value)||1)))}
-                  style={{ flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', color: '#e5e5e5', padding: '7px 8px', fontSize: '0.78rem', outline: 'none' }}
-                />
-                <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.3)', flexShrink: 0 }}>t</span>
-              </div>
+        {/* Stake */}
+        <div style={{ padding: '10px 14px', borderBottom: `1px solid ${panelBdr}` }}>
+          <div style={{ fontSize: 10, color: textDim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Stake</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <span style={{ color: textMid, fontSize: 13 }}>{currency || 'USD'}</span>
+            <input
+              type="number" min="0.35" step="0.01"
+              value={stake}
+              onChange={e => setStake(e.target.value)}
+              style={{
+                flex: 1, background: '#0f172a', border: `1px solid ${panelBdr}`,
+                borderRadius: 5, padding: '6px 8px', color: textMain,
+                fontSize: 14, fontWeight: 600, outline: 'none',
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 3 }}>
+            {STAKE_PICKS.map(v => (
+              <button
+                key={v}
+                onClick={() => setStake(f2(v))}
+                style={{
+                  flex: 1, padding: '4px 2px', fontSize: 10, fontWeight: 600,
+                  background: '#0f172a', border: `1px solid ${panelBdr}`,
+                  borderRadius: 4, color: textMid, cursor: 'pointer',
+                }}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Proposals + Buy buttons */}
+        <div style={{ padding: '10px 14px', flex: 1 }}>
+          {/* Side A */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: textDim }}>
+                {tt.lA} payout
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: propA ? '#4ade80' : textDim }}>
+                {propA ? `${currency} ${f2(propA.payout)}` : '—'}
+              </span>
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '5px' }}>Stake ({currency})</div>
-              <input type="number" min="0.35" step="0.01" value={stake}
-                onChange={e => setStake(e.target.value)}
-                style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', color: '#e5e5e5', padding: '7px 8px', fontSize: '0.78rem', outline: 'none' }}
-              />
-            </div>
+            <button
+              onClick={() => buy('A')}
+              disabled={!propA || buyingA || buyingB}
+              style={{
+                width: '100%', padding: '10px 0', fontSize: 13, fontWeight: 700,
+                background: propA && !buyingA ? green : '#1a2e1a',
+                border: 'none', borderRadius: 7, color: '#fff',
+                cursor: propA && !buyingA ? 'pointer' : 'not-allowed',
+                opacity: propA ? 1 : 0.5,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                transition: 'background 0.15s',
+              }}
+            >
+              {buyingA ? <span style={{ fontSize: 11 }}>Placing…</span> : (
+                <>
+                  <span style={{ fontSize: 16 }}>▲</span>
+                  <span>{tt.lA}</span>
+                  {propA && <span style={{ fontSize: 11, opacity: 0.85 }}>${f2(propA.ask)}</span>}
+                </>
+              )}
+            </button>
           </div>
 
-          {/* Quick stake buttons */}
-          <div style={{ padding: '6px 14px 0', flexShrink: 0, display: 'flex', gap: '3px' }}>
-            {[0.5,1,2,5,10].map(v => (
-              <button key={v}
-                onClick={() => setStake(v.toFixed(2))}
-                style={{ flex: 1, padding: '4px 2px', borderRadius: '5px', border: 'none', cursor: 'pointer', background: parseFloat(stake) === v ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)', color: parseFloat(stake) === v ? '#FCA311' : 'rgba(229,229,229,0.35)', fontSize: '0.62rem', fontWeight: 700, outline: 'none', transition: 'all 0.1s' }}
-              >{v}</button>
+          {/* Side B */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: textDim }}>
+                {tt.lB} payout
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: propB ? '#f87171' : textDim }}>
+                {propB ? `${currency} ${f2(propB.payout)}` : '—'}
+              </span>
+            </div>
+            <button
+              onClick={() => buy('B')}
+              disabled={!propB || buyingA || buyingB}
+              style={{
+                width: '100%', padding: '10px 0', fontSize: 13, fontWeight: 700,
+                background: propB && !buyingB ? red : '#2e1a1a',
+                border: 'none', borderRadius: 7, color: '#fff',
+                cursor: propB && !buyingB ? 'pointer' : 'not-allowed',
+                opacity: propB ? 1 : 0.5,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                transition: 'background 0.15s',
+              }}
+            >
+              {buyingB ? <span style={{ fontSize: 11 }}>Placing…</span> : (
+                <>
+                  <span style={{ fontSize: 16 }}>▼</span>
+                  <span>{tt.lB}</span>
+                  {propB && <span style={{ fontSize: 11, opacity: 0.85 }}>${f2(propB.ask)}</span>}
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Auth status */}
+        <div style={{
+          padding: '8px 14px', borderTop: `1px solid ${panelBdr}`,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: authReady ? '#22c55e' : authErr ? red : '#f59e0b',
+          }} />
+          <span style={{ fontSize: 10, color: textDim }}>
+            {authReady ? 'Live' : authErr ?? 'Connecting…'}
+          </span>
+        </div>
+      </aside>
+
+      {/* ── RIGHT COLUMN (chart + positions) ──────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+
+        {/* Chart toolbar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 14px', background: '#080f1e',
+          borderBottom: `1px solid ${panelBdr}`,
+          flexShrink: 0,
+        }}>
+          {/* Chart type */}
+          <div style={{ display: 'flex', gap: 2, background: '#0f172a', borderRadius: 6, padding: 2 }}>
+            {(['area','line','candles'] as const).map(ct => (
+              <button
+                key={ct}
+                onClick={() => setChartType(ct)}
+                style={{
+                  padding: '4px 10px', fontSize: 11, fontWeight: 600,
+                  background: chartType === ct ? accent : 'transparent',
+                  border: 'none', borderRadius: 4,
+                  color: chartType === ct ? '#fff' : textDim,
+                  cursor: 'pointer',
+                }}
+              >
+                {ct === 'area' ? '◿ Area' : ct === 'line' ? '╱ Line' : '▭ Candles'}
+              </button>
             ))}
           </div>
 
-          {/* Divider */}
-          <div style={{ margin: '12px 14px 0', height: '1px', background: 'rgba(255,255,255,0.05)' }} />
+          {/* Separator */}
+          <div style={{ width: 1, height: 18, background: panelBdr }} />
 
-          {/* Proposal cards */}
-          <div style={{ padding: '12px 14px 0', flexShrink: 0 }}>
-            <div style={{ fontSize: '0.58rem', fontWeight: 700, color: 'rgba(229,229,229,0.25)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
-              {tt.label}
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <ProposalCard side="A" />
-              <ProposalCard side="B" />
-            </div>
+          {/* Timeframes */}
+          <div style={{ display: 'flex', gap: 2 }}>
+            {TFS.map((t, i) => (
+              <button
+                key={t.label}
+                onClick={() => setTfIdx(i)}
+                style={{
+                  padding: '4px 8px', fontSize: 11, fontWeight: 600,
+                  background: tfIdx === i ? '#1e293b' : 'transparent',
+                  border: `1px solid ${tfIdx === i ? accent : 'transparent'}`,
+                  borderRadius: 4, color: tfIdx === i ? textMain : textDim,
+                  cursor: 'pointer',
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
 
-          {/* Error */}
-          {buyErr && (
-            <div style={{ margin: '10px 14px 0', padding: '8px 10px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '7px', fontSize: '0.65rem', color: '#ef4444' }}>
-              ⚠ {buyErr}
-            </div>
-          )}
+          {/* Separator */}
+          <div style={{ width: 1, height: 18, background: panelBdr }} />
 
-          {/* Connection warnings */}
-          {wsErr === 'login' && (
-            <div style={{ margin: '10px 14px 0', padding: '8px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: '7px', fontSize: '0.63rem', color: 'rgba(229,229,229,0.3)', textAlign: 'center' }}>
-              Login to enable trading
-            </div>
-          )}
-          {wsErr === 'reconnecting' && (
-            <div style={{ margin: '10px 14px 0', textAlign: 'center', fontSize: '0.62rem', color: '#f59e0b' }}>Reconnecting…</div>
-          )}
-          {wsErr === 'lost' && (
-            <div style={{ margin: '10px 14px 0', textAlign: 'center', fontSize: '0.62rem', color: '#ef4444' }}>Connection lost — refresh</div>
-          )}
+          {/* MA toggle */}
+          <button
+            onClick={() => setMaOn(v => !v)}
+            style={{
+              padding: '4px 10px', fontSize: 11, fontWeight: 600,
+              background: maOn ? '#f59e0b22' : 'transparent',
+              border: `1px solid ${maOn ? '#f59e0b' : 'transparent'}`,
+              borderRadius: 4, color: maOn ? '#f59e0b' : textDim,
+              cursor: 'pointer',
+            }}
+          >
+            MA(20)
+          </button>
 
           <div style={{ flex: 1 }} />
 
-          {/* Auth status */}
-          <div style={{ padding: '10px 14px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '7px' }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, background: authReady ? '#22c55e' : wsErr ? '#ef4444' : '#444', boxShadow: authReady ? '0 0 5px #22c55e88' : 'none', animation: authReady ? 'blink 2s infinite' : 'none' }} />
-            <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.25)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {authReady
-                ? `${currency}${balance != null ? ` · ${f2(balance)}` : ''}`
-                : wsErr === 'login' ? 'Not logged in'
-                : wsErr ?? 'Connecting…'}
-            </span>
+          {/* Live indicator */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px #22c55e' }} />
+            <span style={{ fontSize: 10, color: textDim }}>LIVE</span>
           </div>
         </div>
-      </div>
 
-      {/* ── BOTTOM: POSITIONS / HISTORY ────────────────────────────────────────── */}
-      <div style={{ height: '196px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.06)', background: '#060e1c', display: 'flex', flexDirection: 'column' }}>
+        {/* Chart canvas */}
+        <div ref={chartEl} style={{ flex: 1, minHeight: 0, position: 'relative' }} />
 
-        {/* Tab bar */}
-        <div style={{ display: 'flex', alignItems: 'center', padding: '0 16px', gap: '0', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
-          {([['open','Open'], ['history','History']] as const).map(([id, label]) => {
-            const count = id === 'open' ? openPos.length : closed.length
-            const active = posTabs === id
-            return (
-              <button key={id}
-                onClick={() => setPosTabs(id)}
-                style={{
-                  padding: '10px 14px', background: 'transparent', border: 'none', cursor: 'pointer', outline: 'none',
-                  color:       active ? '#e5e5e5' : 'rgba(229,229,229,0.35)',
-                  borderBottom: active ? '2px solid #FCA311' : '2px solid transparent',
-                  fontWeight:  active ? 700 : 400, fontSize: '0.75rem',
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                  transition: 'all 0.12s',
-                }}
-              >
-                {label}
-                {count > 0 && (
-                  <span style={{ background: active ? '#FCA311' : 'rgba(255,255,255,0.12)', color: active ? '#000' : 'rgba(229,229,229,0.5)', borderRadius: '10px', padding: '1px 6px', fontSize: '0.58rem', fontWeight: 700 }}>
-                    {count}
+        {/* ── POSITIONS PANEL ─────────────────────────────────────────── */}
+        <div style={{
+          flexShrink: 0, background: '#080f1e',
+          borderTop: `1px solid ${panelBdr}`,
+          height: posOpen ? 200 : 38,
+          transition: 'height 0.2s ease',
+          display: 'flex', flexDirection: 'column',
+        }}>
+          {/* Tab bar */}
+          <div style={{
+            display: 'flex', alignItems: 'center',
+            borderBottom: posOpen ? `1px solid ${panelBdr}` : 'none',
+            flexShrink: 0, height: 38,
+          }}>
+            {(['open','history'] as const).map(tab => {
+              const count = tab === 'open' ? openPos.length : closedPos.length
+              return (
+                <button
+                  key={tab}
+                  onClick={() => { setPosTab(tab); setPosOpen(true) }}
+                  style={{
+                    padding: '0 16px', height: '100%', fontSize: 12, fontWeight: 600,
+                    background: 'transparent',
+                    borderBottom: posTab === tab && posOpen ? `2px solid ${accent}` : '2px solid transparent',
+                    border: 'none',
+                    color: posTab === tab && posOpen ? textMain : textDim,
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  <span style={{ textTransform: 'capitalize' }}>
+                    {tab === 'open' ? 'Open' : 'History'}
                   </span>
-                )}
-              </button>
-            )
-          })}
+                  {count > 0 && (
+                    <span style={{
+                      background: tab === 'open' ? accent : '#334155',
+                      color: '#fff', borderRadius: 10, padding: '1px 6px', fontSize: 10,
+                    }}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
 
-          {/* P&L summary */}
-          {(openPos.length + closed.length) > 0 && (
-            <div style={{ marginLeft: 'auto', fontSize: '0.65rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums', display: 'flex', alignItems: 'center', gap: '5px' }}>
-              Total P&amp;L:
-              <span style={{ fontWeight: 800, color: totalPL >= 0 ? '#22c55e' : '#ef4444' }}>
-                {totalPL >= 0 ? '+' : ''}{f2(totalPL)}
+            <div style={{ flex: 1 }} />
+
+            {posTab === 'history' && closedPos.length > 0 && (
+              <span style={{
+                fontSize: 12, fontWeight: 700, marginRight: 10,
+                color: totalPnl >= 0 ? '#4ade80' : '#f87171',
+              }}>
+                P&L: {totalPnl >= 0 ? '+' : ''}{f2(totalPnl)} {currency}
               </span>
+            )}
+
+            <button
+              onClick={() => setPosOpen(v => !v)}
+              style={{
+                padding: '0 12px', height: '100%', background: 'transparent',
+                border: 'none', color: textDim, cursor: 'pointer', fontSize: 14,
+              }}
+            >
+              {posOpen ? '▾' : '▴'}
+            </button>
+          </div>
+
+          {/* Table */}
+          {posOpen && (
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {(posTab === 'open' ? openPos : closedPos).length === 0 ? (
+                <div style={{ textAlign: 'center', color: textDim, fontSize: 12, paddingTop: 28 }}>
+                  No {posTab === 'open' ? 'open positions' : 'trade history'}
+                </div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ color: textDim, textAlign: 'left' }}>
+                      <th style={{ padding: '6px 14px', fontWeight: 500 }}>Contract</th>
+                      <th style={{ padding: '6px 8px',  fontWeight: 500 }}>Type</th>
+                      <th style={{ padding: '6px 8px',  fontWeight: 500 }}>Stake</th>
+                      <th style={{ padding: '6px 8px',  fontWeight: 500 }}>Payout</th>
+                      <th style={{ padding: '6px 8px',  fontWeight: 500 }}>P&L</th>
+                      <th style={{ padding: '6px 14px', fontWeight: 500 }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(posTab === 'open' ? openPos : closedPos).map(p => (
+                      <tr key={p.id} style={{ borderTop: `1px solid ${panelBdr}` }}>
+                        <td style={{ padding: '6px 14px', color: textMain }}>#{p.id}</td>
+                        <td style={{ padding: '6px 8px' }}>
+                          <span style={{
+                            padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                            background: p.side === 'A' ? p.cA + '22' : p.cB + '22',
+                            color: p.side === 'A' ? p.cA : p.cB,
+                          }}>
+                            {p.side === 'A' ? p.lA : p.lB}
+                            {p.barrier ? ` ${p.barrier}` : ''}
+                          </span>
+                        </td>
+                        <td style={{ padding: '6px 8px', color: textMid }}>{f2(p.stake)}</td>
+                        <td style={{ padding: '6px 8px', color: textMid }}>{f2(p.payout)}</td>
+                        <td style={{ padding: '6px 8px', fontWeight: 600, color: p.profit >= 0 ? '#4ade80' : '#f87171' }}>
+                          {p.profit >= 0 ? '+' : ''}{f2(p.profit)}
+                        </td>
+                        <td style={{ padding: '6px 14px' }}>
+                          <span style={{
+                            padding: '2px 7px', borderRadius: 10, fontSize: 10, fontWeight: 700,
+                            background:
+                              p.status === 'open'  ? '#1e3a5f' :
+                              p.status === 'won'   ? '#14532d' :
+                              p.status === 'lost'  ? '#450a0a' : '#1e293b',
+                            color:
+                              p.status === 'open'  ? '#60a5fa' :
+                              p.status === 'won'   ? '#4ade80' :
+                              p.status === 'lost'  ? '#f87171' : textDim,
+                          }}>
+                            {p.status.toUpperCase()}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
         </div>
-
-        {/* Table */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {posTabs === 'open' && openPos.length === 0 && (
-            <div style={{ padding: '28px', textAlign: 'center', color: 'rgba(229,229,229,0.15)', fontSize: '0.72rem' }}>No open positions</div>
-          )}
-          {posTabs === 'history' && closed.length === 0 && (
-            <div style={{ padding: '28px', textAlign: 'center', color: 'rgba(229,229,229,0.15)', fontSize: '0.72rem' }}>No trade history</div>
-          )}
-          {(posTabs === 'open' ? openPos : closed).length > 0 && (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.72rem' }}>
-              <thead>
-                <tr style={{ background: 'rgba(255,255,255,0.02)', position: 'sticky', top: 0 }}>
-                  {['Contract','Type','Stake','Payout','P&L','Status'].map(h => (
-                    <th key={h} style={{ padding: '6px 14px', textAlign: 'left', fontWeight: 600, color: 'rgba(229,229,229,0.3)', fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {(posTabs === 'open' ? openPos : closed).map(p => {
-                  const label  = p.side === 'A' ? p.lA : p.lB
-                  const color  = p.side === 'A' ? p.cA : p.cB
-                  const status = p.status
-                  const sColor = status === 'won' ? '#22c55e' : status === 'lost' ? '#ef4444' : status === 'open' ? '#f59e0b' : 'rgba(229,229,229,0.4)'
-                  return (
-                    <tr key={p.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}
-                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.02)')}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.4)', fontSize: '0.62rem' }}>#{p.id}</td>
-                      <td style={{ padding: '7px 14px' }}>
-                        <span style={{ fontWeight: 700, color }}>
-                          {label}{p.barrier ? ` ${p.barrier}` : ''}
-                        </span>
-                        <span style={{ marginLeft: '5px', fontSize: '0.58rem', color: 'rgba(229,229,229,0.3)' }}>{p.ttId}</span>
-                      </td>
-                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums' }}>{f2(p.stake)}</td>
-                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', color: '#22c55e' }}>{f2(p.payout)}</td>
-                      <td style={{ padding: '7px 14px', fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: p.profit >= 0 ? '#22c55e' : '#ef4444' }}>
-                        {p.profit >= 0 ? '+' : ''}{f2(p.profit)}
-                      </td>
-                      <td style={{ padding: '7px 14px' }}>
-                        <span style={{ color: sColor, fontWeight: 600, textTransform: 'capitalize', fontSize: '0.65rem' }}>{status}</span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
       </div>
-
-      <style>{`
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
-        input[type=number]::-webkit-inner-spin-button,
-        input[type=number]::-webkit-outer-spin-button { opacity: 0.35 }
-        input::placeholder { color: rgba(229,229,229,0.18) }
-        button:hover:not(:disabled) { filter: brightness(1.1) }
-        ::-webkit-scrollbar { width: 3px; height: 3px }
-        ::-webkit-scrollbar-track { background: transparent }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 2px }
-      `}</style>
     </div>
   )
 }
