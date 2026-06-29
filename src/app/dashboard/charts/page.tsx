@@ -90,35 +90,52 @@ const sma = (arr: number[], n: number) =>
 // ─── Digit frequency bar ─────────────────────────────────────────────────────
 function DigitBar({ freqs, last }: { freqs: number[]; last: number | null }) {
   const total = freqs.reduce((a, b) => a + b, 0)
-  const COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981']
+  const COLORS = ['#9ca3af','#22c55e','#ef4444','#f97316','#eab308','#3b82f6','#a78bfa','#ec4899','#14b8a6','#60a5fa']
+  const SZ = 58, CX = 29, CY = 27, R = 21, SW = 3.5
+
+  function arc(pct: number) {
+    // bottom-half semicircle gauge: left point → clockwise through bottom → right point
+    const startX = CX - R, endX = CX + R, Y = CY
+    if (pct <= 0) return ''
+    if (pct >= 99.9) return `M ${startX} ${Y} A ${R} ${R} 0 0 1 ${endX} ${Y}`
+    const angle = (180 + pct * 1.8) * (Math.PI / 180)
+    const x = (CX + R * Math.cos(angle)).toFixed(2)
+    const y = (CY + R * Math.sin(angle)).toFixed(2)
+    return `M ${startX} ${Y} A ${R} ${R} 0 0 1 ${x} ${y}`
+  }
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '6px 16px 2px', height: '100%' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px', padding: '0 10px' }}>
       {[0,1,2,3,4,5,6,7,8,9].map(d => {
         const pct = total > 0 ? (freqs[d] / total) * 100 : 0
         const isLast = d === last
-        const color = COLORS[d]
-        const size = 52
-        const r = 20, stroke = 3
-        const circ = 2 * Math.PI * r
-        const dash = (pct / 100) * circ
+        const col = COLORS[d]
         return (
-          <div key={d} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px', position: 'relative' }}>
-            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: 'rotate(-90deg)' }}>
-              <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={stroke} />
-              <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
-                strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"
-                style={{ transition: 'stroke-dasharray 0.4s ease' }} />
-            </svg>
-            <div style={{
-              position: 'absolute', top: 0, left: 0, width: size, height: size,
-              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            }}>
-              <span style={{ fontSize: '0.75rem', fontWeight: 700, color: isLast ? color : 'rgba(229,229,229,0.85)', lineHeight: 1 }}>{d}</span>
-              <span style={{ fontSize: '0.5rem', color: 'rgba(229,229,229,0.45)', lineHeight: 1.2, fontVariantNumeric: 'tabular-nums' }}>{total > 0 ? pct.toFixed(1)+'%' : '—'}</span>
+          <div key={d} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <div style={{ width: SZ, height: SZ, borderRadius: '50%', position: 'relative',
+              background: 'rgba(6,14,28,0.88)', border: `1.5px solid ${isLast ? col : 'rgba(255,255,255,0.12)'}`,
+              boxShadow: isLast ? `0 0 8px ${col}55` : 'none' }}>
+              <svg width={SZ} height={SZ} viewBox={`0 0 ${SZ} ${SZ}`} style={{ position: 'absolute', inset: 0 }}>
+                <path d={`M ${CX-R} ${CY} A ${R} ${R} 0 0 1 ${CX+R} ${CY}`}
+                  fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth={SW} strokeLinecap="round" />
+                {pct > 0 && <path d={arc(pct)} fill="none" stroke={col} strokeWidth={SW} strokeLinecap="round"
+                  style={{ transition: 'all 0.35s ease' }} />}
+              </svg>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', paddingBottom: '2px' }}>
+                <span style={{ fontSize: '0.78rem', fontWeight: 800, lineHeight: 1,
+                  color: isLast ? col : 'rgba(229,229,229,0.85)' }}>{d}</span>
+                <span style={{ fontSize: '0.47rem', lineHeight: 1.3, fontVariantNumeric: 'tabular-nums',
+                  color: isLast ? col : 'rgba(229,229,229,0.4)' }}>
+                  {total > 0 ? pct.toFixed(1)+'%' : '0%'}
+                </span>
+              </div>
             </div>
-            {isLast && (
-              <div style={{ width: 0, height: 0, borderLeft: '5px solid transparent', borderRight: '5px solid transparent', borderTop: `6px solid ${color}`, marginTop: '-2px' }} />
-            )}
+            <div style={{ height: '10px', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: '2px' }}>
+              {isLast && <div style={{ width: 0, height: 0,
+                borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
+                borderBottom: '7px solid #ef4444' }} />}
+            </div>
           </div>
         )
       })}
@@ -269,7 +286,7 @@ export default function ChartsPage() {
   }, [chartType, clearSeries, addMA])
 
   const appendTick = useCallback((epoch: number, p: number) => {
-    const t = (Date.now() / 1000) as UTCTimestamp
+    const t = epoch as UTCTimestamp
     if (isTickRef.current) {
       prices.current.push(p)
       times.current.push(t)
@@ -761,7 +778,7 @@ export default function ChartsPage() {
 
             {/* Digit frequency overlay — bottom of chart */}
             {digitFreq.some(v => v > 0) && (
-              <div style={{ position: 'absolute', bottom: '8px', left: 0, right: 0, zIndex: 10, pointerEvents: 'none' }}>
+              <div style={{ position: 'absolute', bottom: '28px', left: 0, right: 0, zIndex: 10, pointerEvents: 'none' }}>
                 <DigitBar freqs={digitFreq} last={lastDig} />
               </div>
             )}
