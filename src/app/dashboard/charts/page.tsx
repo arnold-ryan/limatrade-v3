@@ -1669,6 +1669,6 @@ export default function ChartsPage() {
       </div>
     )}
 
-    </div>{/* end outer flex column */}
+    </div>
   )
 }
