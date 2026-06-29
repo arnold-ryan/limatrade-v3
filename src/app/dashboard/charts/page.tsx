@@ -137,7 +137,7 @@ export default function ChartsPage() {
   const [mktQ,    setMktQ]    = useState('')
   const symbolRef = useRef(symbol)
   useEffect(() => { symbolRef.current = symbol }, [symbol])
-  const curSym = syms.find(s => s.symbol === symbol)
+  const curSym = syms.find(s => s.symbol === symbol) ?? FALLBACK_MARKETS.find(s => s.symbol === symbol)
   const dp     = curSym?.dp ?? 2
   const dpRef  = useRef(dp)
   useEffect(() => { dpRef.current = dp }, [dp])
@@ -269,7 +269,7 @@ export default function ChartsPage() {
   }, [chartType, clearSeries, addMA])
 
   const appendTick = useCallback((epoch: number, p: number) => {
-    const t = epoch as UTCTimestamp
+    const t = (Date.now() / 1000) as UTCTimestamp
     if (isTickRef.current) {
       prices.current.push(p)
       times.current.push(t)
@@ -277,6 +277,7 @@ export default function ChartsPage() {
       const pt = { time: t, value: p }
       areaR.current?.update(pt as AreaData)
       lineR.current?.update(pt as LineData)
+      chartRef.current?.timeScale().scrollToRealTime()
       if (maR.current && maOnRef.current) {
         const n = maPeriodRef.current
         if (prices.current.length >= n) {
@@ -758,6 +759,13 @@ export default function ChartsPage() {
           <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
             <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
 
+            {/* Digit frequency overlay — bottom of chart */}
+            {digitFreq.some(v => v > 0) && (
+              <div style={{ position: 'absolute', bottom: '8px', left: 0, right: 0, zIndex: 10, pointerEvents: 'none' }}>
+                <DigitBar freqs={digitFreq} last={lastDig} />
+              </div>
+            )}
+
             {/* Market drawer — slides over chart */}
             {mktOpen && (
               <>
@@ -948,11 +956,6 @@ export default function ChartsPage() {
             </span>
           </div>
         </div>
-      </div>
-
-      {/* ── DIGIT FREQUENCY BAR ──────────────────────────────────────────────── */}
-      <div style={{ height: '72px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.05)', background: '#060e1c' }}>
-        <DigitBar freqs={digitFreq} last={lastDig} />
       </div>
 
       {/* ── BOTTOM: POSITIONS / HISTORY ────────────────────────────────────────── */}
