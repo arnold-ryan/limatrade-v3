@@ -95,7 +95,7 @@ export default function TradePanel() {
           currency: 'USD',
           duration: DURATION,
           duration_unit: DUR_UNIT,
-          underlying_symbol: SYMBOL,
+          symbol: SYMBOL,
         }))
         ws.send(JSON.stringify({
           proposal: 1, subscribe: 1, req_id: 2,
@@ -105,7 +105,7 @@ export default function TradePanel() {
           currency: 'USD',
           duration: DURATION,
           duration_unit: DUR_UNIT,
-          underlying_symbol: SYMBOL,
+          symbol: SYMBOL,
         }))
       }
 

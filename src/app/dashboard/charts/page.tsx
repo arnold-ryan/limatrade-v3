@@ -386,7 +386,8 @@ export default function ChartsPage() {
      Effect 1: Fetch active_symbols on mount (one-time WS)
   ─────────────────────────────────────────────────────────────────────────── */
   useEffect(() => {
-    const ws = new WebSocket(PUBLIC_WS_URL)
+    // active_symbols is a legacy JSON-RPC call — must use the legacy WS endpoint
+    const ws = new WebSocket('wss://ws.binaryws.com/websockets/v3?app_id=1089')
     ws.onopen = () => ws.send(JSON.stringify({ active_symbols: 'brief', req_id: 1 }))
     ws.onmessage = (ev) => {
       let msg: Record<string, unknown>
@@ -644,9 +645,9 @@ export default function ChartsPage() {
   const resubscribeProposals = useCallback((ws: WebSocket) => {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
-    // Clear proposals so the buy button disables immediately while we wait for fresh UUIDs.
-    // The Deriv API cancels the proposal subscription the moment it is used to buy a contract,
-    // so the old ID is dead and must not be reused.
+    // Clear refs immediately so doBuy cannot read a stale proposal ID before
+    // the next React render clears propA/propB state (refs are synced on render).
+    propARef.current = null; propBRef.current = null
     setPropA(null); setPropB(null)
 
     const tt      = TRADE_TYPES[tradeTypeIdxRef.current]
@@ -655,7 +656,7 @@ export default function ChartsPage() {
     const curr    = currencyRef.current
     const amount  = parseFloat(stakeRef.current) || 1
     const barrier = tt.hasDigit ? String(digitRef.current) : undefined
-    const base    = { proposal: 1, subscribe: 1, basis: 'stake', amount, currency: curr, underlying_symbol: sym, duration: dur, duration_unit: 't' }
+    const base    = { proposal: 1, subscribe: 1, basis: 'stake', amount, currency: curr, symbol: sym, duration: dur, duration_unit: 't' }
 
     ws.send(JSON.stringify({ ...base, contract_type: tt.ctA, ...(barrier ? { barrier } : {}), req_id: 10 }))
     ws.send(JSON.stringify({ ...base, contract_type: tt.ctB, ...(barrier ? { barrier } : {}), req_id: 11 }))
@@ -1112,7 +1113,7 @@ export default function ChartsPage() {
         {/* TF + chart type button */}
         <div style={{ position: 'relative', width: '100%' }}>
           <button
-            onClick={() => { setShowChartMenu(v => !v); setShowMkt(false); setShowIndicators(false); setShowDrawingPanel(false) }}
+            onClick={() => { setShowChartMenu(v => !v); setShowMkt(false) }}
             style={{
               ...toolbarBtn, width: '100%',
               color:      showChartMenu ? '#FCA311' : 'rgba(200,215,235,0.55)',
@@ -1130,7 +1131,7 @@ export default function ChartsPage() {
           {/* TF + chart type dropdown */}
           {showChartMenu && (
             <div style={{
-              position: 'absolute', top: '48px', left: '48px',
+              position: 'absolute', top: '78px', left: '48px',
               background: '#0a1628', border: '1px solid rgba(255,255,255,0.1)',
               borderRadius: '10px', padding: '14px', width: '200px',
               boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 20,
@@ -1187,7 +1188,7 @@ export default function ChartsPage() {
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
         <button
-          onClick={() => { setShowIndicators(v => !v); setShowDrawingPanel(false); setShowChartMenu(false) }}
+          onClick={() => { setShowIndicators(v => !v); setShowDrawingPanel(false) }}
           style={{
             ...toolbarBtn,
             color:      showIndicators ? '#3b82f6' : 'rgba(200,215,235,0.55)',
@@ -1200,7 +1201,7 @@ export default function ChartsPage() {
         </button>
 
         <button
-          onClick={() => { setShowDrawingPanel(v => !v); setShowIndicators(false); setShowChartMenu(false) }}
+          onClick={() => { setShowDrawingPanel(v => !v); setShowIndicators(false) }}
           style={{
             ...toolbarBtn,
             color:      showDrawingPanel ? '#a855f7' : 'rgba(200,215,235,0.55)',
