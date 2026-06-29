@@ -656,7 +656,7 @@ export default function ChartsPage() {
     const curr    = currencyRef.current
     const amount  = parseFloat(stakeRef.current) || 1
     const barrier = tt.hasDigit ? String(digitRef.current) : undefined
-    const base    = { proposal: 1, subscribe: 1, basis: 'stake', amount, currency: curr, symbol: sym, duration: dur, duration_unit: 't' }
+    const base    = { proposal: 1, subscribe: 1, basis: 'stake', amount, currency: curr, underlying_symbol: sym, duration: dur, duration_unit: 't' }
 
     ws.send(JSON.stringify({ ...base, contract_type: tt.ctA, ...(barrier ? { barrier } : {}), req_id: 10 }))
     ws.send(JSON.stringify({ ...base, contract_type: tt.ctB, ...(barrier ? { barrier } : {}), req_id: 11 }))
