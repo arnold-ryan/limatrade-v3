@@ -87,6 +87,40 @@ interface Proposal {
   payout:    number
   error?:    string
 }
+interface Position {
+  contractId:   number
+  contractType: string   // 'DIGITOVER' | 'DIGITUNDER' | 'DIGITMATCH' | etc.
+  underlying:   string
+  buyPrice:     number
+  payout:       number
+  barrier?:     string
+  duration:     number
+  openTime:     number   // epoch seconds
+  status:       'open' | 'won' | 'lost' | 'sold'
+  bidPrice:     number   // live current value
+  profit:       number   // live profit/loss
+  closeTime?:   number
+  exitSpot?:    number
+}
+
+/** Human-readable contract type label */
+function ctLabel(ct: string, barrier?: string): string {
+  const m: Record<string, string> = {
+    DIGITOVER: 'Over', DIGITUNDER: 'Under',
+    DIGITMATCH: 'Match', DIGITDIFF: 'Differ',
+    DIGITEVEN: 'Even', DIGITODD: 'Odd',
+    CALL: 'Rise', PUT: 'Fall',
+  }
+  const base = m[ct] ?? ct
+  return barrier != null ? `${base} ${barrier}` : base
+}
+
+/** Color for contract type side */
+function ctColor(ct: string): string {
+  if (['DIGITOVER', 'CALL', 'DIGITEVEN', 'DIGITMATCH'].includes(ct)) return '#22c55e'
+  if (['DIGITUNDER', 'PUT', 'DIGITODD', 'DIGITDIFF'].includes(ct)) return '#3b82f6'
+  return '#FCA311'
+}
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 function formatSubmarket(sub: string): string {
@@ -255,6 +289,12 @@ export default function ChartsPage() {
   const [autoOn,       setAutoOn]       = useState(false)
   const [sigFilter,    setSigFilter]    = useState<string>('All') // 'All' | 'O1'…'U8'
 
+  /* ── Positions panel state ── */
+  const [openPos,      setOpenPos]      = useState<Position[]>([])
+  const [closedPos,    setClosedPos]    = useState<Position[]>([])
+  const [showPos,      setShowPos]      = useState(false)
+  const [posTab,       setPosTab]       = useState<'open' | 'closed'>('open')
+
   /* ── Refs (chart) ── */
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef          = useRef<IChartApi | null>(null)
@@ -265,7 +305,7 @@ export default function ChartsPage() {
   /* ── Refs (auth WS) ── */
   const botWsRef          = useRef<WebSocket | null>(null)
   const reqIdRef          = useRef(500)
-  const buyReqMap         = useRef<Map<number, 'A' | 'B'>>(new Map())
+  const buyReqMap         = useRef<Map<number, { side: 'A'|'B'; contractType: string; underlying: string; barrier?: string; duration: number }>>(new Map())
   const reconnectCount    = useRef(0)
   const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const intentionalClose  = useRef(false)
@@ -627,8 +667,7 @@ export default function ChartsPage() {
           const rid = msg.req_id as number
           if (rid === 10) setPropA({ id: '', ask_price: 0, payout: 0, error: err.message })
           if (rid === 11) setPropB({ id: '', ask_price: 0, payout: 0, error: err.message })
-          const buyKey = buyReqMap.current.get(rid)
-          if (buyKey) { buyReqMap.current.delete(rid); setBuying(null) }
+          if (buyReqMap.current.has(rid)) { buyReqMap.current.delete(rid); setBuying(null) }
           return
         }
 
@@ -645,11 +684,90 @@ export default function ChartsPage() {
         }
 
         if (msg.msg_type === 'buy') {
-          const rid = msg.req_id as number
-          const key = buyReqMap.current.get(rid)
-          if (key) { buyReqMap.current.delete(rid); setBuying(null) }
-          // Refresh proposals after purchase
+          const rid  = msg.req_id as number
+          const meta = buyReqMap.current.get(rid)
+          if (meta) {
+            buyReqMap.current.delete(rid)
+            setBuying(null)
+            type BuyResp = { contract_id: number; buy_price: number; payout: number; start_time: number }
+            const b = (msg as { buy: BuyResp }).buy
+            const pos: Position = {
+              contractId:   b.contract_id,
+              contractType: meta.contractType,
+              underlying:   meta.underlying,
+              buyPrice:     b.buy_price,
+              payout:       b.payout,
+              barrier:      meta.barrier,
+              duration:     meta.duration,
+              openTime:     b.start_time,
+              status:       'open',
+              bidPrice:     b.buy_price,
+              profit:       0,
+            }
+            setOpenPos(prev => [pos, ...prev])
+            setShowPos(true)  // auto-open panel on first trade
+            // Subscribe to live contract updates on the auth WS
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: b.contract_id, subscribe: 1, req_id: 999 }))
+            }
+          }
           setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) resubscribeProposals(ws!) }, 300)
+        }
+
+        // Live contract updates — moves position from open→closed when settled
+        if (msg.msg_type === 'proposal_open_contract') {
+          type POC = {
+            contract_id:  number
+            status:       string
+            bid_price?:   number
+            profit?:      number
+            date_settlement?: number
+            exit_tick?:   number
+          }
+          const poc = (msg as { proposal_open_contract: POC }).proposal_open_contract
+          const cid = poc.contract_id
+          const st  = poc.status as Position['status']
+
+          if (st !== 'open') {
+            // Contract settled — move from open → closed
+            setOpenPos(prev => prev.filter(p => p.contractId !== cid))
+            setClosedPos(prev => {
+              const closed: Position = {
+                contractId:   cid,
+                contractType: '',  // will be filled below by finding in prev open list
+                underlying:   '',
+                buyPrice:     0,
+                payout:       0,
+                duration:     0,
+                openTime:     0,
+                status:       st,
+                bidPrice:     poc.bid_price ?? 0,
+                profit:       poc.profit ?? 0,
+                closeTime:    poc.date_settlement,
+                exitSpot:     poc.exit_tick,
+              }
+              return [closed, ...prev].slice(0, 100)
+            })
+            // Patch the closed position with data from openPos
+            setOpenPos(prev => {
+              const found = prev.find(p => p.contractId === cid)
+              if (found) {
+                setClosedPos(cp => cp.map(c =>
+                  c.contractId === cid
+                    ? { ...found, status: st, bidPrice: poc.bid_price ?? found.bidPrice, profit: poc.profit ?? found.profit, closeTime: poc.date_settlement, exitSpot: poc.exit_tick }
+                    : c
+                ))
+              }
+              return prev.filter(p => p.contractId !== cid)
+            })
+          } else {
+            // Still open — update bid price and profit
+            setOpenPos(prev => prev.map(p =>
+              p.contractId === cid
+                ? { ...p, bidPrice: poc.bid_price ?? p.bidPrice, profit: poc.profit ?? p.profit }
+                : p
+            ))
+          }
         }
       }
 
@@ -713,7 +831,14 @@ export default function ChartsPage() {
     if (!prop?.id || prop.error) return
     setBuying(isA ? 'A' : 'B')
     const rid = ++reqIdRef.current
-    buyReqMap.current.set(rid, isA ? 'A' : 'B')
+    const tt  = TRADE_TYPES[tradeTypeIdxRef.current]
+    buyReqMap.current.set(rid, {
+      side:         isA ? 'A' : 'B',
+      contractType: isA ? tt.ctA : tt.ctB,
+      underlying:   symbolRef.current,
+      barrier:      tt.hasDigit ? String(digitRef.current) : undefined,
+      duration:     durationRef.current,
+    })
     ws.send(JSON.stringify({ buy: prop.id, price: parseFloat((prop.ask_price * 1.02).toFixed(2)), req_id: rid }))
   }, [buying])
 
@@ -753,7 +878,9 @@ export default function ChartsPage() {
 
   /* ─── Render ─────────────────────────────────────────────────────────── */
   return (
-    <div style={{ background: '#060d18', height: '100%', display: 'flex', overflow: 'hidden', position: 'relative' }}>
+    <div style={{ background: '#060d18', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    {/* ── Main row: toolbar + chart + trading panel ── */}
+    <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative', minHeight: 0 }}>
 
       {/* ══ LEFT TOOLBAR (sc-toolbar-widget) ══ */}
       <div style={{
@@ -1364,6 +1491,9 @@ export default function ChartsPage() {
       <style>{`
         @keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:0.4} }
         @keyframes pricePulse { 0%{opacity:0.5} 100%{opacity:1} }
+        @keyframes slideUp    { from{transform:translateY(100%)} to{transform:translateY(0)} }
+        @keyframes winFlash   { 0%{background:rgba(34,197,94,0.2)} 100%{background:transparent} }
+        @keyframes lossFlash  { 0%{background:rgba(239,68,68,0.2)} 100%{background:transparent} }
         input::placeholder    { color: rgba(229,229,229,0.25); }
         button:hover          { filter: brightness(1.15); }
         ::-webkit-scrollbar       { width: 4px; }
@@ -1371,6 +1501,174 @@ export default function ChartsPage() {
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
       `}</style>
+    </div>{/* end main row */}
+
+    {/* ══ POSITIONS PANEL (bottom drawer) ══════════════════════════════════ */}
+
+    {/* Toggle bar — always visible */}
+    <div
+      onClick={() => setShowPos(v => !v)}
+      style={{
+        flexShrink: 0, height: '34px',
+        background: '#07101f',
+        borderTop: '1px solid rgba(255,255,255,0.07)',
+        display: 'flex', alignItems: 'center', gap: '12px',
+        padding: '0 14px', cursor: 'pointer', userSelect: 'none',
+      }}
+    >
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style={{ flexShrink: 0, color: 'rgba(229,229,229,0.4)', transform: showPos ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+        <path d="M3 5L7 9L11 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+
+      <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'rgba(229,229,229,0.55)', letterSpacing: '0.04em' }}>
+        Positions
+      </span>
+
+      {openPos.length > 0 && (
+        <span style={{
+          background: 'rgba(252,163,17,0.85)', color: '#000',
+          borderRadius: '9px', fontSize: '0.55rem', fontWeight: 800,
+          padding: '1px 6px', lineHeight: '16px',
+        }}>
+          {openPos.length} open
+        </span>
+      )}
+
+      {closedPos.length > 0 && (
+        <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.25)', marginLeft: '4px' }}>
+          {closedPos.filter(p => p.status === 'won').length}W / {closedPos.filter(p => p.status === 'lost').length}L
+        </span>
+      )}
+
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: '14px' }}>
+        {/* Aggregate P&L */}
+        {(openPos.length + closedPos.length) > 0 && (() => {
+          const totalPL = [...openPos, ...closedPos].reduce((s, p) => s + p.profit, 0)
+          return (
+            <span style={{ fontSize: '0.68rem', fontWeight: 700, color: totalPL >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
+              {totalPL >= 0 ? '+' : ''}{fmt2(totalPL)}
+            </span>
+          )
+        })()}
+      </div>
     </div>
+
+    {/* Expandable positions list */}
+    {showPos && (
+      <div style={{
+        flexShrink: 0, height: '220px',
+        background: '#07101f',
+        borderTop: '1px solid rgba(255,255,255,0.05)',
+        display: 'flex', flexDirection: 'column',
+        animation: 'slideUp 0.18s ease',
+      }}>
+        {/* Tabs: Open / Closed */}
+        <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }}>
+          {(['open', 'closed'] as const).map(tab => (
+            <button key={tab}
+              onClick={e => { e.stopPropagation(); setPosTab(tab) }}
+              style={{
+                padding: '8px 16px', background: 'transparent', border: 'none', cursor: 'pointer',
+                color:       posTab === tab ? '#FCA311' : 'rgba(229,229,229,0.38)',
+                borderBottom: posTab === tab ? '2px solid #FCA311' : '2px solid transparent',
+                fontSize: '0.68rem', fontWeight: 700, textTransform: 'capitalize',
+                outline: 'none',
+              }}
+            >
+              {tab === 'open' ? `Open (${openPos.length})` : `Closed (${closedPos.length})`}
+            </button>
+          ))}
+        </div>
+
+        {/* List */}
+        <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+          {posTab === 'open' && openPos.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: 'rgba(229,229,229,0.18)', fontSize: '0.75rem' }}>
+              You have no open positions.
+            </div>
+          )}
+          {posTab === 'closed' && closedPos.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: 'rgba(229,229,229,0.18)', fontSize: '0.75rem' }}>
+              No closed positions yet.
+            </div>
+          )}
+
+          {(posTab === 'open' ? openPos : closedPos).map(pos => {
+            const isWon  = pos.status === 'won'
+            const isLost = pos.status === 'lost'
+            const plColor = pos.profit > 0 ? '#22c55e' : pos.profit < 0 ? '#ef4444' : 'rgba(229,229,229,0.4)'
+            const label = ctLabel(pos.contractType, pos.barrier)
+            const color = ctColor(pos.contractType)
+            const ts = pos.status === 'open' ? pos.openTime : (pos.closeTime ?? pos.openTime)
+            const timeStr = ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''
+
+            return (
+              <div key={pos.contractId} style={{
+                display: 'grid',
+                gridTemplateColumns: '28px 1fr auto auto auto auto',
+                alignItems: 'center', gap: '0 10px',
+                padding: '8px 14px',
+                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                animation: isWon ? 'winFlash 1.2s ease' : isLost ? 'lossFlash 1.2s ease' : 'none',
+              }}>
+                {/* Status indicator */}
+                <div style={{
+                  width: '28px', height: '28px', borderRadius: '50%', flexShrink: 0,
+                  background: pos.status === 'open' ? 'rgba(252,163,17,0.12)'
+                    : isWon ? 'rgba(34,197,94,0.12)' : isLost ? 'rgba(239,68,68,0.12)' : 'rgba(255,255,255,0.05)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.7rem',
+                }}>
+                  {pos.status === 'open' ? '⟳' : isWon ? '✓' : isLost ? '✕' : '~'}
+                </div>
+
+                {/* Symbol + label */}
+                <div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'rgba(229,229,229,0.85)' }}>
+                    {pos.underlying || symbol}
+                  </div>
+                  <div style={{ fontSize: '0.6rem', color, fontWeight: 600, marginTop: '1px' }}>
+                    {label} · {pos.duration}t
+                  </div>
+                </div>
+
+                {/* Time */}
+                <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.28)', textAlign: 'right' }}>
+                  {timeStr}
+                </div>
+
+                {/* Buy price */}
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.28)' }}>Stake</div>
+                  <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'rgba(229,229,229,0.65)', fontVariantNumeric: 'tabular-nums' }}>
+                    {fmt2(pos.buyPrice)}
+                  </div>
+                </div>
+
+                {/* Payout */}
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.28)' }}>Payout</div>
+                  <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+                    {fmt2(pos.payout)}
+                  </div>
+                </div>
+
+                {/* P&L */}
+                <div style={{ textAlign: 'right', minWidth: '60px' }}>
+                  <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.28)' }}>
+                    {pos.status === 'open' ? 'Current' : 'P&L'}
+                  </div>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 800, color: plColor, fontVariantNumeric: 'tabular-nums' }}>
+                    {pos.profit >= 0 ? '+' : ''}{fmt2(pos.profit)}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )}
+
+    </div>{/* end outer flex column */}
   )
 }
