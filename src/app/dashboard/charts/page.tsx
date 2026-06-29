@@ -137,6 +137,14 @@ function formatSubmarket(sub: string): string {
 
 function fmt(p: number, d: number) { return p.toFixed(d) }
 function fmt2(n: number) { return n.toFixed(2) }
+function computeMA(data: { time: number; value: number }[], period: number): { time: UTCTimestamp; value: number }[] {
+  const result: { time: UTCTimestamp; value: number }[] = []
+  for (let i = period - 1; i < data.length; i++) {
+    let sum = 0; for (let j = i - period + 1; j <= i; j++) sum += data[j].value
+    result.push({ time: data[i].time as UTCTimestamp, value: sum / period })
+  }
+  return result
+}
 
 /** Compute last-digit frequency counts from an array of prices. */
 function computeDigitCounts(prices: number[], pip: number): number[] {
@@ -295,10 +303,20 @@ export default function ChartsPage() {
   const [showPos,      setShowPos]      = useState(true)
   const [posTab,       setPosTab]       = useState<'open' | 'closed'>('open')
 
+  /* ── Toolbar panel state ── */
+  const [showIndicators,   setShowIndicators]   = useState(false)
+  const [showDrawingPanel, setShowDrawingPanel] = useState(false)
+  const [maOn,     setMaOn]     = useState(false)
+  const [maPeriod, setMaPeriod] = useState(20)
+  const maOnRef     = useRef(false)
+  const maPeriodRef = useRef(20)
+
   /* ── Refs (chart) ── */
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef          = useRef<IChartApi | null>(null)
   const seriesRef         = useRef<ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null)
+  const maSeriesRef       = useRef<ISeriesApi<'Line'> | null>(null)
+  const chartTicksRef     = useRef<{ time: number; value: number }[]>([])
   const prevPriceRef      = useRef<number | null>(null)
   const firstPriceRef     = useRef<number | null>(null)
 
@@ -306,6 +324,8 @@ export default function ChartsPage() {
   const botWsRef          = useRef<WebSocket | null>(null)
   const reqIdRef          = useRef(500)
   const buyReqMap         = useRef<Map<number, { side: 'A'|'B'; contractType: string; underlying: string; barrier?: string; duration: number }>>(new Map())
+  /** Mirror of openPos keyed by contractId — lets POC handler look up full position without nested setState */
+  const posMapRef         = useRef<Map<number, Position>>(new Map())
   const reconnectCount    = useRef(0)
   const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const intentionalClose  = useRef(false)
@@ -329,6 +349,8 @@ export default function ChartsPage() {
   currencyRef.current     = currency
   propARef.current        = propA
   propBRef.current        = propB
+  maOnRef.current         = maOn
+  maPeriodRef.current     = maPeriod
 
   /* ── Derived ── */
   const tf           = TIMEFRAMES[tfIdx]
@@ -496,6 +518,11 @@ export default function ChartsPage() {
           if (!seen.has(times[i])) { seen.add(times[i]); data.push({ time: times[i] as UTCTimestamp, value: prices[i] }) }
         }
         try { (seriesRef.current as ISeriesApi<'Area'>)?.setData(data) } catch { /**/ }
+        // Store for MA computation
+        chartTicksRef.current = data.map(d => ({ time: Number(d.time), value: d.value }))
+        if (maOnRef.current && maSeriesRef.current) {
+          try { maSeriesRef.current.setData(computeMA(chartTicksRef.current, maPeriodRef.current)) } catch { /**/ }
+        }
         if (prices.length > 0) {
           const last = prices[prices.length - 1]
           firstPriceRef.current = prices[0]; prevPriceRef.current = last
@@ -512,6 +539,20 @@ export default function ChartsPage() {
         prevPriceRef.current = q; setLivePrice(q)
         if (firstPriceRef.current != null) setPriceChange(q - firstPriceRef.current)
         try { (seriesRef.current as ISeriesApi<'Area'>)?.update({ time: e as UTCTimestamp, value: q }) } catch { /**/ }
+        // Update MA
+        const ticks = chartTicksRef.current
+        const newTick = { time: e, value: q }
+        const last = ticks[ticks.length - 1]
+        const updated = last?.time === e ? [...ticks.slice(0, -1), newTick] : [...ticks.slice(-999), newTick]
+        chartTicksRef.current = updated
+        if (maOnRef.current && maSeriesRef.current) {
+          const p = maPeriodRef.current
+          if (updated.length >= p) {
+            const slice = updated.slice(-p)
+            const avg = slice.reduce((s, d) => s + d.value, 0) / p
+            try { maSeriesRef.current.update({ time: e as UTCTimestamp, value: avg }) } catch { /**/ }
+          }
+        }
       }
 
       // Initial candle batch → msg_type:'candles'
@@ -704,6 +745,7 @@ export default function ChartsPage() {
               bidPrice:     b.buy_price,
               profit:       0,
             }
+            posMapRef.current.set(b.contract_id, pos)
             setOpenPos(prev => [pos, ...prev])
             setShowPos(true)  // auto-open panel on first trade
             // Subscribe to live contract updates on the auth WS
@@ -729,37 +771,14 @@ export default function ChartsPage() {
           const st  = poc.status as Position['status']
 
           if (st !== 'open') {
-            // Contract settled — move from open → closed
+            // Contract settled — look up original data from posMapRef (avoids nested setState)
+            const original = posMapRef.current.get(cid)
+            posMapRef.current.delete(cid)
+            const closed: Position = original
+              ? { ...original, status: st, bidPrice: poc.bid_price ?? original.bidPrice, profit: poc.profit ?? original.profit, closeTime: poc.date_settlement, exitSpot: poc.exit_tick }
+              : { contractId: cid, contractType: '', underlying: '', buyPrice: 0, payout: 0, duration: 0, openTime: 0, status: st, bidPrice: poc.bid_price ?? 0, profit: poc.profit ?? 0, closeTime: poc.date_settlement, exitSpot: poc.exit_tick }
             setOpenPos(prev => prev.filter(p => p.contractId !== cid))
-            setClosedPos(prev => {
-              const closed: Position = {
-                contractId:   cid,
-                contractType: '',  // will be filled below by finding in prev open list
-                underlying:   '',
-                buyPrice:     0,
-                payout:       0,
-                duration:     0,
-                openTime:     0,
-                status:       st,
-                bidPrice:     poc.bid_price ?? 0,
-                profit:       poc.profit ?? 0,
-                closeTime:    poc.date_settlement,
-                exitSpot:     poc.exit_tick,
-              }
-              return [closed, ...prev].slice(0, 100)
-            })
-            // Patch the closed position with data from openPos
-            setOpenPos(prev => {
-              const found = prev.find(p => p.contractId === cid)
-              if (found) {
-                setClosedPos(cp => cp.map(c =>
-                  c.contractId === cid
-                    ? { ...found, status: st, bidPrice: poc.bid_price ?? found.bidPrice, profit: poc.profit ?? found.profit, closeTime: poc.date_settlement, exitSpot: poc.exit_tick }
-                    : c
-                ))
-              }
-              return prev.filter(p => p.contractId !== cid)
-            })
+            setClosedPos(prev => [closed, ...prev].slice(0, 100))
           } else {
             // Still open — update bid price and profit
             setOpenPos(prev => prev.map(p =>
@@ -822,6 +841,41 @@ export default function ChartsPage() {
     setDigit(bestSignal.barrier)
     setSideA(bestSignal.side === 'over')
   }, [autoOn, bestSignal, currentTT.id])
+
+  /* ── MA indicator effect ── */
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    if (maOn) {
+      if (!maSeriesRef.current) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        maSeriesRef.current = chart.addLineSeries({
+          color: '#3b82f6', lineWidth: 2 as any,
+          priceLineVisible: false, lastValueVisible: true,
+          title: `MA(${maPeriod})`,
+        })
+      } else {
+        maSeriesRef.current.applyOptions({ title: `MA(${maPeriod})` })
+      }
+      try { maSeriesRef.current.setData(computeMA(chartTicksRef.current, maPeriod)) } catch { /**/ }
+    } else {
+      if (maSeriesRef.current) {
+        try { chart.removeSeries(maSeriesRef.current) } catch { /**/ }
+        maSeriesRef.current = null
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maOn, maPeriod])
+
+  /* ── Download chart ── */
+  function downloadChart() {
+    const canvas = chartRef.current?.takeScreenshot()
+    if (!canvas) return
+    const url = canvas.toDataURL('image/png')
+    const a = document.createElement('a')
+    a.href = url; a.download = `lima-chart-${symbol}-${Date.now()}.png`
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+  }
 
   /* ── Buy handler ── */
   const doBuy = useCallback((isA: boolean) => {
@@ -1104,11 +1158,149 @@ export default function ChartsPage() {
           )}
         </div>
 
+        {/* Spacer — pushes utility buttons below the market selector pill (~70px) */}
+        <div style={{ flex: 1, minHeight: '40px' }} />
+
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
-        <button style={toolbarBtn} title="Indicators"><IcIndicators /><span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Indicators</span></button>
-        <button style={toolbarBtn} title="Drawing tools"><IcDrawing /><span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Drawing</span></button>
-        <button style={toolbarBtn} title="Download"><IcDownload /><span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Download</span></button>
+        <button
+          onClick={() => { setShowIndicators(v => !v); setShowDrawingPanel(false) }}
+          style={{
+            ...toolbarBtn,
+            color:      showIndicators ? '#3b82f6' : 'rgba(200,215,235,0.55)',
+            background: showIndicators ? 'rgba(59,130,246,0.1)' : 'transparent',
+          }}
+          title="Indicators"
+        >
+          <IcIndicators />
+          <span style={{ fontSize: '0.45rem', color: 'inherit' }}>Indicators</span>
+        </button>
+
+        <button
+          onClick={() => { setShowDrawingPanel(v => !v); setShowIndicators(false) }}
+          style={{
+            ...toolbarBtn,
+            color:      showDrawingPanel ? '#a855f7' : 'rgba(200,215,235,0.55)',
+            background: showDrawingPanel ? 'rgba(168,85,247,0.1)' : 'transparent',
+          }}
+          title="Drawing tools"
+        >
+          <IcDrawing />
+          <span style={{ fontSize: '0.45rem', color: 'inherit' }}>Drawing</span>
+        </button>
+
+        <button
+          onClick={downloadChart}
+          style={{ ...toolbarBtn }}
+          title="Download chart as PNG"
+        >
+          <IcDownload />
+          <span style={{ fontSize: '0.45rem', color: 'rgba(200,215,235,0.3)' }}>Download</span>
+        </button>
+
+        {/* ── Indicators panel (slides out to the right of toolbar) ── */}
+        {showIndicators && (
+          <div style={{
+            position: 'absolute', left: '44px', top: 0, bottom: 0, width: '240px',
+            background: '#07101f', borderRight: '1px solid rgba(255,255,255,0.08)',
+            zIndex: 15, display: 'flex', flexDirection: 'column',
+            boxShadow: '4px 0 24px rgba(0,0,0,0.5)',
+          }}>
+            <div style={{ padding: '14px 14px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#e5e5e5' }}>Indicators</span>
+              <button onClick={() => setShowIndicators(false)} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1rem', lineHeight: 1, padding: '0 2px' }}>×</button>
+            </div>
+
+            {/* Moving Average */}
+            <div style={{ padding: '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <div>
+                  <div style={{ fontSize: '0.73rem', fontWeight: 700, color: maOn ? '#3b82f6' : '#e5e5e5' }}>Moving Average (MA)</div>
+                  <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px' }}>Simple moving average overlay</div>
+                </div>
+                {/* Toggle */}
+                <div
+                  onClick={() => setMaOn(v => !v)}
+                  style={{
+                    width: '36px', height: '20px', borderRadius: '10px', cursor: 'pointer', flexShrink: 0,
+                    background: maOn ? '#3b82f6' : 'rgba(255,255,255,0.1)',
+                    position: 'relative', transition: 'background 0.2s',
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: '2px', width: '16px', height: '16px', borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.2s',
+                    left: maOn ? '18px' : '2px',
+                  }} />
+                </div>
+              </div>
+              {maOn && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+                  <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.45)' }}>Period</span>
+                  <input
+                    type="number" min={2} max={200} value={maPeriod}
+                    onChange={e => setMaPeriod(Math.max(2, Math.min(200, parseInt(e.target.value) || 20)))}
+                    style={{
+                      width: '60px', background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)',
+                      borderRadius: '5px', color: '#e5e5e5', padding: '4px 8px', fontSize: '0.72rem', outline: 'none',
+                    }}
+                  />
+                  <div style={{ width: '10px', height: '2px', background: '#3b82f6', flexShrink: 0 }} />
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.05)', opacity: 0.4 }}>
+              <div style={{ fontSize: '0.73rem', fontWeight: 700, color: '#e5e5e5' }}>Bollinger Bands</div>
+              <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px' }}>Coming soon</div>
+            </div>
+            <div style={{ padding: '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.05)', opacity: 0.4 }}>
+              <div style={{ fontSize: '0.73rem', fontWeight: 700, color: '#e5e5e5' }}>RSI</div>
+              <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px' }}>Coming soon</div>
+            </div>
+            <div style={{ padding: '12px 14px', opacity: 0.4 }}>
+              <div style={{ fontSize: '0.73rem', fontWeight: 700, color: '#e5e5e5' }}>MACD</div>
+              <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginTop: '2px' }}>Coming soon</div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Drawing panel (slides out to the right of toolbar) ── */}
+        {showDrawingPanel && (
+          <div style={{
+            position: 'absolute', left: '44px', top: 0, bottom: 0, width: '220px',
+            background: '#07101f', borderRight: '1px solid rgba(255,255,255,0.08)',
+            zIndex: 15, display: 'flex', flexDirection: 'column',
+            boxShadow: '4px 0 24px rgba(0,0,0,0.5)',
+          }}>
+            <div style={{ padding: '14px 14px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#e5e5e5' }}>Drawing Tools</span>
+              <button onClick={() => setShowDrawingPanel(false)} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1rem', lineHeight: 1, padding: '0 2px' }}>×</button>
+            </div>
+            <div style={{ padding: '12px 14px' }}>
+              {[
+                { icon: '—', label: 'Trend Line',        hint: 'Coming soon' },
+                { icon: '↔', label: 'Horizontal Line',   hint: 'Coming soon' },
+                { icon: '↗', label: 'Ray',               hint: 'Coming soon' },
+                { icon: '▭', label: 'Rectangle',         hint: 'Coming soon' },
+                { icon: '◯', label: 'Circle',            hint: 'Coming soon' },
+                { icon: '✎', label: 'Text Annotation',   hint: 'Coming soon' },
+              ].map(t => (
+                <div key={t.label} style={{
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                  padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  opacity: 0.45, cursor: 'default',
+                }}>
+                  <span style={{ width: '28px', height: '28px', borderRadius: '6px', background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem', color: '#a855f7', flexShrink: 0 }}>{t.icon}</span>
+                  <div>
+                    <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#e5e5e5' }}>{t.label}</div>
+                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)' }}>{t.hint}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ══ CHART AREA ══ */}
