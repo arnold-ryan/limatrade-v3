@@ -303,6 +303,9 @@ export default function ChartsPage() {
   const [showPos,      setShowPos]      = useState(true)
   const [posTab,       setPosTab]       = useState<'open' | 'closed'>('open')
 
+  /* ── Buy feedback ── */
+  const [buyError, setBuyError] = useState<string | null>(null)
+
   /* ── Toolbar panel state ── */
   const [showIndicators,   setShowIndicators]   = useState(false)
   const [showDrawingPanel, setShowDrawingPanel] = useState(false)
@@ -692,6 +695,8 @@ export default function ChartsPage() {
       ws.onopen = () => {
         reconnectCount.current = 0; setWsError(null); setWsReady(true)
         ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+        // Subscribe to all open contract updates (mirrors manual-trader pattern)
+        ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
         resubscribeProposals(ws!)
         ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 30_000)
       }
@@ -708,7 +713,11 @@ export default function ChartsPage() {
           const rid = msg.req_id as number
           if (rid === 10) setPropA({ id: '', ask_price: 0, payout: 0, error: err.message })
           if (rid === 11) setPropB({ id: '', ask_price: 0, payout: 0, error: err.message })
-          if (buyReqMap.current.has(rid)) { buyReqMap.current.delete(rid); setBuying(null) }
+          if (buyReqMap.current.has(rid)) {
+            buyReqMap.current.delete(rid); setBuying(null)
+            setBuyError(err.message)
+            setTimeout(() => setBuyError(null), 6000)
+          }
           return
         }
 
@@ -718,8 +727,12 @@ export default function ChartsPage() {
         }
 
         if (msg.msg_type === 'proposal') {
-          const p = (msg as { proposal: { id: string; ask_price: number; payout: number }; req_id: number }).proposal
-          const prop: Proposal = { id: p.id, ask_price: p.ask_price, payout: p.payout }
+          // Deriv API: subscription id lives at msg.subscription.id (v3+) and also echoed at proposal.id
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const raw = msg as any
+          const p = raw.proposal as { id?: string; ask_price: number; payout: number }
+          const subscriptionId: string = raw.subscription?.id ?? p?.id ?? ''
+          const prop: Proposal = { id: subscriptionId, ask_price: p.ask_price, payout: p.payout }
           if (msg.req_id === 10) setPropA(prop)
           if (msg.req_id === 11) setPropB(prop)
         }
@@ -894,6 +907,10 @@ export default function ChartsPage() {
       duration:     durationRef.current,
     })
     ws.send(JSON.stringify({ buy: prop.id, price: parseFloat((prop.ask_price * 1.02).toFixed(2)), req_id: rid }))
+    // Safety: clear buying state if no response in 10 s
+    setTimeout(() => {
+      if (buyReqMap.current.has(rid)) { buyReqMap.current.delete(rid); setBuying(null); setBuyError('No response from server — please retry') }
+    }, 10_000)
   }, [buying])
 
   /* ── Chart helpers ── */
@@ -1158,8 +1175,8 @@ export default function ChartsPage() {
           )}
         </div>
 
-        {/* Spacer — pushes utility buttons below the market selector pill (~70px) */}
-        <div style={{ flex: 1, minHeight: '40px' }} />
+        {/* Fixed gap — just clears the market selector pill (~66px tall at top:10px) */}
+        <div style={{ height: '22px', flexShrink: 0 }} />
 
         <div style={{ width: '28px', height: '1px', background: 'rgba(255,255,255,0.07)', margin: '6px 0' }} />
 
@@ -1747,6 +1764,12 @@ export default function ChartsPage() {
           {activeProp?.error && (
             <div style={{ fontSize: '0.65rem', color: '#ef4444', padding: '7px 9px', background: 'rgba(239,68,68,0.08)', borderRadius: '7px', border: '1px solid rgba(239,68,68,0.15)' }}>
               {activeProp.error.slice(0, 60)}
+            </div>
+          )}
+
+          {buyError && (
+            <div style={{ fontSize: '0.65rem', color: '#ef4444', padding: '7px 9px', background: 'rgba(239,68,68,0.08)', borderRadius: '7px', border: '1px solid rgba(239,68,68,0.2)', animation: 'lossFlash 0.4s ease' }}>
+              ⚠ {buyError}
             </div>
           )}
 
