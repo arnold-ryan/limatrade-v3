@@ -1,203 +1,310 @@
 'use client'
 /**
- * Free Bots — pre-built digit trading bots
+ * Free Bots — powered by Deriv's native Automation API
  *
  * Architecture:
- *  • One shared auth WebSocket (OTP URL from /api/user/ws-url)
- *  • Only one bot runs at a time
- *  • Buy: { buy:'1', price:1000, parameters:{ ... } }
- *  • Settle via transaction stream (action:'sell')
- *  • proposal_open_contract for live P/L
- *  • Balance via { balance:1, subscribe:1 }
+ *  PUBLIC WS  → auto_list_strategies (no auth), ticks for dominant-digit analysis
+ *  AUTH WS    → balance, auto_start (subscribe:1), auto_stop, auto_pause, auto_resume
+ *
+ * API refs:
+ *  auto_list_strategies : /schemas/auto_list_strategies_request.schema.json
+ *  auto_start           : /schemas/auto_start_request.schema.json
+ *  auto_stop            : /schemas/auto_stop_request.schema.json
+ *  contract_template    : requires contract_type, currency, underlying_symbol
+ *  strategy_parameters  : object; shape defined per-strategy in strategies[].parameters
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-// ── Bot catalogue ────────────────────────────────────────────────────────────
-interface BotDef {
-  id:          string
-  name:        string
-  icon:        string
-  description: string
-  contractType: string
-  barrier?:    number
-  risk:        'Low' | 'Medium' | 'High'
-  winOdds:     string   // theoretical win probability
-  color:       string
-}
+// ── Constants ──────────────────────────────────────────────────────────────
+const PUB_WS = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
-const BOTS: BotDef[] = [
-  {
-    id: 'even', name: 'Even Stevens', icon: '⊙',
-    description: 'Bets the last digit of each tick is even (0, 2, 4, 6, 8).',
-    contractType: 'DIGITEVEN', risk: 'Low', winOdds: '~50%', color: '#22c55e',
-  },
-  {
-    id: 'odd', name: 'Odd Ranger', icon: '⊗',
-    description: 'Bets the last digit of each tick is odd (1, 3, 5, 7, 9).',
-    contractType: 'DIGITODD', risk: 'Low', winOdds: '~50%', color: '#a855f7',
-  },
-  {
-    id: 'over4', name: 'High Roller', icon: '▲',
-    description: 'Bets the last digit is over 4 — wins on 5, 6, 7, 8, or 9.',
-    contractType: 'DIGITOVER', barrier: 4, risk: 'Medium', winOdds: '~50%', color: '#3b82f6',
-  },
-  {
-    id: 'under5', name: 'Low Rider', icon: '▼',
-    description: 'Bets the last digit is under 5 — wins on 0, 1, 2, 3, or 4.',
-    contractType: 'DIGITUNDER', barrier: 5, risk: 'Medium', winOdds: '~50%', color: '#f97316',
-  },
-  {
-    id: 'match5', name: 'Match King', icon: '◎',
-    description: 'Bets the last digit exactly matches 5. High risk, high payout.',
-    contractType: 'DIGITMATCH', barrier: 5, risk: 'High', winOdds: '~10%', color: '#FCA311',
-  },
-  {
-    id: 'differ0', name: 'Differ Pro', icon: '◈',
-    description: 'Bets the last digit is anything except 0. Wins 9 out of 10 ticks.',
-    contractType: 'DIGITDIFF', barrier: 0, risk: 'Low', winOdds: '~90%', color: '#14b8a6',
-  },
-]
+const DIGIT_CONTRACT_TYPES = new Set([
+  'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF',
+])
+
+const BARRIER_TYPES = new Set(['DIGITOVER', 'DIGITUNDER', 'DIGITMATCH', 'DIGITDIFF'])
 
 const MARKETS = [
-  { symbol: 'R_10',    name: 'Volatility 10 Index'      },
-  { symbol: 'R_25',    name: 'Volatility 25 Index'      },
-  { symbol: 'R_50',    name: 'Volatility 50 Index'      },
-  { symbol: 'R_75',    name: 'Volatility 75 Index'      },
-  { symbol: 'R_100',   name: 'Volatility 100 Index'     },
-  { symbol: '1HZ10V',  name: 'Volatility 10 (1s) Index' },
-  { symbol: '1HZ25V',  name: 'Volatility 25 (1s) Index' },
-  { symbol: '1HZ50V',  name: 'Volatility 50 (1s) Index' },
-  { symbol: '1HZ75V',  name: 'Volatility 75 (1s) Index' },
-  { symbol: '1HZ100V', name: 'Volatility 100 (1s) Index'},
+  { symbol: 'R_10',    name: 'Volatility 10 Index'       },
+  { symbol: 'R_25',    name: 'Volatility 25 Index'       },
+  { symbol: 'R_50',    name: 'Volatility 50 Index'       },
+  { symbol: 'R_75',    name: 'Volatility 75 Index'       },
+  { symbol: 'R_100',   name: 'Volatility 100 Index'      },
+  { symbol: '1HZ10V',  name: 'Volatility 10 (1s) Index'  },
+  { symbol: '1HZ25V',  name: 'Volatility 25 (1s) Index'  },
+  { symbol: '1HZ50V',  name: 'Volatility 50 (1s) Index'  },
+  { symbol: '1HZ75V',  name: 'Volatility 75 (1s) Index'  },
+  { symbol: '1HZ100V', name: 'Volatility 100 (1s) Index' },
 ]
 
-// ── Types ────────────────────────────────────────────────────────────────────
-interface BotStats {
-  trades: number; wins: number; losses: number
-  totalStake: number; totalPayout: number; profit: number
+// Contract type display info
+const CT_META: Record<string, { label: string; icon: string; color: string; desc: string }> = {
+  DIGITEVEN:  { label: 'Even/Odd',        icon: '⊙', color: '#22c55e', desc: 'Bet the last digit is even (0,2,4,6,8)'  },
+  DIGITODD:   { label: 'Even/Odd',        icon: '⊗', color: '#a855f7', desc: 'Bet the last digit is odd (1,3,5,7,9)'   },
+  DIGITOVER:  { label: 'Over/Under',      icon: '▲', color: '#3b82f6', desc: 'Bet the last digit is over your barrier' },
+  DIGITUNDER: { label: 'Over/Under',      icon: '▼', color: '#f97316', desc: 'Bet the last digit is under your barrier'},
+  DIGITMATCH: { label: 'Match/Differ',    icon: '◎', color: '#FCA311', desc: 'Bet the last digit matches your barrier' },
+  DIGITDIFF:  { label: 'Match/Differ',    icon: '◈', color: '#14b8a6', desc: 'Bet the last digit differs from barrier' },
 }
 
-interface TxEntry {
-  id: number; botId: string; contractType: string
-  stake: number; payout: number; won: boolean; settled: boolean
-  currentPnl?: number; time: number
+// ── Types ──────────────────────────────────────────────────────────────────
+interface DerivStrategy {
+  strategy_id: string
+  display_name: string
+  description?: string
+  parameters: Record<string, any>   // JSON Schema object
+  supported_contract_types: string[]
 }
 
+interface RunContract {
+  contract_id: number
+  buy_price: number
+  sell_price?: number
+  contract_status: 'open' | 'won' | 'lost'
+  purchase_time: number
+}
+
+interface ActiveRun {
+  run_id: string
+  botKey: string   // `${strategy_id}::${contract_type}`
+  status: 'running' | 'paused' | 'stopped'
+  contracts: RunContract[]
+  total_stake: number
+  total_payout: number
+  stop_reason?: string
+}
+
+// Per-bot user config
 interface BotConfig {
-  stake: string; takeProfit: string; stopLoss: string; market: string
+  market: string
+  contract_type: string
+  barrier: string
+  stake: string
+  // dynamic strategy params — stored as string values, parsed on send
+  params: Record<string, string>
 }
 
-const defaultConfig = (): BotConfig => ({ stake: '1.00', takeProfit: '10', stopLoss: '5', market: 'R_100' })
-const defaultStats  = (): BotStats  => ({ trades: 0, wins: 0, losses: 0, totalStake: 0, totalPayout: 0, profit: 0 })
+// ── Helper: render one strategy-parameter field ────────────────────────────
+function ParamField({
+  name, schema, value, onChange,
+}: {
+  name: string; schema: any; value: string; onChange: (v: string) => void
+}) {
+  const label = name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  const desc  = schema.description ?? ''
 
-const RISK_COLOR: Record<string, string> = { Low: '#22c55e', Medium: '#f97316', High: '#ef4444' }
+  if (schema.type === 'boolean') {
+    return (
+      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.78rem' }}>
+        <input
+          type="checkbox"
+          checked={value === 'true'}
+          onChange={e => onChange(e.target.checked ? 'true' : 'false')}
+          style={{ accentColor: '#FCA311', width: 14, height: 14 }}
+        />
+        <span style={{ color: 'rgba(229,229,229,0.7)' }}>{label}</span>
+        {desc && <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.35)' }}>— {desc}</span>}
+      </label>
+    )
+  }
 
-// ── Component ────────────────────────────────────────────────────────────────
-export default function FreeBotsPage() {
-  const [activeBotId,  setActiveBotId]  = useState<string | null>(null)
-  const [botStats,     setBotStats]     = useState<Record<string, BotStats>>({})
-  const [configs,      setConfigs]      = useState<Record<string, BotConfig>>(
-    () => Object.fromEntries(BOTS.map(b => [b.id, defaultConfig()]))
+  if (schema.enum) {
+    return (
+      <div>
+        <label style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.4)', display: 'block', marginBottom: 3 }}>{label}</label>
+        <select
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          style={{ width: '100%', background: '#111', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 7, padding: '5px 8px', fontSize: '0.8rem', color: '#e5e5e5' }}
+        >
+          {schema.enum.map((v: string) => <option key={v} value={v}>{v}</option>)}
+        </select>
+      </div>
+    )
+  }
+
+  const type  = schema.type === 'integer' || schema.type === 'number' ? 'number' : 'text'
+  const step  = schema.type === 'number' ? '0.01' : '1'
+  const min   = schema.minimum ?? (schema.type === 'integer' ? 1 : 0.01)
+
+  return (
+    <div>
+      <label style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.4)', display: 'block', marginBottom: 3 }}>
+        {label} {desc && <span style={{ fontSize: '0.6rem', opacity: 0.5 }}>— {desc}</span>}
+      </label>
+      <input
+        type={type} step={step} min={min}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{ width: '100%', boxSizing: 'border-box', background: '#111', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 7, padding: '5px 8px', fontSize: '0.8rem', color: '#e5e5e5' }}
+      />
+    </div>
   )
-  const [expanded,     setExpanded]     = useState<string | null>(null)
-  const [txLog,        setTxLog]        = useState<TxEntry[]>([])
-  const [balance,      setBalance]      = useState<number | null>(null)
-  const [currency,     setCurrency]     = useState('USD')
-  const [wsReady,      setWsReady]      = useState(false)
-  const [wsErr,        setWsErr]        = useState<string | null>(null)
-  const [stopReason,   setStopReason]   = useState<string | null>(null)
+}
 
-  // ── Refs ──────────────────────────────────────────────────────────────────
-  const wsRef             = useRef<WebSocket | null>(null)
-  const activeBotRef      = useRef<string | null>(null)
-  const configRef         = useRef<BotConfig>(defaultConfig())
-  const statsRef          = useRef<BotStats>(defaultStats())
-  const reqIdRef          = useRef(0)
-  const inTradeRef        = useRef(false)
-  const pendingBuys       = useRef<Map<number, number>>(new Map()) // contractId → buyPrice
-  const pocSubs           = useRef<Map<number, string>>(new Map()) // contractId → subscriptionId
-  const intentionalClose  = useRef(false)
-  const reconnectCount    = useRef(0)
+// ── Build default param values from strategy.parameters schema ─────────────
+function defaultParams(schema: Record<string, any>): Record<string, string> {
+  const props = schema?.properties ?? {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(props) as [string, any][]) {
+    if      (v.default !== undefined)              out[k] = String(v.default)
+    else if (v.type === 'boolean')                 out[k] = 'false'
+    else if (v.type === 'integer' || v.type === 'number') out[k] = String(v.minimum ?? 1)
+    else if (v.enum)                               out[k] = String(v.enum[0])
+    else                                            out[k] = ''
+  }
+  return out
+}
 
-  // sync refs
-  useEffect(() => { activeBotRef.current = activeBotId }, [activeBotId])
-  const syncConfig = useCallback((botId: string) => {
-    configRef.current = configs[botId] ?? defaultConfig()
-  }, [configs])
+// ── Parse param values to their correct JS types ───────────────────────────
+function parseParams(values: Record<string, string>, schema: Record<string, any>): Record<string, any> {
+  const props = schema?.properties ?? {}
+  const out: Record<string, any> = {}
+  for (const [k, raw] of Object.entries(values)) {
+    const s = props[k]
+    if (!s) { out[k] = raw; continue }
+    if (s.type === 'boolean') out[k] = raw === 'true'
+    else if (s.type === 'integer') out[k] = parseInt(raw) || 0
+    else if (s.type === 'number')  out[k] = parseFloat(raw) || 0
+    else out[k] = raw
+  }
+  return out
+}
 
-  // ── Config helpers ────────────────────────────────────────────────────────
-  const updateConfig = (botId: string, key: keyof BotConfig, val: string) =>
-    setConfigs(prev => ({ ...prev, [botId]: { ...prev[botId], [key]: val } }))
+// ── Dominant digit analysis from recent ticks ─────────────────────────────
+function lastDigitOf(price: number, dp: number) {
+  return Math.abs(Math.round(price * 10 ** dp)) % 10
+}
 
-  // ── Stop check ────────────────────────────────────────────────────────────
-  const checkStops = useCallback((stats: BotStats, cfg: BotConfig): string | null => {
-    const tp = parseFloat(cfg.takeProfit)
-    const sl = parseFloat(cfg.stopLoss)
-    if (!isNaN(tp) && tp > 0 && stats.profit >= tp)  return `✓ Take profit reached (+${tp} ${currency})`
-    if (!isNaN(sl) && sl > 0 && stats.profit <= -sl) return `✗ Stop loss triggered (-${sl} ${currency})`
-    return null
-  }, [currency])
+// ── Component ──────────────────────────────────────────────────────────────
+export default function FreeBotsPage() {
+  // Strategies from Deriv
+  const [strategies,   setStrategies]   = useState<DerivStrategy[]>([])
+  const [strategiesOk, setStrategiesOk] = useState(false)
 
-  // ── Execute a single trade ────────────────────────────────────────────────
-  const executeTrade = useCallback(() => {
-    const ws    = wsRef.current
-    const botId = activeBotRef.current
-    if (!botId || !ws || ws.readyState !== WebSocket.OPEN) return
-    if (inTradeRef.current) return
+  // Active run state
+  const [activeRun,  setActiveRun]  = useState<ActiveRun | null>(null)
+  const activeRunRef = useRef<ActiveRun | null>(null)
+  useEffect(() => { activeRunRef.current = activeRun }, [activeRun])
 
-    const bot = BOTS.find(b => b.id === botId)!
-    const cfg = configRef.current
-    const stake = parseFloat(cfg.stake) || 1
-    if (stake < 0.35) { stopBot('Minimum stake is 0.35'); return }
+  // Auth/connection
+  const [balance,    setBalance]    = useState<number | null>(null)
+  const [currency,   setCurrency]   = useState('USD')
+  const [authReady,  setAuthReady]  = useState(false)
+  const [wsErr,      setWsErr]      = useState<string | null>(null)
 
-    inTradeRef.current = true
-    const reqId = ++reqIdRef.current
+  // Dominant digit (from public WS ticks)
+  const [digitFreq,  setDigitFreq]  = useState<number[]>(Array(10).fill(0))
+  const [tickSymbol, setTickSymbol] = useState('R_100')
 
-    ws.send(JSON.stringify({
-      buy:    '1',
-      price:  1000,
-      req_id: reqId,
-      parameters: {
-        contract_type:     bot.contractType,
-        underlying_symbol: cfg.market,
-        duration:          1,
-        duration_unit:     't',
-        amount:            parseFloat(stake.toFixed(2)),
-        basis:             'stake',
-        currency:          currency,
-        ...(bot.barrier !== undefined ? { barrier: String(bot.barrier) } : {}),
-      },
-    }))
-  }, [currency])
+  // Per-bot config: key = `${strategy_id}::${contract_type}`
+  const [configs,  setConfigs]  = useState<Record<string, BotConfig>>({})
+  const [expanded, setExpanded] = useState<string | null>(null)
 
-  // ── Stop bot ──────────────────────────────────────────────────────────────
-  const stopBot = useCallback((reason?: string) => {
-    setActiveBotId(null)
-    activeBotRef.current = null
-    inTradeRef.current   = false
-    if (reason) setStopReason(reason)
+  // UI feedback
+  const [startErr,   setStartErr]   = useState<string | null>(null)
+  const [subId,      setSubId]      = useState<string | null>(null)  // subscription to forget on stop
+
+  // WS refs
+  const pubWsRef  = useRef<WebSocket | null>(null)
+  const authWsRef = useRef<WebSocket | null>(null)
+  const reqIdRef  = useRef(0)
+  const subIdRef  = useRef<string | null>(null)
+  useEffect(() => { subIdRef.current = subId }, [subId])
+
+  // ── Public WS: auto_list_strategies + ticks for dominant digit ─────────
+  useEffect(() => {
+    let ws: WebSocket, dead = false, ping: ReturnType<typeof setInterval>
+
+    function connect() {
+      ws = new WebSocket(PUB_WS)
+      pubWsRef.current = ws
+
+      ws.onopen = () => {
+        if (dead) return
+        ws.send(JSON.stringify({ auto_list_strategies: 1, req_id: 1 }))
+        ws.send(JSON.stringify({ ticks_history: 'R_100', count: 100, end: 'latest', style: 'ticks', req_id: 2 }))
+        ws.send(JSON.stringify({ ticks: 'R_100', subscribe: 1, req_id: 3 }))
+        ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 25_000)
+      }
+
+      ws.onmessage = ev => {
+        if (dead) return
+        let msg: any; try { msg = JSON.parse(ev.data) } catch { return }
+
+        if (msg.msg_type === 'auto_list_strategies') {
+          const list: DerivStrategy[] = (msg.auto_list_strategies?.strategies ?? []).filter(
+            (s: DerivStrategy) => s.supported_contract_types.some(ct => DIGIT_CONTRACT_TYPES.has(ct))
+          )
+          setStrategies(list)
+          setStrategiesOk(true)
+          // Init configs for each strategy × digit contract type
+          setConfigs(prev => {
+            const next = { ...prev }
+            for (const s of list) {
+              for (const ct of s.supported_contract_types) {
+                if (!DIGIT_CONTRACT_TYPES.has(ct)) continue
+                const key = `${s.strategy_id}::${ct}`
+                if (!next[key]) {
+                  next[key] = {
+                    market:        'R_100',
+                    contract_type: ct,
+                    barrier:       ct === 'DIGITOVER' || ct === 'DIGITMATCH' ? '5'
+                                 : ct === 'DIGITUNDER' ? '4'
+                                 : ct === 'DIGITDIFF'  ? '0' : '',
+                    stake:         '1.00',
+                    params:        defaultParams(s.parameters),
+                  }
+                }
+              }
+            }
+            return next
+          })
+        }
+
+        if (msg.msg_type === 'history') {
+          const h = msg.history as { prices: (number | string)[] }
+          if (!h?.prices?.length) return
+          const freq = Array(10).fill(0)
+          for (const p of h.prices) freq[lastDigitOf(parseFloat(String(p)), 3)]++
+          setDigitFreq(freq)
+        }
+
+        if (msg.msg_type === 'tick') {
+          const p = parseFloat(String(msg.tick?.quote ?? 0))
+          if (!isNaN(p)) {
+            const d = lastDigitOf(p, 3)
+            setDigitFreq(prev => { const n = [...prev]; n[d]++; return n })
+          }
+        }
+      }
+
+      ws.onclose = () => { if (!dead) setTimeout(connect, 3000) }
+      ws.onerror = () => {}
+    }
+
+    connect()
+    return () => {
+      dead = true
+      clearInterval(ping)
+      try { ws?.close() } catch {/**/}
+    }
   }, [])
 
-  // ── Start bot ─────────────────────────────────────────────────────────────
-  const startBot = useCallback((botId: string) => {
-    syncConfig(botId)
-    statsRef.current = botStats[botId] ? { ...botStats[botId] } : defaultStats()
-    setStopReason(null)
-    setActiveBotId(botId)
-    activeBotRef.current = botId
-    inTradeRef.current   = false
-    // kick off first trade
-    setTimeout(() => executeTrade(), 300)
-  }, [syncConfig, botStats, executeTrade])
-
-  // ── Auth WebSocket ─────────────────────────────────────────────────────────
+  // Sync tick symbol when config changes
   useEffect(() => {
-    let ws: WebSocket | null = null
-    let ping: ReturnType<typeof setInterval> | null = null
-    let dead = false
+    if (!pubWsRef.current || pubWsRef.current.readyState !== WebSocket.OPEN) return
+    const ws = pubWsRef.current
+    ws.send(JSON.stringify({ forget_all: 'ticks' }))
+    ws.send(JSON.stringify({ ticks_history: tickSymbol, count: 100, end: 'latest', style: 'ticks', req_id: 2 }))
+    ws.send(JSON.stringify({ ticks: tickSymbol, subscribe: 1, req_id: 3 }))
+    setDigitFreq(Array(10).fill(0))
+  }, [tickSymbol])
 
-    const backoff = (n: number) => Math.min(1000 * 2 ** n, 30_000)
+  // ── Auth WS ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let ws: WebSocket | null = null, dead = false, ping: ReturnType<typeof setInterval>
 
     async function connect() {
       try {
@@ -207,14 +314,12 @@ export default function FreeBotsPage() {
         if (!wsUrl)     { setWsErr('Could not get connection URL.'); return }
 
         ws = new WebSocket(wsUrl)
-        wsRef.current = ws
+        authWsRef.current = ws
 
         ws.onopen = () => {
           if (dead) return
-          reconnectCount.current = 0
-          setWsReady(true); setWsErr(null)
+          setAuthReady(true); setWsErr(null)
           ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
           ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 25_000)
         }
 
@@ -231,356 +336,455 @@ export default function FreeBotsPage() {
             setBalance(b.balance); setCurrency(b.currency)
           }
 
-          if (msg.msg_type === 'buy') {
+          // auto_start subscription updates (streaming run state)
+          if (msg.msg_type === 'auto_start') {
             if (msg.error) {
-              inTradeRef.current = false
-              stopBot(`Buy error: ${msg.error.message}`)
+              setStartErr(msg.error.message ?? 'Failed to start bot')
+              setActiveRun(null)
               return
             }
-            const buy = msg.buy as { contract_id: number; buy_price: number }
-            pendingBuys.current.set(buy.contract_id, buy.buy_price)
-
-            // Update stats
-            const upd: BotStats = {
-              ...statsRef.current,
-              trades:     statsRef.current.trades + 1,
-              totalStake: parseFloat((statsRef.current.totalStake + buy.buy_price).toFixed(2)),
+            const run = msg.auto_start as {
+              run_id: string; status: string; contracts?: RunContract[]
+              total_stake?: number; total_payout?: number; stop_reason?: string
             }
-            statsRef.current = upd
-            const bid = activeBotRef.current
-            if (bid) setBotStats(prev => ({ ...prev, [bid]: upd }))
+            if (msg.subscription?.id) setSubId(msg.subscription.id)
 
-            // Add pending tx log entry
-            setTxLog(prev => [{
-              id: buy.contract_id, botId: activeBotRef.current ?? '',
-              contractType: BOTS.find(b => b.id === activeBotRef.current)?.contractType ?? '',
-              stake: buy.buy_price, payout: 0, won: false, settled: false, time: Date.now(),
-            }, ...prev].slice(0, 80))
-
-            // Subscribe to live P/L
-            ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, contract_id: buy.contract_id, req_id: 400 }))
-          }
-
-          if (msg.msg_type === 'proposal_open_contract') {
-            const poc = msg.proposal_open_contract as { contract_id: number; profit: number; subscription?: { id: string } }
-            if (poc.subscription?.id) pocSubs.current.set(poc.contract_id, poc.subscription.id)
-            setTxLog(prev => prev.map(tx =>
-              tx.id === poc.contract_id && !tx.settled ? { ...tx, currentPnl: poc.profit } : tx
-            ))
-          }
-
-          if (msg.msg_type === 'transaction') {
-            const tx = msg.transaction as { action: string; amount: number; contract_id?: number }
-            if (tx.action !== 'sell' || tx.contract_id == null) return
-            const buyPrice = pendingBuys.current.get(tx.contract_id)
-            if (buyPrice === undefined) return
-            pendingBuys.current.delete(tx.contract_id)
-            inTradeRef.current = false
-
-            // Forget POC subscription
-            const subId = pocSubs.current.get(tx.contract_id)
-            if (subId && ws?.readyState === WebSocket.OPEN) {
-              try { ws.send(JSON.stringify({ forget: subId, req_id: 9996 })) } catch { /**/ }
-            }
-            pocSubs.current.delete(tx.contract_id)
-
-            const payout = Math.max(0, tx.amount)
-            const won    = payout > 0
-            const upd: BotStats = {
-              ...statsRef.current,
-              wins:         won ? statsRef.current.wins + 1  : statsRef.current.wins,
-              losses:       won ? statsRef.current.losses    : statsRef.current.losses + 1,
-              totalPayout:  parseFloat((statsRef.current.totalPayout + payout).toFixed(2)),
-              profit:       parseFloat((statsRef.current.totalPayout + payout - statsRef.current.totalStake).toFixed(2)),
-            }
-            statsRef.current = upd
-            const bid = activeBotRef.current
-            if (bid) setBotStats(prev => ({ ...prev, [bid]: upd }))
-
-            // Settle tx log
-            setTxLog(prev => {
-              const i = prev.findIndex(t => t.id === tx.contract_id)
-              if (i === -1) return prev
-              const next = [...prev]
-              next[i] = { ...next[i], payout, won, settled: true, currentPnl: undefined }
-              return next
+            setActiveRun(prev => {
+              const botKey = prev?.botKey ?? activeRunRef.current?.botKey ?? ''
+              return {
+                run_id:       run.run_id,
+                botKey,
+                status:       run.status as ActiveRun['status'],
+                contracts:    run.contracts ?? prev?.contracts ?? [],
+                total_stake:  run.total_stake  ?? prev?.total_stake  ?? 0,
+                total_payout: run.total_payout ?? prev?.total_payout ?? 0,
+                stop_reason:  run.stop_reason,
+              }
             })
 
-            // Check TP/SL
-            const cfg = configRef.current
-            const stopMsg = checkStops(upd, cfg)
-            if (stopMsg) { stopBot(stopMsg); return }
-
-            // Fire next trade
-            if (activeBotRef.current && ws?.readyState === WebSocket.OPEN) {
-              setTimeout(() => executeTrade(), 400)
+            // Auto-clear if stopped
+            if (run.status === 'stopped') {
+              setTimeout(() => {
+                setActiveRun(prev => prev?.status === 'stopped' ? null : prev)
+              }, 3000)
             }
+          }
+
+          if (msg.msg_type === 'auto_stop' || msg.msg_type === 'auto_pause' || msg.msg_type === 'auto_resume') {
+            if (msg.error) { setStartErr(msg.error.message ?? 'Action failed'); return }
+            const d = msg[msg.msg_type] as { run_id: string; status: string }
+            setActiveRun(prev => prev && prev.run_id === d.run_id ? { ...prev, status: d.status as ActiveRun['status'] } : prev)
           }
         }
 
         ws.onerror = () => {}
         ws.onclose = () => {
-          setWsReady(false)
-          wsRef.current = null
-          inTradeRef.current = false
-          if (ping) { clearInterval(ping); ping = null }
-          if (activeBotRef.current) { stopBot(); }
-          if (!dead && !intentionalClose.current) {
-            const delay = backoff(reconnectCount.current++)
-            setTimeout(connect, delay)
-          }
+          setAuthReady(false)
+          authWsRef.current = null
+          if (activeRunRef.current) setActiveRun(null)
+          if (!dead) setTimeout(connect, 3000)
         }
-      } catch (e) {
-        setWsErr('Connection failed. Retrying...')
-        if (!dead) setTimeout(connect, backoff(reconnectCount.current++))
+      } catch {
+        if (!dead) setTimeout(connect, 5000)
       }
     }
 
     connect()
     return () => {
       dead = true
-      intentionalClose.current = true
-      if (ping) clearInterval(ping)
-      if (ws) { try { ws.send(JSON.stringify({ forget_all: 'proposal' })) } catch {/***/} ws.close() }
+      clearInterval(ping)
+      if (ws) { try { ws.close() } catch {/**/} }
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Start bot ─────────────────────────────────────────────────────────────
+  const startBot = useCallback((strategy: DerivStrategy, botKey: string) => {
+    const ws  = authWsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) { setStartErr('Not connected. Wait a moment.'); return }
+    const cfg = configs[botKey]
+    if (!cfg) return
+    const stake = parseFloat(cfg.stake)
+    if (isNaN(stake) || stake < 0.35) { setStartErr('Minimum stake is $0.35'); return }
+
+    setStartErr(null)
+    setActiveRun({ run_id: '', botKey, status: 'running', contracts: [], total_stake: 0, total_payout: 0 })
+
+    const contractTemplate: Record<string, any> = {
+      contract_type:     cfg.contract_type,
+      currency,
+      underlying_symbol: cfg.market,
+      amount:            parseFloat(stake.toFixed(2)),
+      basis:             'stake',
+      duration:          1,
+      duration_unit:     't',
+    }
+    if (BARRIER_TYPES.has(cfg.contract_type) && cfg.barrier !== '') {
+      contractTemplate.barrier = cfg.barrier
+    }
+
+    ws.send(JSON.stringify({
+      auto_start:          1,
+      strategy_id:         strategy.strategy_id,
+      contract_template:   contractTemplate,
+      strategy_parameters: parseParams(cfg.params, strategy.parameters),
+      subscribe:           1,
+      req_id:              ++reqIdRef.current,
+    }))
+  }, [configs, currency])
+
+  // ── Stop bot ──────────────────────────────────────────────────────────────
+  const stopBot = useCallback(() => {
+    const ws = authWsRef.current
+    const run = activeRunRef.current
+    if (!run?.run_id || !ws || ws.readyState !== WebSocket.OPEN) {
+      setActiveRun(null); return
+    }
+    ws.send(JSON.stringify({ auto_stop: 1, run_id: run.run_id, req_id: ++reqIdRef.current }))
+    // Forget subscription
+    if (subIdRef.current) {
+      ws.send(JSON.stringify({ forget: subIdRef.current, req_id: ++reqIdRef.current }))
+      setSubId(null)
+    }
+  }, [])
+
+  // ── Pause / Resume ────────────────────────────────────────────────────────
+  const pauseBot = useCallback(() => {
+    const ws = authWsRef.current; const run = activeRunRef.current
+    if (!run?.run_id || !ws) return
+    ws.send(JSON.stringify({ auto_pause: 1, run_id: run.run_id, req_id: ++reqIdRef.current }))
+  }, [])
+
+  const resumeBot = useCallback(() => {
+    const ws = authWsRef.current; const run = activeRunRef.current
+    if (!run?.run_id || !ws) return
+    ws.send(JSON.stringify({ auto_resume: 1, run_id: run.run_id, req_id: ++reqIdRef.current }))
+  }, [])
+
+  // ── Dominant digit ────────────────────────────────────────────────────────
+  const total   = digitFreq.reduce((a, b) => a + b, 0)
+  const domDigit = total > 0 ? digitFreq.indexOf(Math.max(...digitFreq)) : null
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  const profit = activeRun ? parseFloat((activeRun.total_payout - activeRun.total_stake).toFixed(2)) : 0
+  const wins   = activeRun?.contracts.filter(c => c.contract_status === 'won').length  ?? 0
+  const losses = activeRun?.contracts.filter(c => c.contract_status === 'lost').length ?? 0
+
   return (
     <div style={{ minHeight: '100%', background: '#000', color: '#e5e5e5', padding: '1.5rem', fontFamily: 'var(--font-geist-sans, sans-serif)' }}>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
         <div>
           <h1 style={{ fontSize: '1.35rem', fontWeight: 800, margin: 0 }}>Free Bots</h1>
-          <p style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.45)', margin: '4px 0 0' }}>
-            Pre-built digit trading bots — one active at a time
+          <p style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.45)', margin: '3px 0 0' }}>
+            Pre-built strategies powered by Deriv Automation API
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           {balance !== null && (
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#FCA311' }}>{balance.toFixed(2)} {currency}</div>
-              <div style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.4)' }}>Balance</div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#FCA311' }}>{balance.toFixed(2)} {currency}</div>
+              <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.4)' }}>Balance</div>
             </div>
           )}
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '6px',
-            padding: '6px 14px', borderRadius: '999px',
-            background: wsReady ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-            border: `1px solid ${wsReady ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
-            fontSize: '0.72rem', fontWeight: 600,
-            color: wsReady ? '#22c55e' : '#ef4444',
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 12px', borderRadius: '999px',
+            background: authReady ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+            border: `1px solid ${authReady ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+            fontSize: '0.7rem', fontWeight: 600, color: authReady ? '#22c55e' : '#ef4444',
           }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: wsReady ? '#22c55e' : '#ef4444' }} />
-            {wsReady ? 'Connected' : 'Connecting'}
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: authReady ? '#22c55e' : '#ef4444' }} />
+            {authReady ? 'Connected' : 'Connecting'}
           </div>
         </div>
       </div>
 
-      {/* Error banner */}
+      {/* ── Banners ────────────────────────────────────────────────────── */}
       {wsErr && (
-        <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', borderRadius: '10px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', fontSize: '0.82rem', color: '#ef4444' }}>
+        <div style={{ marginBottom: '1rem', padding: '0.7rem 1rem', borderRadius: '10px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', fontSize: '0.82rem', color: '#ef4444' }}>
           {wsErr}
         </div>
       )}
-
-      {/* Stop reason banner */}
-      {stopReason && (
-        <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', borderRadius: '10px', background: 'rgba(252,163,17,0.08)', border: '1px solid rgba(252,163,17,0.25)', fontSize: '0.82rem', color: '#FCA311', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>Bot stopped — {stopReason}</span>
-          <button onClick={() => setStopReason(null)} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer', fontSize: '1rem' }}>✕</button>
+      {startErr && (
+        <div style={{ marginBottom: '1rem', padding: '0.7rem 1rem', borderRadius: '10px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', fontSize: '0.82rem', color: '#ef4444', display: 'flex', justifyContent: 'space-between' }}>
+          {startErr}
+          <button onClick={() => setStartErr(null)} style={{ background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)', cursor: 'pointer' }}>✕</button>
         </div>
       )}
 
-      {/* Bot grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
-        {BOTS.map(bot => {
-          const isActive  = activeBotId === bot.id
-          const isBlocked = activeBotId !== null && activeBotId !== bot.id
-          const stats     = botStats[bot.id]
-          const cfg       = configs[bot.id]
-          const isExpanded = expanded === bot.id
-          const profit    = stats?.profit ?? 0
+      {/* ── Active Run Card ─────────────────────────────────────────────── */}
+      {activeRun && (
+        <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '14px', background: 'rgba(252,163,17,0.06)', border: '1px solid rgba(252,163,17,0.25)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: activeRun.status === 'running' ? '#22c55e' : activeRun.status === 'paused' ? '#FCA311' : '#ef4444', animation: activeRun.status === 'running' ? 'pulse 1.5s infinite' : 'none' }} />
+              <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                {activeRun.status === 'running' ? 'Bot Running' : activeRun.status === 'paused' ? 'Bot Paused' : 'Bot Stopped'}
+              </span>
+              {activeRun.run_id && (
+                <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.35)', fontFamily: 'monospace' }}>#{activeRun.run_id.slice(0, 8)}</span>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              {activeRun.status === 'running' && (
+                <button onClick={pauseBot} style={{ padding: '6px 14px', borderRadius: '8px', border: '1px solid rgba(252,163,17,0.3)', background: 'rgba(252,163,17,0.08)', color: '#FCA311', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer' }}>
+                  ⏸ Pause
+                </button>
+              )}
+              {activeRun.status === 'paused' && (
+                <button onClick={resumeBot} style={{ padding: '6px 14px', borderRadius: '8px', border: '1px solid rgba(34,197,94,0.3)', background: 'rgba(34,197,94,0.08)', color: '#22c55e', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer' }}>
+                  ▶ Resume
+                </button>
+              )}
+              <button onClick={stopBot} style={{ padding: '6px 14px', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer' }}>
+                ■ Stop
+              </button>
+            </div>
+          </div>
 
-          return (
-            <div key={bot.id} style={{
-              background: isActive ? `rgba(${bot.color === '#22c55e' ? '34,197,94' : bot.color === '#a855f7' ? '168,85,247' : bot.color === '#3b82f6' ? '59,130,246' : bot.color === '#f97316' ? '249,115,22' : bot.color === '#FCA311' ? '252,163,17' : '20,184,166'},0.06)` : 'rgba(255,255,255,0.03)',
-              border: `1px solid ${isActive ? bot.color + '55' : 'rgba(255,255,255,0.08)'}`,
-              borderRadius: '16px', padding: '1.25rem',
-              transition: 'all 0.2s',
-              opacity: isBlocked ? 0.45 : 1,
-            }}>
-              {/* Card header */}
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <div style={{
-                    width: 42, height: 42, borderRadius: '10px', flexShrink: 0,
-                    background: `${bot.color}22`, border: `1px solid ${bot.color}44`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '1.1rem', color: bot.color,
-                  }}>{bot.icon}</div>
-                  <div>
-                    <div style={{ fontWeight: 800, fontSize: '0.95rem' }}>{bot.name}</div>
-                    <div style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.4)', marginTop: '2px' }}>
-                      {bot.contractType}{bot.barrier !== undefined ? ` · Barrier ${bot.barrier}` : ''}
-                    </div>
+          {/* Stats */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.6rem' }}>
+            {[
+              { label: 'Trades',  value: activeRun.contracts.length, color: undefined },
+              { label: 'Wins',    value: wins,                        color: '#22c55e' },
+              { label: 'Losses',  value: losses,                      color: '#ef4444' },
+              { label: 'Staked',  value: `$${activeRun.total_stake.toFixed(2)}`,   color: undefined },
+              { label: 'P/L',     value: `${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}`, color: profit >= 0 ? '#22c55e' : '#ef4444' },
+            ].map(s => (
+              <div key={s.label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '9px', padding: '8px', textAlign: 'center' }}>
+                <div style={{ fontSize: '1rem', fontWeight: 800, color: s.color ?? '#e5e5e5' }}>{s.value}</div>
+                <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.4)', marginTop: '2px' }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Recent contracts */}
+          {activeRun.contracts.length > 0 && (
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+              {[...activeRun.contracts].reverse().slice(0, 20).map(c => (
+                <div key={c.contract_id} style={{
+                  width: 24, height: 24, borderRadius: '6px',
+                  background: c.contract_status === 'open' ? 'rgba(252,163,17,0.2)'
+                            : c.contract_status === 'won'  ? 'rgba(34,197,94,0.25)'
+                            : 'rgba(239,68,68,0.25)',
+                  border: `1px solid ${c.contract_status === 'open' ? 'rgba(252,163,17,0.4)' : c.contract_status === 'won' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem',
+                  color: c.contract_status === 'open' ? '#FCA311' : c.contract_status === 'won' ? '#22c55e' : '#ef4444',
+                }}>
+                  {c.contract_status === 'open' ? '●' : c.contract_status === 'won' ? '✓' : '✗'}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeRun.stop_reason && (
+            <div style={{ marginTop: '0.6rem', fontSize: '0.75rem', color: 'rgba(229,229,229,0.5)' }}>
+              Stopped: {activeRun.stop_reason}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Dominant Digit Analysis ─────────────────────────────────────── */}
+      {total > 0 && (
+        <div style={{ marginBottom: '1.5rem', padding: '1rem 1.25rem', borderRadius: '12px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'rgba(229,229,229,0.6)' }}>
+              Dominant Digit Analysis
+              {domDigit !== null && (
+                <span style={{ marginLeft: '0.5rem', color: '#FCA311' }}>
+                  — Digit <strong>{domDigit}</strong> most frequent ({((digitFreq[domDigit] / total) * 100).toFixed(1)}%)
+                </span>
+              )}
+            </div>
+            <select
+              value={tickSymbol}
+              onChange={e => setTickSymbol(e.target.value)}
+              style={{ background: '#111', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '7px', padding: '4px 8px', fontSize: '0.72rem', color: '#e5e5e5' }}
+            >
+              {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.name}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            {digitFreq.map((f, d) => {
+              const pct = total > 0 ? (f / total) * 100 : 0
+              const isDom = d === domDigit
+              return (
+                <div key={d} style={{ flex: 1, textAlign: 'center' }}>
+                  <div style={{ height: 40, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', marginBottom: 3 }}>
+                    <div style={{
+                      width: '70%', background: isDom ? '#FCA311' : 'rgba(255,255,255,0.12)',
+                      borderRadius: '3px 3px 0 0',
+                      height: `${Math.max(4, (pct / 20) * 100)}%`,
+                      transition: 'height 0.3s',
+                    }} />
                   </div>
+                  <div style={{ fontSize: '0.72rem', fontWeight: isDom ? 800 : 500, color: isDom ? '#FCA311' : 'rgba(229,229,229,0.6)' }}>{d}</div>
+                  <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)' }}>{pct.toFixed(0)}%</div>
                 </div>
-                <div style={{ display: 'flex', gap: '0.4rem', flexDirection: 'column', alignItems: 'flex-end' }}>
-                  <span style={{ fontSize: '0.65rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px', background: `${RISK_COLOR[bot.risk]}22`, color: RISK_COLOR[bot.risk], border: `1px solid ${RISK_COLOR[bot.risk]}44` }}>
-                    {bot.risk} Risk
-                  </span>
-                  <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.4)' }}>Win {bot.winOdds}</span>
-                </div>
+              )
+            })}
+          </div>
+          {domDigit !== null && (
+            <div style={{ marginTop: '0.6rem', fontSize: '0.72rem', color: 'rgba(229,229,229,0.45)', fontStyle: 'italic' }}>
+              💡 Tip: Digit {domDigit} is hot — consider a <strong style={{ color: '#14b8a6' }}>Differs</strong> strategy against it, or <strong style={{ color: '#FCA311' }}>Match</strong> if you expect it to continue.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Strategy loading state ──────────────────────────────────────── */}
+      {!strategiesOk && (
+        <div style={{ textAlign: 'center', padding: '3rem', color: 'rgba(229,229,229,0.3)', fontSize: '0.85rem' }}>
+          <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>⟳</div>
+          Loading available strategies from Deriv…
+        </div>
+      )}
+
+      {strategiesOk && strategies.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '3rem', color: 'rgba(229,229,229,0.35)', fontSize: '0.85rem' }}>
+          No digit strategies available from Deriv at the moment.
+        </div>
+      )}
+
+      {/* ── Strategy cards ─────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        {strategies.map(strategy => {
+          const digitCTs = strategy.supported_contract_types.filter(ct => DIGIT_CONTRACT_TYPES.has(ct))
+          return (
+            <div key={strategy.strategy_id} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '16px', overflow: 'hidden' }}>
+
+              {/* Strategy header */}
+              <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ fontWeight: 800, fontSize: '1rem', marginBottom: '3px' }}>{strategy.display_name}</div>
+                {strategy.description && (
+                  <div style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.45)', lineHeight: 1.5 }}>{strategy.description}</div>
+                )}
               </div>
 
-              {/* Description */}
-              <p style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.55)', margin: '0 0 1rem', lineHeight: 1.5 }}>
-                {bot.description}
-              </p>
+              {/* Contract type cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1px', background: 'rgba(255,255,255,0.05)' }}>
+                {digitCTs.map(ct => {
+                  const botKey  = `${strategy.strategy_id}::${ct}`
+                  const cfg     = configs[botKey]
+                  const meta    = CT_META[ct] ?? { label: ct, icon: '◉', color: '#e5e5e5', desc: '' }
+                  const isActive  = activeRun?.botKey === botKey
+                  const isBlocked = activeRun !== null && !isActive
+                  const isExpd    = expanded === botKey
+                  const paramProps = Object.entries(strategy.parameters?.properties ?? {}) as [string, any][]
 
-              {/* Live stats (shown when bot ran at least once) */}
-              {stats && stats.trades > 0 && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
-                  {[
-                    { label: 'Trades', value: stats.trades },
-                    { label: 'Wins', value: stats.wins, color: '#22c55e' },
-                    { label: 'Losses', value: stats.losses, color: '#ef4444' },
-                    { label: 'P/L', value: `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}`, color: profit >= 0 ? '#22c55e' : '#ef4444' },
-                  ].map(s => (
-                    <div key={s.label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '8px', padding: '6px 8px', textAlign: 'center' }}>
-                      <div style={{ fontSize: '0.9rem', fontWeight: 800, color: s.color ?? '#e5e5e5' }}>{s.value}</div>
-                      <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.4)', marginTop: '1px' }}>{s.label}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                  if (!cfg) return null
 
-              {/* Settings toggle */}
-              <button
-                onClick={() => setExpanded(isExpanded ? null : bot.id)}
-                disabled={isActive}
-                style={{
-                  width: '100%', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
-                  borderRadius: '8px', padding: '7px 12px', cursor: isActive ? 'default' : 'pointer',
-                  fontSize: '0.75rem', color: 'rgba(229,229,229,0.55)', display: 'flex', alignItems: 'center',
-                  justifyContent: 'space-between', marginBottom: isExpanded ? '0.75rem' : '0.75rem',
-                }}
-              >
-                <span>⚙ Settings</span>
-                <span style={{ transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▾</span>
-              </button>
-
-              {/* Settings panel */}
-              {isExpanded && !isActive && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '0.75rem', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.07)' }}>
-                  {/* Market */}
-                  <div>
-                    <label style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.4)', display: 'block', marginBottom: '4px' }}>MARKET</label>
-                    <select
-                      value={cfg.market}
-                      onChange={e => updateConfig(bot.id, 'market', e.target.value)}
-                      style={{ width: '100%', background: '#111', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '7px', padding: '6px 10px', fontSize: '0.8rem', color: '#e5e5e5' }}
-                    >
-                      {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.name}</option>)}
-                    </select>
-                  </div>
-                  {/* Stake / TP / SL */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
-                    {([['stake', 'Stake ($)', '0.35'], ['takeProfit', 'Take Profit ($)', '0'], ['stopLoss', 'Stop Loss ($)', '0']] as const).map(([key, label, ph]) => (
-                      <div key={key}>
-                        <label style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.4)', display: 'block', marginBottom: '3px' }}>{label}</label>
-                        <input
-                          type="number" min="0" step="0.01"
-                          value={cfg[key]}
-                          onChange={e => updateConfig(bot.id, key, e.target.value)}
-                          placeholder={ph}
-                          style={{ width: '100%', boxSizing: 'border-box', background: '#111', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '7px', padding: '5px 8px', fontSize: '0.8rem', color: '#e5e5e5' }}
-                        />
+                  return (
+                    <div key={botKey} style={{
+                      background: isActive ? `${meta.color}08` : '#050505',
+                      padding: '1rem',
+                      opacity: isBlocked ? 0.4 : 1,
+                      transition: 'all 0.2s',
+                    }}>
+                      {/* CT header */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.6rem' }}>
+                        <div style={{ width: 34, height: 34, borderRadius: '8px', background: `${meta.color}18`, border: `1px solid ${meta.color}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.9rem', color: meta.color, flexShrink: 0 }}>
+                          {meta.icon}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '0.85rem', color: meta.color }}>{ct}</div>
+                          <div style={{ fontSize: '0.67rem', color: 'rgba(229,229,229,0.4)' }}>{meta.desc}</div>
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
-              {/* Run / Stop button */}
-              <button
-                disabled={(!wsReady && !isActive) || isBlocked}
-                onClick={() => {
-                  if (isActive) {
-                    stopBot('Stopped by user')
-                  } else {
-                    syncConfig(bot.id)
-                    configRef.current = configs[bot.id]
-                    startBot(bot.id)
-                  }
-                }}
-                style={{
-                  width: '100%', padding: '0.7rem', borderRadius: '10px', border: 'none',
-                  fontWeight: 800, fontSize: '0.9rem', cursor: isBlocked ? 'not-allowed' : 'pointer',
-                  background: isActive
-                    ? 'rgba(239,68,68,0.15)'
-                    : isBlocked
-                    ? 'rgba(255,255,255,0.05)'
-                    : bot.color,
-                  color: isActive ? '#ef4444' : isBlocked ? 'rgba(229,229,229,0.25)' : '#000',
-                  border: isActive ? '1px solid rgba(239,68,68,0.35)' : 'none',
-                  transition: 'all 0.2s',
-                }}
-              >
-                {isActive ? '■ Stop Bot' : isBlocked ? 'Another bot is running' : '▶ Run Bot'}
-              </button>
+                      {/* Quick settings row */}
+                      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.6rem' }}>
+                        {/* Market */}
+                        <select
+                          disabled={isActive || isBlocked}
+                          value={cfg.market}
+                          onChange={e => setConfigs(p => ({ ...p, [botKey]: { ...p[botKey], market: e.target.value } }))}
+                          style={{ flex: 2, background: '#0d0d0d', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '7px', padding: '5px 6px', fontSize: '0.7rem', color: '#e5e5e5' }}
+                        >
+                          {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.name}</option>)}
+                        </select>
+
+                        {/* Stake */}
+                        <input
+                          type="number" step="0.01" min="0.35"
+                          disabled={isActive || isBlocked}
+                          value={cfg.stake}
+                          onChange={e => setConfigs(p => ({ ...p, [botKey]: { ...p[botKey], stake: e.target.value } }))}
+                          placeholder="Stake $"
+                          style={{ flex: 1, background: '#0d0d0d', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '7px', padding: '5px 6px', fontSize: '0.72rem', color: '#e5e5e5' }}
+                        />
+
+                        {/* Barrier (if applicable) */}
+                        {BARRIER_TYPES.has(ct) && (
+                          <select
+                            disabled={isActive || isBlocked}
+                            value={cfg.barrier}
+                            onChange={e => setConfigs(p => ({ ...p, [botKey]: { ...p[botKey], barrier: e.target.value } }))}
+                            style={{ width: 52, background: '#0d0d0d', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '7px', padding: '5px 4px', fontSize: '0.7rem', color: '#e5e5e5' }}
+                          >
+                            {[0,1,2,3,4,5,6,7,8,9].map(d => <option key={d} value={String(d)}>{d}</option>)}
+                          </select>
+                        )}
+                      </div>
+
+                      {/* Strategy params toggle */}
+                      {paramProps.length > 0 && !isActive && (
+                        <button
+                          onClick={() => setExpanded(isExpd ? null : botKey)}
+                          style={{ width: '100%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '7px', padding: '5px 10px', cursor: 'pointer', fontSize: '0.72rem', color: 'rgba(229,229,229,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isExpd ? '0.6rem' : '0.6rem' }}
+                        >
+                          <span>⚙ Strategy parameters</span>
+                          <span style={{ transform: isExpd ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▾</span>
+                        </button>
+                      )}
+
+                      {isExpd && paramProps.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', padding: '0.7rem', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)', marginBottom: '0.6rem' }}>
+                          {paramProps.map(([pName, pSchema]) => (
+                            <ParamField
+                              key={pName}
+                              name={pName}
+                              schema={pSchema}
+                              value={cfg.params[pName] ?? ''}
+                              onChange={v => setConfigs(prev => ({
+                                ...prev,
+                                [botKey]: { ...prev[botKey], params: { ...prev[botKey].params, [pName]: v } }
+                              }))}
+                            />
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Run / Stop */}
+                      <button
+                        disabled={(!authReady && !isActive) || isBlocked}
+                        onClick={() => isActive ? stopBot() : startBot(strategy, botKey)}
+                        style={{
+                          width: '100%', padding: '0.6rem', borderRadius: '9px',
+                          fontWeight: 800, fontSize: '0.85rem',
+                          cursor: isBlocked || (!authReady && !isActive) ? 'not-allowed' : 'pointer',
+                          background: isActive    ? 'rgba(239,68,68,0.12)'
+                                    : isBlocked   ? 'rgba(255,255,255,0.04)'
+                                    : meta.color,
+                          color:      isActive    ? '#ef4444'
+                                    : isBlocked   ? 'rgba(229,229,229,0.2)'
+                                    : '#000',
+                          border:     isActive    ? '1px solid rgba(239,68,68,0.3)' : 'none',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {isActive ? '■ Stop Bot' : isBlocked ? 'Bot running…' : `▶ Run ${ct}`}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )
         })}
       </div>
 
-      {/* Transaction log */}
-      {txLog.length > 0 && (
-        <div>
-          <h2 style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '0.75rem', color: 'rgba(229,229,229,0.7)' }}>Recent Trades</h2>
-          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '12px', overflow: 'hidden' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
-                  {['Bot', 'Type', 'Stake', 'Payout', 'P/L', 'Result'].map(h => (
-                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 600, color: 'rgba(229,229,229,0.4)', fontSize: '0.7rem' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {txLog.slice(0, 20).map((tx, i) => {
-                  const bot = BOTS.find(b => b.id === tx.botId)
-                  const pl  = tx.settled ? (tx.payout - tx.stake) : (tx.currentPnl ?? null)
-                  return (
-                    <tr key={tx.id} style={{ borderBottom: i < 19 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
-                      <td style={{ padding: '8px 12px', color: bot?.color ?? '#e5e5e5', fontWeight: 600 }}>
-                        {bot?.icon} {bot?.name ?? tx.botId}
-                      </td>
-                      <td style={{ padding: '8px 12px', color: 'rgba(229,229,229,0.6)', fontSize: '0.72rem' }}>{tx.contractType}</td>
-                      <td style={{ padding: '8px 12px' }}>${tx.stake.toFixed(2)}</td>
-                      <td style={{ padding: '8px 12px' }}>{tx.settled ? `$${tx.payout.toFixed(2)}` : '—'}</td>
-                      <td style={{ padding: '8px 12px', color: pl === null ? 'rgba(229,229,229,0.35)' : pl >= 0 ? '#22c55e' : '#ef4444', fontWeight: 700 }}>
-                        {pl === null ? '…' : `${pl >= 0 ? '+' : ''}${pl.toFixed(2)}`}
-                      </td>
-                      <td style={{ padding: '8px 12px' }}>
-                        {!tx.settled ? (
-                          <span style={{ color: '#FCA311', fontSize: '0.7rem' }}>● Live</span>
-                        ) : tx.won ? (
-                          <span style={{ color: '#22c55e', fontSize: '0.7rem', fontWeight: 700 }}>✓ Won</span>
-                        ) : (
-                          <span style={{ color: '#ef4444', fontSize: '0.7rem', fontWeight: 700 }}>✗ Lost</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
     </div>
   )
 }
