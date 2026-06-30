@@ -1,20 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
 
 export default function Navbar() {
-  const [authUrl, setAuthUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    fetch('/api/auth/preauth')
-      .then(r => r.json())
-      .then(d => { if (d.url) setAuthUrl(d.url) })
-      .catch(() => {})
-  }, [])
-
-  const href = authUrl ?? '/api/auth/login'
-
   return (
     <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-8 py-4"
       style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(20px)', borderBottom: '1px solid var(--border)' }}>
@@ -27,14 +15,14 @@ export default function Navbar() {
 
       {/* Auth buttons */}
       <div className="flex items-center gap-3">
-        <a href={href}
+        <a href="/api/auth/login?mode=login"
           className="px-5 py-2 rounded-full text-sm font-semibold text-white border transition-colors"
           style={{ borderColor: 'rgba(255,255,255,0.25)' }}
           onMouseOver={e => (e.currentTarget.style.borderColor = 'var(--gold)')}
           onMouseOut={e  => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.25)')}>
           Log in
         </a>
-        <a href={href}
+        <a href="/api/auth/login?mode=signup"
           className="flex items-center gap-2 px-5 py-2 rounded-full text-sm font-bold text-black btn-glow"
           style={{ background: 'var(--gold)' }}>
           Sign up

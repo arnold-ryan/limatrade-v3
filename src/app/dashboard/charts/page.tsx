@@ -442,17 +442,14 @@ export default function ChartsPage() {
           if (msg.msg_type === 'proposal') {
             if (msg.error) {
               const e = msg.error.message ?? 'Error'
-              // route errors by req_id as before
               if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: e })
               if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: e })
               return
             }
-            const p = msg.proposal as { id: string; ask_price: number; payout: number; contract_type: string }
+            const p = msg.proposal as { id: string; ask_price: number; payout: number }
             const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
-            const cur = ttRef.current
-            // Route by contract_type from response — reliable regardless of arrival order or stale updates
-            if (p.contract_type === cur.ctA) setPropA(prop)
-            else if (p.contract_type === cur.ctB) setPropB(prop)
+            if (msg.req_id === 10) setPropA(prop)
+            if (msg.req_id === 11) setPropB(prop)
           }
           if (msg.msg_type === 'buy') {
             const rid = msg.req_id as number
