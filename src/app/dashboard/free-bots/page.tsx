@@ -162,12 +162,20 @@ function parseParams(values: Record<string, string>, schema: Record<string, any>
   const props = schema?.properties ?? {}
   const out: Record<string, any> = {}
   for (const [k, raw] of Object.entries(values)) {
+    if (raw === '' || raw === undefined) continue  // skip empty — let API use its defaults
     const s = props[k]
     if (!s) { out[k] = raw; continue }
-    if (s.type === 'boolean') out[k] = raw === 'true'
-    else if (s.type === 'integer') out[k] = parseInt(raw) || 0
-    else if (s.type === 'number')  out[k] = parseFloat(raw) || 0
-    else out[k] = raw
+    if (s.type === 'boolean') {
+      out[k] = raw === 'true'
+    } else if (s.type === 'integer') {
+      const v = parseInt(raw)
+      if (!isNaN(v)) out[k] = v
+    } else if (s.type === 'number') {
+      const v = parseFloat(raw)
+      if (!isNaN(v)) out[k] = v
+    } else {
+      out[k] = raw
+    }
   }
   return out
 }
@@ -610,11 +618,11 @@ export default function FreeBotsPage() {
               const isDom = d === domDigit
               return (
                 <div key={d} style={{ flex: 1, textAlign: 'center' }}>
-                  <div style={{ height: 40, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', marginBottom: 3 }}>
+                  <div style={{ height: 40, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', marginBottom: 3, overflow: 'hidden' }}>
                     <div style={{
                       width: '70%', background: isDom ? '#FCA311' : 'rgba(255,255,255,0.12)',
                       borderRadius: '3px 3px 0 0',
-                      height: `${Math.max(4, (pct / 20) * 100)}%`,
+                      height: maxPct > 0 ? Math.max(2, Math.round((pct / maxPct) * 38)) : 2,
                       transition: 'height 0.3s',
                     }} />
                   </div>
