@@ -197,7 +197,6 @@ export default function Hero() {
 
   // Risk modal
   const [showModal, setShowModal] = useState(false)
-  const [authUrl, setAuthUrl] = useState<string | null>(null)
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -247,14 +246,6 @@ export default function Hero() {
     return () => io.disconnect()
   }, [])
 
-  // Pre-generate OAuth URL in background so click is instant
-  useEffect(() => {
-    fetch('/api/auth/preauth')
-      .then(r => r.json())
-      .then(d => { if (d.url) setAuthUrl(d.url) })
-      .catch(() => { /* fallback to /api/auth/login on click */ })
-  }, [])
-
   function handleCTAClick(e: React.MouseEvent) {
     e.preventDefault()
     // Check if user already acknowledged risk in this session
@@ -262,7 +253,7 @@ export default function Hero() {
       const ack = localStorage.getItem('lt_risk_ack')
       if (ack && Date.now() - parseInt(ack) < 24 * 60 * 60 * 1000) {
         // Acknowledged within last 24h — go straight to login
-        window.location.href = authUrl ?? '/api/auth/login'
+        window.location.href = '/api/auth/login'
         return
       }
     } catch { /* localStorage unavailable in some browsers */ }
@@ -272,7 +263,7 @@ export default function Hero() {
   function handleAccept() {
     try { localStorage.setItem('lt_risk_ack', String(Date.now())) } catch { /* ignore */ }
     setShowModal(false)
-    window.location.href = authUrl ?? '/api/auth/login'
+    window.location.href = '/api/auth/login'
   }
 
   const reviews = [...REVIEWS, ...REVIEWS]
