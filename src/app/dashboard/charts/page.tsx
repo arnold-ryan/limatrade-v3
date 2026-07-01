@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v106
+ * Lima Trade — Charts Page v107
  *
  * All fixes consolidated:
  *  - proposal request uses `underlying_symbol` (required by new API, not `symbol`)
@@ -178,6 +178,8 @@ export default function ChartsPage() {
   // Keep propA/B refs in sync with state (for buy-time sym guard)
   useEffect(() => { propARef.current = propA }, [propA])
   useEffect(() => { propBRef.current = propB }, [propB])
+  // Track which side was bought — read inside WS onmessage which has a stale buyingA/B closure
+  const buyingSideRef = useRef<'A'|'B'|null>(null)
 
   // ── Account-switch listener (unchanged from v82) ──────────────────────────
   useEffect(() => {
@@ -453,9 +455,10 @@ export default function ChartsPage() {
           setAuthReady(true); setAuthErr(null)
         }
 
-        ws.onmessage = (e) => {
+        ws.onmessage = (evt) => {
           if (!alive) return
-          const msg = JSON.parse(e.data)
+          try {
+          const msg = JSON.parse(evt.data)
 
           if (msg.balance) {
             setBalance(msg.balance.balance)
@@ -464,9 +467,9 @@ export default function ChartsPage() {
 
           if (msg.proposal) {
             if (msg.error) {
-              const e = msg.error?.message ?? 'Error'
-              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: e })
-              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: e })
+              const errMsg = msg.error?.message ?? 'Error'
+              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: errMsg })
+              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: errMsg })
               return
             }
             const p = msg.proposal as { id: string; ask_price: number; payout: number }
@@ -496,13 +499,15 @@ export default function ChartsPage() {
             const cur = ttRef.current
             const newPos: Pos = {
               id: b.contract_id, ct: b.contract_type,
-              side: buyingA ? 'A' : 'B', ttId: cur.id,
+              // Use ref to read buying side — avoids stale closure (buyingA/B captured at effect creation time)
+              side: buyingSideRef.current ?? 'A', ttId: cur.id,
               lA: cur.lA, lB: cur.lB, cA: cur.cA, cB: cur.cB,
               stake: parseFloat(stakeRef.current), payout: b.buy_price ?? 0,
               bid: b.buy_price ?? 0, profit: 0,
               status: 'open', barrier: cur.barrier ? String(barrierRef.current) : undefined,
               ts: Date.now(),
             }
+            buyingSideRef.current = null
             setPositions(ps => [...ps, newPos])
             setBuyingA(false); setBuyingB(false)
             setTimeout(() => subscribeProposals(), 300)
@@ -520,6 +525,7 @@ export default function ChartsPage() {
                 ? { ...p, profit: poc.profit ?? p.profit, bid: poc.bid_price ?? p.bid } : p))
             }
           }
+          } catch (err) { console.error('[Charts WS]', err) }  // prevent any handler error from crashing React
         }
 
         ws.onclose = () => { if (alive) { setAuthReady(false); setTimeout(connect, 3000) } }
@@ -545,6 +551,7 @@ export default function ChartsPage() {
     if (buyingA || buyingB) return
     // Guard: reject stale proposal from previous market
     if (prop.sym && prop.sym !== symbolRef.current) return
+    buyingSideRef.current = side  // set before state update so WS callback sees it
     if (side === 'A') setBuyingA(true); else setBuyingB(true)
     ws.send(JSON.stringify({ buy: prop.id, price: +(prop.ask * 1.02).toFixed(2) }))
   }, [buyingA, buyingB]) // propA/B read from refs inside
