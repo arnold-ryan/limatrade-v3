@@ -14,29 +14,6 @@ const QUOTES = [
 
 const CARDS = [
   {
-    title: 'Charts',
-    description: 'Live price chart with tick data, digit circles, and one-click Over/Under, Match/Differ, Rise/Fall trading.',
-    href: '/dashboard/charts',
-    accent: '#e6b429',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
-        <polyline points="16 7 22 7 22 13"/>
-      </svg>
-    ),
-  },
-  {
-    title: 'Manual Trader',
-    description: 'Trade all four contract types side-by-side with live digit frequency bars and sequence history.',
-    href: '/dashboard/manual-trader',
-    accent: '#FCA311',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-      </svg>
-    ),
-  },
-  {
     title: 'Free Bots',
     description: 'Browse 8 ready-made strategies — Martingale, D\'Alembert, Fibonacci — and deploy instantly.',
     href: '/dashboard/free-bots',
@@ -46,18 +23,6 @@ const CARDS = [
         <rect x="3" y="11" width="18" height="11" rx="2"/>
         <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         <line x1="12" y1="15" x2="12" y2="17"/>
-      </svg>
-    ),
-  },
-  {
-    title: 'Bot Builder',
-    description: 'Run an automated bot with live staking rules, trade tracking, and Pause / Stop controls.',
-    href: '/dashboard/bot-builder',
-    accent: '#a855f7',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
       </svg>
     ),
   },
@@ -81,6 +46,17 @@ const CARDS = [
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+      </svg>
+    ),
+  },
+  {
+    title: 'Manual Trader',
+    description: 'Trade all four contract types side-by-side with live digit frequency bars and sequence history.',
+    href: '/dashboard/manual-trader',
+    accent: '#FCA311',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
       </svg>
     ),
   },
