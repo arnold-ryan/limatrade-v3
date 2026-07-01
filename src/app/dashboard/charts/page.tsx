@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v107
+ * Lima Trade — Charts Page v108
  *
  * All fixes consolidated:
  *  - proposal request uses `underlying_symbol` (required by new API, not `symbol`)
@@ -461,7 +461,7 @@ export default function ChartsPage() {
           const msg = JSON.parse(evt.data)
 
           if (msg.balance) {
-            setBalance(msg.balance.balance)
+            setBalance(Number(msg.balance.balance) || 0)
             setCurrency(msg.balance.currency ?? 'USD')
           }
 
@@ -486,7 +486,8 @@ export default function ChartsPage() {
             if (msgSym && msgSym !== symbolRef.current) return
 
             const cur  = ttRef.current
-            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout, sym: msgSym ?? symbolRef.current }
+            // Coerce to number — new Deriv API may return monetary values as strings
+            const prop: Prop = { id: p.id, ask: Number(p.ask_price) || 0, payout: Number(p.payout) || 0, sym: msgSym ?? symbolRef.current }
             const isA = ptSide === 'A' || (ptSide === undefined && (echoCt !== undefined ? echoCt === cur.ctA : msg.req_id === 10))
             const isB = ptSide === 'B' || (ptSide === undefined && (echoCt !== undefined ? echoCt === cur.ctB : msg.req_id === 11))
             if      (isA) { propARef.current = prop; setPropA(prop) }
@@ -502,8 +503,8 @@ export default function ChartsPage() {
               // Use ref to read buying side — avoids stale closure (buyingA/B captured at effect creation time)
               side: buyingSideRef.current ?? 'A', ttId: cur.id,
               lA: cur.lA, lB: cur.lB, cA: cur.cA, cB: cur.cB,
-              stake: parseFloat(stakeRef.current), payout: b.buy_price ?? 0,
-              bid: b.buy_price ?? 0, profit: 0,
+              stake: parseFloat(stakeRef.current) || 0, payout: Number(b.buy_price) || 0,
+              bid: Number(b.buy_price) || 0, profit: 0,
               status: 'open', barrier: cur.barrier ? String(barrierRef.current) : undefined,
               ts: Date.now(),
             }
@@ -516,13 +517,16 @@ export default function ChartsPage() {
 
           if (msg.proposal_open_contract) {
             const poc = msg.proposal_open_contract
+            // Coerce to number — new API may return profit/bid as strings
+            const pocProfit   = poc.profit    !== undefined ? Number(poc.profit)    : undefined
+            const pocBidPrice = poc.bid_price !== undefined ? Number(poc.bid_price) : undefined
             if (poc.is_sold || poc.status === 'sold') {
-              const status = poc.profit >= 0 ? 'won' : 'lost'
+              const status = (pocProfit ?? 0) >= 0 ? 'won' : 'lost'
               setPositions(ps => ps.map(p => p.id === poc.contract_id
-                ? { ...p, status, profit: poc.profit ?? 0, bid: poc.bid_price ?? p.bid } : p))
+                ? { ...p, status, profit: pocProfit ?? 0, bid: pocBidPrice ?? p.bid } : p))
             } else {
               setPositions(ps => ps.map(p => p.id === poc.contract_id
-                ? { ...p, profit: poc.profit ?? p.profit, bid: poc.bid_price ?? p.bid } : p))
+                ? { ...p, profit: pocProfit ?? p.profit, bid: pocBidPrice ?? p.bid } : p))
             }
           }
           } catch (err) { console.error('[Charts WS]', err) }  // prevent any handler error from crashing React
