@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v108
+ * Lima Trade — Charts Page v109
  *
  * All fixes consolidated:
  *  - proposal request uses `underlying_symbol` (required by new API, not `symbol`)
@@ -540,11 +540,15 @@ export default function ChartsPage() {
     return () => { alive = false; ws?.close() }
   }, [subscribeProposals, authKey]) // v82 deps — unchanged
 
+  // Re-subscribe whenever any trade param or market changes, not just on auth-ready.
+  // Debounced 400ms so rapid stake typing doesn't flood the API.
+  // Ref-sync effects (symbolRef, stakeRef, ttRef, etc.) all appear earlier in the file
+  // so they are guaranteed to run before this effect within the same render flush.
   useEffect(() => {
     if (!authReady) return
     if (propTimerRef.current) clearTimeout(propTimerRef.current)
     propTimerRef.current = setTimeout(subscribeProposals, 400)
-  }, [authReady, subscribeProposals])
+  }, [symbol, ttIdx, barrier, tickDur, stake, authReady, subscribeProposals]) // eslint-disable-line
 
   // ── Buy ───────────────────────────────────────────────────────────────────
   const buy = useCallback((side: 'A'|'B') => {
