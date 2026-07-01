@@ -447,12 +447,14 @@ export default function ChartsPage() {
               if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: e })
               return
             }
-            const p = msg.proposal as { id: string; ask_price: number; payout: number; contract_type: string }
+            const p = msg.proposal as { id: string; ask_price: number; payout: number }
             const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
+            // echo_req carries the original contract_type we sent — most reliable routing.
+            // Fall back to req_id (10=A, 11=B) if echo_req is absent.
+            const echoCt = (msg.echo_req as any)?.contract_type as string | undefined
             const cur = ttRef.current
-            // Route by contract_type from response — reliable regardless of arrival order or stale updates
-            if (p.contract_type === cur.ctA) setPropA(prop)
-            else if (p.contract_type === cur.ctB) setPropB(prop)
+            if      (echoCt !== undefined ? echoCt === cur.ctA : msg.req_id === 10) setPropA(prop)
+            else if (echoCt !== undefined ? echoCt === cur.ctB : msg.req_id === 11) setPropB(prop)
           }
           if (msg.msg_type === 'buy') {
             const rid = msg.req_id as number
