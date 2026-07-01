@@ -48,7 +48,7 @@ const TFS = [
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Sym  { symbol: string; name: string; pip: number; dp: number; group: string; open: boolean }
-interface Prop { id: string; ask: number; payout: number; err?: string }
+interface Prop { id: string; ask: number; payout: number; sym?: string; err?: string }
 interface Pos  {
   id: number; ct: string; side: 'A'|'B'; ttId: string
   lA: string; lB: string; cA: string; cB: string
@@ -321,12 +321,17 @@ export default function ChartsPage() {
     if (ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ forget_all: 'proposal', req_id: 998 }))
     setPropA(null); setPropB(null)
+    propARef.current = null; propBRef.current = null  // immediate clear — don't wait for React flush
     const amt = parseFloat(stakeRef.current) || 1
     const cur = ttRef.current
     const bar = cur.barrier ? String(barrierRef.current) : undefined
-    const base = { proposal: 1, subscribe: 1, basis: 'stake', amount: amt, currency: currencyRef.current, underlying_symbol: symbolRef.current, duration: durRef.current, duration_unit: 't' }
-    ws.send(JSON.stringify({ ...base, contract_type: cur.ctA, ...(bar ? { barrier: bar } : {}), req_id: 10 }))
-    ws.send(JSON.stringify({ ...base, contract_type: cur.ctB, ...(bar ? { barrier: bar } : {}), req_id: 11 }))
+    const sym = symbolRef.current
+    const base = { proposal: 1, subscribe: 1, basis: 'stake', amount: amt, currency: currencyRef.current, underlying_symbol: sym, duration: durRef.current, duration_unit: 't' }
+    // passthrough is the official Deriv API pattern: data sent here returns verbatim in every
+    // subscription update, so we can reliably route proposals by market+side without
+    // relying on req_id or echo_req field ordering.
+    ws.send(JSON.stringify({ ...base, contract_type: cur.ctA, ...(bar ? { barrier: bar } : {}), passthrough: { sym, side: 'A' }, req_id: 10 }))
+    ws.send(JSON.stringify({ ...base, contract_type: cur.ctB, ...(bar ? { barrier: bar } : {}), passthrough: { sym, side: 'B' }, req_id: 11 }))
   }, [])
 
   const requestHistory = useCallback((ws: WebSocket, sym: string, gran: number) => {
@@ -448,15 +453,23 @@ export default function ChartsPage() {
               return
             }
             const p = msg.proposal as { id: string; ask_price: number; payout: number }
-            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
-            // Discard stale proposals from a previous market (arrive after forget_all in-flight)
+            // 1. passthrough is the official Deriv pattern — embedded at send-time, returns verbatim
+            const pt  = (msg.passthrough as any) ?? {}
+            const ptSym  = pt.sym  as string | undefined
+            const ptSide = pt.side as 'A' | 'B' | undefined
+            // 2. echo_req fallback (always present per new API spec)
             const echoSym = (msg.echo_req as any)?.underlying_symbol as string | undefined
-            if (echoSym && echoSym !== symbolRef.current) return
-            // Route by echo_req.contract_type; fall back to req_id (10=A 11=B)
-            const echoCt = (msg.echo_req as any)?.contract_type as string | undefined
+            const echoCt  = (msg.echo_req as any)?.contract_type    as string | undefined
+            // 3. Discard if either passthrough or echo_req says wrong market
+            const msgSym = ptSym ?? echoSym
+            if (msgSym && msgSym !== symbolRef.current) return
+            const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout, sym: msgSym ?? symbolRef.current }
             const cur = ttRef.current
-            if      (echoCt !== undefined ? echoCt === cur.ctA : msg.req_id === 10) setPropA(prop)
-            else if (echoCt !== undefined ? echoCt === cur.ctB : msg.req_id === 11) setPropB(prop)
+            // Route: passthrough.side → echo_req.contract_type → req_id
+            const isA = ptSide === 'A' || (ptSide === undefined && (echoCt !== undefined ? echoCt === cur.ctA : msg.req_id === 10))
+            const isB = ptSide === 'B' || (ptSide === undefined && (echoCt !== undefined ? echoCt === cur.ctB : msg.req_id === 11))
+            if      (isA) setPropA(prop)
+            else if (isB) setPropB(prop)
           }
           if (msg.msg_type === 'buy') {
             const rid = msg.req_id as number
@@ -567,6 +580,8 @@ export default function ChartsPage() {
     if (side === 'B' && buyingB) return
     const prop = side === 'A' ? propARef.current : propBRef.current
     if (!prop?.id || prop.err) { setBuyErr('Price not ready'); return }
+    // Guard: reject stale proposal from previous market
+    if (prop.sym && prop.sym !== symbolRef.current) { setBuyErr('Price refreshing — try again'); return }
     const ask = Number(prop.ask)
     if (!ask || isNaN(ask)) return
     side === 'A' ? setBuyingA(true) : setBuyingB(true)
