@@ -449,8 +449,10 @@ export default function ChartsPage() {
             }
             const p = msg.proposal as { id: string; ask_price: number; payout: number }
             const prop: Prop = { id: p.id, ask: p.ask_price, payout: p.payout }
-            // echo_req carries the original contract_type we sent — most reliable routing.
-            // Fall back to req_id (10=A, 11=B) if echo_req is absent.
+            // Discard stale proposals from a previous market (arrive after forget_all in-flight)
+            const echoSym = (msg.echo_req as any)?.underlying_symbol as string | undefined
+            if (echoSym && echoSym !== symbolRef.current) return
+            // Route by echo_req.contract_type; fall back to req_id (10=A 11=B)
             const echoCt = (msg.echo_req as any)?.contract_type as string | undefined
             const cur = ttRef.current
             if      (echoCt !== undefined ? echoCt === cur.ctA : msg.req_id === 10) setPropA(prop)
