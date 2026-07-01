@@ -3,20 +3,22 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 
+// visible: false = route exists in the codebase but tab is hidden until the page is built
 const TABS = [
-  { label: 'Dashboard',     href: '/dashboard',              icon: '⊞' },
-  { label: 'Bot Builder',   href: '/dashboard/bot-builder',  icon: '⚙' },
-  { label: 'Free Bots',     href: '/dashboard/free-bots',    icon: '🤖' },
-  { label: 'Speedbot',      href: '/dashboard/speedbot',     icon: '⚡' },
-  { label: 'AI Software',   href: '/dashboard/ai-software',  icon: '✦' },
-  { label: 'Auto Trader',   href: '/dashboard/auto-trader',  icon: '↺' },
-  { label: 'Analysis Tool', href: '/dashboard/analysis',     icon: '📊' },
-  { label: 'Manual Trader', href: '/dashboard/manual-trader', icon: '✎' },
-  { label: 'Bulk Trader',   href: '/dashboard/bulk-trader',  icon: '⣿' },
-  { label: 'Charts',        href: '/dashboard/charts',       icon: '▲' },
-  { label: 'Copy Trader',   href: '/dashboard/copy-trader',  icon: '⊕' },
-  { label: 'Risk Calculator',href: '/dashboard/risk-calc',   icon: '⚖' },
-  { label: 'Trade Academy', href: '/dashboard/academy',      icon: '🎓' },
+  { label: 'Dashboard',      href: '/dashboard',               icon: '⊞', visible: true  },
+  { label: 'Charts',         href: '/dashboard/charts',        icon: '▲', visible: true  },
+  { label: 'Manual Trader',  href: '/dashboard/manual-trader', icon: '✎', visible: true  },
+  { label: 'Free Bots',      href: '/dashboard/free-bots',     icon: '🤖', visible: true  },
+  { label: 'Bot Builder',    href: '/dashboard/bot-builder',   icon: '⚙', visible: true  },
+  { label: 'Analysis Tool',  href: '/dashboard/analysis',      icon: '📊', visible: true  },
+  { label: 'Speedbot',       href: '/dashboard/speedbot',      icon: '⚡', visible: true  },
+  // ── Not yet built — keep routes, hide tabs ──────────────────────────────
+  { label: 'AI Software',    href: '/dashboard/ai-software',   icon: '✦', visible: false },
+  { label: 'Auto Trader',    href: '/dashboard/auto-trader',   icon: '↺', visible: false },
+  { label: 'Bulk Trader',    href: '/dashboard/bulk-trader',   icon: '⣿', visible: false },
+  { label: 'Copy Trader',    href: '/dashboard/copy-trader',   icon: '⊕', visible: false },
+  { label: 'Risk Calculator',href: '/dashboard/risk-calc',     icon: '⚖', visible: false },
+  { label: 'Trade Academy',  href: '/dashboard/academy',       icon: '🎓', visible: false },
 ]
 
 export default function TabNav() {
@@ -40,7 +42,7 @@ export default function TabNav() {
           height: '44px',
         }}
       >
-        {TABS.map(tab => {
+        {TABS.filter(tab => tab.visible).map(tab => {
           // Active: exact match for /dashboard, prefix match for sub-pages
           const isActive =
             tab.href === '/dashboard'

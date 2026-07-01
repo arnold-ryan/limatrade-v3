@@ -771,7 +771,7 @@ export default function ChartsPage() {
               <div style={{ textAlign: 'center', color: txt2, fontSize: 11, paddingTop: 32 }}>
                 {posTab === 'open' ? 'No open positions' : 'No history'}
               </div>
-            ) : (posTab === 'open' ? openPos : closedPos).map(p => (
+            ) : [...(posTab === 'open' ? openPos : closedPos)].reverse().map(p => (
               <div key={p.id} style={{ padding: '8px 10px', borderBottom: `1px solid ${bdr}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                   <span style={{

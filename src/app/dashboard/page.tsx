@@ -14,9 +14,21 @@ const QUOTES = [
 
 const CARDS = [
   {
-    title: 'Manual Trader',
-    description: 'Trade Deriv synthetics with real-time charts and one-click execution.',
+    title: 'Charts',
+    description: 'Live price chart with tick data, digit circles, and one-click Over/Under, Match/Differ, Rise/Fall trading.',
     href: '/dashboard/charts',
+    accent: '#e6b429',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+        <polyline points="16 7 22 7 22 13"/>
+      </svg>
+    ),
+  },
+  {
+    title: 'Manual Trader',
+    description: 'Trade all four contract types side-by-side with live digit frequency bars and sequence history.',
+    href: '/dashboard/manual-trader',
     accent: '#FCA311',
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -26,7 +38,7 @@ const CARDS = [
   },
   {
     title: 'Free Bots',
-    description: 'Browse ready-made trading bots you can deploy instantly.',
+    description: 'Browse 8 ready-made strategies — Martingale, D\'Alembert, Fibonacci — and deploy instantly.',
     href: '/dashboard/free-bots',
     accent: '#22c55e',
     icon: (
@@ -39,7 +51,7 @@ const CARDS = [
   },
   {
     title: 'Bot Builder',
-    description: 'Design and backtest your own automated trading strategy.',
+    description: 'Run an automated bot with live staking rules, trade tracking, and Pause / Stop controls.',
     href: '/dashboard/bot-builder',
     accent: '#a855f7',
     icon: (
@@ -50,16 +62,25 @@ const CARDS = [
     ),
   },
   {
-    title: 'Risk Calculator',
-    description: 'Calculate position sizes and risk-to-reward ratios before you trade.',
-    href: '/dashboard/risk-calc',
+    title: 'Analysis Tool',
+    description: 'Deep digit frequency analysis, trend detection, and market statistics across all synthetic indices.',
+    href: '/dashboard/analysis',
     accent: '#3b82f6',
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="4" y="2" width="16" height="20" rx="2"/>
-        <line x1="8" y1="6" x2="16" y2="6"/>
-        <line x1="8" y1="10" x2="16" y2="10"/>
-        <line x1="8" y1="14" x2="12" y2="14"/>
+        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        <line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>
+      </svg>
+    ),
+  },
+  {
+    title: 'Speedbot',
+    description: 'High-speed automated trading with rapid entry configuration and fast execution.',
+    href: '/dashboard/speedbot',
+    accent: '#f97316',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
       </svg>
     ),
   },
