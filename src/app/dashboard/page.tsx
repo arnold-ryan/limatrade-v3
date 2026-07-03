@@ -14,8 +14,19 @@ const QUOTES = [
 
 const CARDS = [
   {
+    title: 'Manual Trader',
+    description: 'Trade Deriv synthetics with real-time charts and one-click execution.',
+    href: '/dashboard/charts',
+    accent: '#FCA311',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+    ),
+  },
+  {
     title: 'Free Bots',
-    description: 'Browse 8 ready-made strategies — Martingale, D\'Alembert, Fibonacci — and deploy instantly.',
+    description: 'Browse ready-made trading bots you can deploy instantly.',
     href: '/dashboard/free-bots',
     accent: '#22c55e',
     icon: (
@@ -27,36 +38,28 @@ const CARDS = [
     ),
   },
   {
-    title: 'Analysis Tool',
-    description: 'Deep digit frequency analysis, trend detection, and market statistics across all synthetic indices.',
-    href: '/dashboard/analysis',
+    title: 'Bot Builder',
+    description: 'Design and backtest your own automated trading strategy.',
+    href: '/dashboard/bot-builder',
+    accent: '#a855f7',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
+      </svg>
+    ),
+  },
+  {
+    title: 'Risk Calculator',
+    description: 'Calculate position sizes and risk-to-reward ratios before you trade.',
+    href: '/dashboard/risk-calc',
     accent: '#3b82f6',
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-        <line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>
-      </svg>
-    ),
-  },
-  {
-    title: 'Speedbot',
-    description: 'High-speed automated trading with rapid entry configuration and fast execution.',
-    href: '/dashboard/speedbot',
-    accent: '#f97316',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-      </svg>
-    ),
-  },
-  {
-    title: 'Manual Trader',
-    description: 'Trade all four contract types side-by-side with live digit frequency bars and sequence history.',
-    href: '/dashboard/manual-trader',
-    accent: '#FCA311',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        <rect x="4" y="2" width="16" height="20" rx="2"/>
+        <line x1="8" y1="6" x2="16" y2="6"/>
+        <line x1="8" y1="10" x2="16" y2="10"/>
+        <line x1="8" y1="14" x2="12" y2="14"/>
       </svg>
     ),
   },
