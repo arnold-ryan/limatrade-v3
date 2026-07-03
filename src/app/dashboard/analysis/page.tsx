@@ -361,7 +361,7 @@ function RunPanel({
 
   return (
     <div style={{
-      position: 'fixed', right: 0, top: '56px', bottom: '48px',
+      position: 'fixed', right: 0, top: '100px', bottom: '48px',
       width: '340px',
       transform: open ? 'translateX(0)' : 'translateX(340px)',
       transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',

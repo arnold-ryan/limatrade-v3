@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 /* ─── Constants ──────────────────────────────────────────────────────────── */
 const PUBLIC_WS_URL  = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const MAX_HISTORY    = 5000
-const MAX_RECONNECT  = 5
+const MAX_RECONNECT  = 99   // effectively unlimited — never stop retrying in a long session
 
 const MARKETS = [
   { symbol: '1HZ100V',   label: 'Volatility 100 (1s) Index' },
@@ -739,9 +739,10 @@ export default function ManualTraderPage() {
         }
 
         if (msg.msg_type === 'proposal') {
-          const p = (msg as { proposal: { id: string; ask_price: number; payout: number } }).proposal
+          const p = (msg as { proposal: { id: string; ask_price: unknown; payout: unknown } }).proposal
           const ct = REQ_TO_CT[msg.req_id as number]
-          if (ct) setProposals(prev => ({ ...prev, [ct]: { id: p.id, ask_price: p.ask_price, payout: p.payout } }))
+          // Number() coerce — new Deriv API returns ask_price / payout as strings
+          if (ct) setProposals(prev => ({ ...prev, [ct]: { id: p.id, ask_price: Number(p.ask_price) || 0, payout: Number(p.payout) || 0 } }))
         }
 
         if (msg.msg_type === 'buy') {
@@ -759,8 +760,8 @@ export default function ManualTraderPage() {
           } else {
             setBuying(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])))
           }
-          // Refresh proposal for the bought CT only
-          setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) resubscribeAll(ws) }, 200)
+          // Refresh proposals — use botWsRef.current so a reconnect between buy and timeout isn't missed
+          setTimeout(() => { const cws = botWsRef.current; if (cws?.readyState === WebSocket.OPEN) resubscribeAll(cws) }, 200)
         }
 
         if (msg.msg_type === 'portfolio') {
@@ -887,10 +888,16 @@ export default function ManualTraderPage() {
     return () => window.removeEventListener('deriv-account-switch', handler)
   }, [])
 
+  /* ── Clear proposals immediately on market switch ── */
+  /* ── Prevents buying a stale proposal from the previous market during the debounce window ── */
+  useEffect(() => {
+    setProposals({})
+  }, [symbol]) // eslint-disable-line
+
   /* ── Debounce resubscription on config changes ── */
   useEffect(() => {
-    if (!botWsRef.current) return
-    const t = setTimeout(() => { if (botWsRef.current?.readyState === WebSocket.OPEN) resubscribeAll(botWsRef.current) }, 450)
+    if (!wsReady) return
+    const t = setTimeout(() => { const cws = botWsRef.current; if (cws?.readyState === WebSocket.OPEN) resubscribeAll(cws) }, 450)
     return () => clearTimeout(t)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, ouBarrier, mdDigit, stakeOU, stakeMD, stakeEO, stakeRF, durOU, durMD, durEO, durRF, durUnitRF, currency, wsReady])
