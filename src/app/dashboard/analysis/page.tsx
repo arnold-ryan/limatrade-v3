@@ -1,11 +1,12 @@
 'use client'
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { bg0, bg1, bg2, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /* ─── Constants ─────────────────────────────────────────── */
 // New Deriv API public WebSocket — no auth/OTP needed for market data
 // Source: https://developers.deriv.com/docs/options/websocket/
-const WS_URL      = 'wss://api.derivws.com/trading/v1/options/ws/public'
+const WS_URL      = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
 // Bot WS URL is fetched via /api/user/ws-url (OTP-authenticated for trading)
 const MAX_HISTORY = 5000
 
@@ -110,7 +111,7 @@ function Bar({ label, color, count, total }: {
       </div>
       <span style={{
         width: '42px', fontSize: '0.72rem', fontWeight: 600,
-        color: 'rgba(229,229,229,0.7)', textAlign: 'right',
+        color: txt1, textAlign: 'right',
         fontVariantNumeric: 'tabular-nums', flexShrink: 0,
       }}>
         {pct.toFixed(1)}%
@@ -194,12 +195,12 @@ function Card({ title, streak, streakLabel, children }: {
   title: string; streak: number; streakLabel: string; children: React.ReactNode
 }) {
   return (
-    <div style={{ background: '#050505', padding: '1rem 1.25rem' }}>
+    <div style={{ background: bg1, padding: '1rem 1.25rem' }}>
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         marginBottom: '0.9rem',
       }}>
-        <span style={{ fontSize: '0.84rem', fontWeight: 700, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        <span style={{ fontSize: '0.84rem', fontWeight: 700, color: txt0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           {title}
         </span>
         {streak > 0 && (
@@ -229,7 +230,7 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
             fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
             border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
             background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
-            color: selected === d ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
+            color: selected === d ? 'var(--gold)' : txt1,
             transition: 'all 0.15s',
           }}
         >
@@ -271,9 +272,9 @@ type RunTab = 'summary' | 'transactions' | 'journal'
 function EmptyBoxIcon() {
   return (
     <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
-      <path d="M10 20L28 11L46 20V36L28 45L10 36V20Z" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
-      <path d="M10 20L28 29L46 20" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
-      <path d="M28 29V45" stroke="rgba(229,229,229,0.2)" strokeWidth="1.5"/>
+      <path d="M10 20L28 11L46 20V36L28 45L10 36V20Z" stroke="var(--txt2)" strokeWidth="1.5"/>
+      <path d="M10 20L28 29L46 20" stroke="var(--txt2)" strokeWidth="1.5"/>
+      <path d="M28 29V45" stroke="var(--txt2)" strokeWidth="1.5"/>
     </svg>
   )
 }
@@ -288,6 +289,7 @@ function RunPanel({
   setContractType,
   stake,
   setStake,
+  pipSize,
   barrier,
   setBarrier,
   botReady,
@@ -316,13 +318,14 @@ function RunPanel({
   txLog: TxEntry[]
   onViewDetail: () => void
   lastContractSummary: { symbol: string; contractType: string; stake: number; potentialPayout: number } | null
+  pipSize: number
 }) {
   const [tab, setTab] = useState<RunTab>('summary')
   const TABS: RunTab[] = ['summary', 'transactions', 'journal']
 
   const inputStyle: React.CSSProperties = {
-    background: '#0a0f1a', border: '1px solid var(--border)',
-    borderRadius: '8px', color: '#fff', fontSize: '0.78rem',
+    background: bg1, border: `1px solid ${bdr}`,
+    borderRadius: '8px', color: txt0, fontSize: '0.78rem',
     padding: '0.35rem 0.6rem', width: '100%', outline: 'none',
   }
 
@@ -344,9 +347,9 @@ function RunPanel({
   /* Stats always shown pinned to bottom — 3×2 grid */
   const statRows = [
     [
-      { label: 'Total stake',   value: `${stats.totalStake.toFixed(2)} ${currency}`,  color: '#fff' },
-      { label: 'Total payout',  value: `${stats.totalPayout.toFixed(2)} ${currency}`, color: '#fff' },
-      { label: 'No. of runs',   value: String(stats.runs), color: '#fff' },
+      { label: 'Total stake',   value: `${stats.totalStake.toFixed(2)} ${currency}`,  color: txt0 },
+      { label: 'Total payout',  value: `${stats.totalPayout.toFixed(2)} ${currency}`, color: txt0 },
+      { label: 'No. of runs',   value: String(stats.runs), color: txt0 },
     ],
     [
       { label: 'Contracts lost',     value: String(stats.lost), color: stats.lost  > 0 ? '#ef4444' : '#fff' },
@@ -366,8 +369,8 @@ function RunPanel({
       transform: open ? 'translateX(0)' : 'translateX(340px)',
       transition: 'transform 0.28s cubic-bezier(0.4,0,0.2,1)',
       zIndex: 60,
-      background: '#07111e',
-      borderLeft: '1px solid rgba(255,255,255,0.08)',
+      background: bg1,
+      borderLeft: `1px solid ${bdr}`,
       display: 'flex', flexDirection: 'column',
       boxShadow: open ? '-12px 0 40px rgba(0,0,0,0.7)' : 'none',
     }}>
@@ -378,11 +381,11 @@ function RunPanel({
         aria-label={open ? 'Close run panel' : 'Open run panel'}
         style={{
           position: 'absolute', left: '-22px', top: '50%', transform: 'translateY(-50%)',
-          width: '22px', height: '52px', background: '#07111e',
-          border: '1px solid rgba(255,255,255,0.08)', borderRight: 'none',
+          width: '22px', height: '52px', background: bg1,
+          border: `1px solid ${bdr}`, borderRight: 'none',
           borderRadius: '8px 0 0 8px', cursor: 'pointer',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: open ? 'rgba(229,229,229,0.45)' : 'rgba(252,163,17,0.85)', padding: 0,
+          color: open ? txt2 : 'rgba(252,163,17,0.85)', padding: 0,
           overflow: 'visible',
         }}
       >
@@ -408,7 +411,7 @@ function RunPanel({
       `}</style>
 
       {/* Tab bar */}
-      <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+      <div style={{ display: 'flex', flexShrink: 0, borderBottom: `1px solid ${bdr}` }}>
         {TABS.map(t => (
           <button
             key={t}
@@ -417,7 +420,7 @@ function RunPanel({
               flex: 1, padding: '0.8rem 0',
               fontSize: '0.8rem', fontWeight: tab === t ? 700 : 500,
               cursor: 'pointer', border: 'none', background: 'transparent',
-              color: tab === t ? '#fff' : 'rgba(229,229,229,0.4)',
+              color: tab === t ? '#fff' : txt2,
               borderBottom: tab === t ? '2px solid #fff' : '2px solid transparent',
               textTransform: 'capitalize', transition: 'color 0.15s',
             }}
@@ -437,12 +440,12 @@ function RunPanel({
             {/* Last contract summary */}
             {lastContractSummary && (
               <div style={{
-                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)',
+                background: 'var(--bg2)', border: `1px solid ${bdr}`,
                 borderRadius: '10px', padding: '0.75rem', marginBottom: '0.85rem',
               }}>
                 {/* Market + direction */}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
-                  <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#fff' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 700, color: txt0 }}>
                     {symLabel(lastContractSummary.symbol)}
                   </span>
                   <span style={{
@@ -457,19 +460,19 @@ function RunPanel({
                     {CONTRACT_TYPES.find(c => c.value === lastContractSummary.contractType)?.label?.split('→')[1]?.trim() ?? lastContractSummary.contractType}
                   </span>
                 </div>
-                <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', marginBottom: '0.65rem' }}>
+                <div style={{ fontSize: '0.62rem', color: txt2, marginBottom: '0.65rem' }}>
                   Tick 0
                 </div>
                 {/* Stats 2×2 */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
                   {[
                     { label: 'Total profit/loss', value: `${stats.profit >= 0 ? '+' : ''}${stats.profit.toFixed(2)} ${currency}`, color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff' },
-                    { label: 'Contract value',    value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: '#fff' },
-                    { label: 'Stake',             value: `${lastContractSummary.stake.toFixed(2)}`, color: '#fff' },
-                    { label: 'Potential payout',  value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: '#fff' },
+                    { label: 'Contract value',    value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: txt0 },
+                    { label: 'Stake',             value: `${lastContractSummary.stake.toFixed(2)}`, color: txt0 },
+                    { label: 'Potential payout',  value: `${lastContractSummary.potentialPayout.toFixed(2)}`, color: txt0 },
                   ].map(s => (
                     <div key={s.label}>
-                      <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', marginBottom: '1px' }}>{s.label}</div>
+                      <div style={{ fontSize: '0.58rem', color: txt2, marginBottom: '1px' }}>{s.label}</div>
                       <div style={{ fontSize: '0.78rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
                     </div>
                   ))}
@@ -489,7 +492,7 @@ function RunPanel({
                 background: botError ? '#ef4444' : botReady ? '#22c55e' : '#FCA311',
                 boxShadow: botReady && !botError ? '0 0 6px #22c55e66' : 'none',
               }}/>
-              <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
+              <span style={{ fontSize: '0.68rem', color: txt1 }}>
                 {botError ?? (botReady
                   ? `Connected · ${accountLabel || 'Account'} · ${currency}`
                   : 'Connecting to Deriv…')}
@@ -499,7 +502,7 @@ function RunPanel({
             {/* Bot config */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', marginBottom: '1rem' }}>
               <div>
-                <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
+                <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: txt2, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                   Contract Type
                 </label>
                 <select value={contractType} onChange={e => setContractType(e.target.value)} disabled={running}
@@ -509,7 +512,7 @@ function RunPanel({
               </div>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
                 <div style={{ flex: 1 }}>
-                  <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
+                  <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: txt2, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                     Stake ({currency})
                   </label>
                   <input type="number" min="0.35" step="0.01" value={stake} onChange={e => setStake(e.target.value)}
@@ -517,7 +520,7 @@ function RunPanel({
                 </div>
                 {needsBarrier(contractType) && (
                   <div style={{ width: '70px' }}>
-                    <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
+                    <label style={{ display: 'block', fontSize: '0.6rem', fontWeight: 600, color: txt2, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.3rem' }}>
                       Digit
                     </label>
                     <select value={barrier} onChange={e => setBarrier(e.target.value)} disabled={running}
@@ -532,8 +535,8 @@ function RunPanel({
             {/* Empty state */}
             {stats.runs === 0 && (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
-                <p style={{ color: 'rgba(229,229,229,0.6)', fontSize: '0.85rem', lineHeight: 1.65, textAlign: 'center', margin: 0 }}>
-                  When you&apos;re ready to trade, hit <strong style={{ color: '#fff' }}>Run</strong>.<br/>
+                <p style={{ color: txt1, fontSize: '0.85rem', lineHeight: 1.65, textAlign: 'center', margin: 0 }}>
+                  When you&apos;re ready to trade, hit <strong style={{ color: txt0 }}>Run</strong>.<br/>
                   You&apos;ll be able to track your bot&apos;s performance here.
                 </p>
               </div>
@@ -547,7 +550,7 @@ function RunPanel({
                 background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.15)',
               }}>
                 <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#22c55e', flexShrink: 0, animation: 'pulse 1.5s infinite' }}/>
-                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.55)' }}>
+                <span style={{ fontSize: '0.72rem', color: txt1 }}>
                   Bot running · {stats.runs} contract{stats.runs !== 1 ? 's' : ''} placed
                 </span>
               </div>
@@ -560,14 +563,14 @@ function RunPanel({
           <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
 
             {/* Action bar */}
-            <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem 1rem', borderBottom: `1px solid ${bdr}` }}>
               <button
                 onClick={downloadCSV}
                 disabled={txLog.length === 0}
                 style={{
                   padding: '0.4rem 0.9rem', borderRadius: '6px',
-                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                  border: `1px solid ${bdr}`, background: 'transparent',
+                  color: txLog.length === 0 ? txt2 : txt1,
                   fontSize: '0.78rem', fontWeight: 600,
                   cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
                 }}
@@ -577,8 +580,8 @@ function RunPanel({
                 disabled={txLog.length === 0}
                 style={{
                   padding: '0.4rem 0.9rem', borderRadius: '6px',
-                  border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-                  color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+                  border: `1px solid ${bdr}`, background: 'transparent',
+                  color: txLog.length === 0 ? txt2 : txt1,
                   fontSize: '0.78rem', fontWeight: 600,
                   cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
                 }}
@@ -588,16 +591,16 @@ function RunPanel({
             {txLog.length === 0 ? (
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem 1.5rem', textAlign: 'center' }}>
                 <EmptyBoxIcon />
-                <p style={{ color: 'rgba(229,229,229,0.7)', fontWeight: 600, fontSize: '0.88rem', margin: '1rem 0 0.4rem' }}>
+                <p style={{ color: txt1, fontWeight: 600, fontSize: '0.88rem', margin: '1rem 0 0.4rem' }}>
                   There are no transactions to display
                 </p>
-                <p style={{ color: 'rgba(229,229,229,0.38)', fontSize: '0.78rem', margin: '0 0 0.6rem' }}>
+                <p style={{ color: txt2, fontSize: '0.78rem', margin: '0 0 0.6rem' }}>
                   Here are the possible reasons:
                 </p>
                 {['The bot is not running', 'The stats are cleared'].map(r => (
                   <div key={r} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.25rem' }}>
-                    <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: 'rgba(229,229,229,0.3)', flexShrink: 0 }}/>
-                    <span style={{ fontSize: '0.78rem', color: 'rgba(229,229,229,0.38)' }}>{r}</span>
+                    <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: txt2, flexShrink: 0 }}/>
+                    <span style={{ fontSize: '0.78rem', color: txt2 }}>{r}</span>
                   </div>
                 ))}
               </div>
@@ -606,11 +609,11 @@ function RunPanel({
                 {/* Column headers */}
                 <div style={{
                   display: 'grid', gridTemplateColumns: '56px 1fr 90px',
-                  padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)',
-                  position: 'sticky', top: 0, background: '#07111e',
+                  padding: '0.45rem 1rem', borderBottom: `1px solid ${bdr}`,
+                  position: 'sticky', top: 0, background: bg1,
                 }}>
                   {['Type', 'Entry/Exit spot', 'Buy price and P/L'].map(h => (
-                    <span key={h} style={{ fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    <span key={h} style={{ fontSize: '0.62rem', fontWeight: 700, color: txt2, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                       {h}
                     </span>
                   ))}
@@ -621,14 +624,14 @@ function RunPanel({
                   const potentialPL = tx.potentialPayout - tx.stake
                   return (
                     <div key={tx.id}
-                      style={{ display: 'grid', gridTemplateColumns: '56px 1fr 90px', alignItems: 'center', padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', transition: 'background 0.1s' }}
+                      style={{ display: 'grid', gridTemplateColumns: '56px 1fr 90px', alignItems: 'center', padding: '0.6rem 1rem', borderBottom: `1px solid ${bdr}`, transition: 'background 0.1s' }}
                       onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
                       onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
                     >
                       {/* Type: market grid icon + direction arrow */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
                         {/* 4-dot market icon */}
-                        <svg width="14" height="14" viewBox="0 0 14 14" fill="rgba(229,229,229,0.25)">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="var(--txt2)">
                           <rect x="0" y="0" width="6" height="6" rx="1"/>
                           <rect x="8" y="0" width="6" height="6" rx="1"/>
                           <rect x="0" y="8" width="6" height="6" rx="1"/>
@@ -651,7 +654,7 @@ function RunPanel({
                             background: '#ef4444', border: '1.5px solid #ef4444',
                           }}/>
                           <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: '#fff' }}>
-                            {tx.entrySpot?.toFixed(2) ?? '—'}
+                            {tx.entrySpot != null ? tx.entrySpot.toFixed(pipSize) : '—'}
                           </span>
                         </div>
                         {/* Exit spot — empty circle, or spinner while pending */}
@@ -665,19 +668,19 @@ function RunPanel({
                           ) : (
                             <span style={{
                               width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
-                              background: 'transparent', border: '1.5px solid rgba(229,229,229,0.35)',
+                              background: 'transparent', border: `1.5px solid ${bdr}`,
                             }}/>
                           )}
-                          <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: 'rgba(229,229,229,0.55)' }}>
+                          <span style={{ fontSize: '0.72rem', fontVariantNumeric: 'tabular-nums', color: txt1 }}>
                             {/* Hide exit spot while pending — POC may arrive before SELL, avoid blip */}
-                            {!tx.pending && (tx.exitSpot?.toFixed(2) ?? '')}
+                            {!tx.pending && (tx.exitSpot != null ? tx.exitSpot.toFixed(pipSize) : '')}
                           </span>
                         </div>
                       </div>
 
                       {/* Buy price + P/L */}
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
+                        <div style={{ fontSize: '0.72rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>
                           {tx.stake.toFixed(2)} {currency}
                         </div>
                         {tx.pending ? (
@@ -716,12 +719,12 @@ function RunPanel({
           PINNED BOTTOM — Stats + Reset
           Same on every tab (matches Deriv UI)
       ══════════════════════════════════════ */}
-      <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', background: '#07111e', flexShrink: 0 }}>
+      <div style={{ borderTop: `1px solid ${bdr}`, background: bg1, flexShrink: 0 }}>
 
         {/* "What's this?" */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0.5rem 1rem 0' }}>
           <a href="https://deriv.com/help-centre/" target="_blank" rel="noopener noreferrer"
-            style={{ fontSize: '0.63rem', color: 'rgba(229,229,229,0.28)', textDecoration: 'underline', cursor: 'pointer' }}>
+            style={{ fontSize: '0.63rem', color: txt2, textDecoration: 'underline', cursor: 'pointer' }}>
             What&apos;s this?
           </a>
         </div>
@@ -732,7 +735,7 @@ function RunPanel({
             <div key={ri} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', marginBottom: ri === 0 ? '0.75rem' : 0 }}>
               {row.map(s => (
                 <div key={s.label}>
-                  <div style={{ fontSize: '0.63rem', fontWeight: 600, color: 'rgba(229,229,229,0.42)', marginBottom: '0.18rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div style={{ fontSize: '0.63rem', fontWeight: 600, color: txt2, marginBottom: '0.18rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {s.label}
                   </div>
                   <div style={{ fontSize: '0.78rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>
@@ -750,13 +753,13 @@ function RunPanel({
             onClick={onReset}
             style={{
               width: '100%', padding: '0.72rem',
-              borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)',
-              background: 'transparent', color: 'rgba(229,229,229,0.65)',
+              borderRadius: '8px', border: `1px solid ${bdr}`,
+              background: 'transparent', color: txt1,
               fontSize: '0.88rem', fontWeight: 700, cursor: 'pointer',
               letterSpacing: '0.03em', transition: 'background 0.15s, color 0.15s, border-color 0.15s',
             }}
             onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff'; b.style.borderColor = 'rgba(255,255,255,0.35)' }}
-            onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = 'rgba(229,229,229,0.65)'; b.style.borderColor = 'rgba(255,255,255,0.2)' }}
+            onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = txt1; b.style.borderColor = 'rgba(255,255,255,0.2)' }}
           >
             Reset
           </button>
@@ -780,14 +783,14 @@ function JournalTab({ txLog, currency, downloadCSV }: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
       {/* Action bar */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.06)', position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', borderBottom: `1px solid ${bdr}`, position: 'relative' }}>
         <button
           onClick={downloadCSV}
           disabled={txLog.length === 0}
           style={{
             padding: '0.4rem 0.9rem', borderRadius: '6px',
-            border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-            color: txLog.length === 0 ? 'rgba(229,229,229,0.2)' : 'rgba(229,229,229,0.7)',
+            border: `1px solid ${bdr}`, background: 'transparent',
+            color: txLog.length === 0 ? txt2 : txt1,
             fontSize: '0.78rem', fontWeight: 600,
             cursor: txLog.length === 0 ? 'not-allowed' : 'pointer',
           }}
@@ -797,7 +800,7 @@ function JournalTab({ txLog, currency, downloadCSV }: {
         <div style={{ position: 'relative' }}>
           <button
             onClick={() => setFiltersOpen(v => !v)}
-            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'transparent', border: 'none', cursor: 'pointer', color: 'rgba(229,229,229,0.5)', fontSize: '0.78rem', fontWeight: 500 }}
+            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', background: 'transparent', border: 'none', cursor: 'pointer', color: txt2, fontSize: '0.78rem', fontWeight: 500 }}
           >
             Filters
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -807,7 +810,7 @@ function JournalTab({ txLog, currency, downloadCSV }: {
           {filtersOpen && (
             <div style={{
               position: 'absolute', right: 0, top: 'calc(100% + 6px)',
-              background: '#0d1f35', border: '1px solid rgba(255,255,255,0.1)',
+              background: bg1, border: `1px solid ${bdr}`,
               borderRadius: '10px', padding: '0.5rem 0', minWidth: '160px',
               boxShadow: '0 8px 24px rgba(0,0,0,0.5)', zIndex: 80,
             }}>
@@ -822,7 +825,7 @@ function JournalTab({ txLog, currency, downloadCSV }: {
                     onChange={() => toggle(key)}
                     style={{ accentColor: '#FCA311', width: '14px', height: '14px', cursor: 'pointer' }}
                   />
-                  <span style={{ fontSize: '0.82rem', color: '#E5E5E5', textTransform: 'capitalize' }}>{key}</span>
+                  <span style={{ fontSize: '0.82rem', color: txt0, textTransform: 'capitalize' }}>{key}</span>
                 </label>
               ))}
             </div>
@@ -832,7 +835,7 @@ function JournalTab({ txLog, currency, downloadCSV }: {
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
         {txLog.length === 0 ? (
-          <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.3)', fontSize: '0.78rem', lineHeight: 1.6 }}>
+          <div style={{ padding: '2rem 1rem', textAlign: 'center', color: txt2, fontSize: '0.78rem', lineHeight: 1.6 }}>
             No events yet. Start the bot to see activity here.
           </div>
         ) : (
@@ -845,20 +848,20 @@ function JournalTab({ txLog, currency, downloadCSV }: {
               <div key={tx.id}>
                 {/* Bought entry */}
                 {filters.notifications && (
-                  <div style={{ padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div style={{ padding: '0.65rem 1rem', borderBottom: `1px solid ${bdr}` }}>
                     <div style={{ fontSize: '0.75rem', lineHeight: 1.5 }}>
                       <span style={{ color: '#4A90D9', fontWeight: 600 }}>Bought</span>
-                      <span style={{ color: 'rgba(229,229,229,0.65)' }}>: {description} (ID: {tx.id})</span>
+                      <span style={{ color: txt1 }}>: {description} (ID: {tx.id})</span>
                     </div>
-                    <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>{dateStr}</div>
+                    <div style={{ fontSize: '0.62rem', color: txt2, marginTop: '3px' }}>{dateStr}</div>
                   </div>
                 )}
                 {/* Result entry */}
-                <div style={{ padding: '0.65rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <div style={{ padding: '0.65rem 1rem', borderBottom: `1px solid ${bdr}` }}>
                   <div style={{ fontSize: '0.75rem', fontWeight: 600, color: pl > 0 ? '#22c55e' : '#ef4444' }}>
                     {pl > 0 ? 'Profit' : 'Loss'} amount: {pl > 0 ? '+' : ''}{pl.toFixed(2)} {currency}
                   </div>
-                  <div style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.28)', marginTop: '3px' }}>{dateStr}</div>
+                  <div style={{ fontSize: '0.62rem', color: txt2, marginTop: '3px' }}>{dateStr}</div>
                 </div>
               </div>
             )
@@ -871,13 +874,14 @@ function JournalTab({ txLog, currency, downloadCSV }: {
 
 /* ─── View Detail Modal ─────────────────────────────────── */
 function ViewDetailModal({
-  onClose, txLog, stats, accountId, currency,
+  onClose, txLog, stats, accountId, currency, pipSize,
 }: {
   onClose: () => void
   txLog: TxEntry[]
   stats: RunStats
   accountId: string
   currency: string
+  pipSize: number
 }) {
   return (
     <div
@@ -890,7 +894,7 @@ function ViewDetailModal({
       }}
     >
       <div style={{
-        background: '#0d1f35', border: '1px solid rgba(255,255,255,0.1)',
+        background: bg1, border: `1px solid ${bdr}`,
         borderRadius: '14px', width: '100%', maxWidth: '700px',
         maxHeight: '85vh', display: 'flex', flexDirection: 'column',
         overflow: 'hidden',
@@ -898,17 +902,17 @@ function ViewDetailModal({
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '1rem 1.25rem', borderBottom: '1px solid rgba(255,255,255,0.08)',
+          padding: '1rem 1.25rem', borderBottom: `1px solid ${bdr}`,
           flexShrink: 0,
         }}>
-          <span style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff' }}>
+          <span style={{ fontWeight: 700, fontSize: '0.95rem', color: txt0 }}>
             Transactions detailed summary
           </span>
           <button
             onClick={onClose}
             style={{
               background: 'transparent', border: 'none', cursor: 'pointer',
-              color: 'rgba(229,229,229,0.5)', padding: '4px',
+              color: txt2, padding: '4px',
             }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -924,21 +928,21 @@ function ViewDetailModal({
             display: 'grid',
             gridTemplateColumns: '160px 80px 80px 80px 80px 80px 80px 90px',
             padding: '0.6rem 1rem',
-            borderBottom: '1px solid rgba(255,255,255,0.06)',
-            background: '#07111e',
+            borderBottom: `1px solid ${bdr}`,
+            background: bg1,
             position: 'sticky', top: 0,
             gap: '0.5rem',
           }}>
             {['Timestamp','Reference','Market','Trade type','Entry spot','Exit spot','Buy price','Profit/Loss'].map(h => (
               <span key={h} style={{
                 fontSize: '0.62rem', fontWeight: 700,
-                color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em',
+                color: txt2, textTransform: 'uppercase', letterSpacing: '0.04em',
               }}>{h}</span>
             ))}
           </div>
 
           {txLog.length === 0 ? (
-            <div style={{ padding: '2rem', textAlign: 'center', color: 'rgba(229,229,229,0.35)', fontSize: '0.82rem' }}>
+            <div style={{ padding: '2rem', textAlign: 'center', color: txt2, fontSize: '0.82rem' }}>
               No transactions yet.
             </div>
           ) : txLog.map(tx => {
@@ -948,19 +952,19 @@ function ViewDetailModal({
                 display: 'grid',
                 gridTemplateColumns: '160px 80px 80px 80px 80px 80px 80px 90px',
                 padding: '0.65rem 1rem', gap: '0.5rem',
-                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                borderBottom: `1px solid ${bdr}`,
                 alignItems: 'center',
               }}
                 onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
                 onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
               >
-                <span style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.5)' }}>
+                <span style={{ fontSize: '0.7rem', color: txt2 }}>
                   {new Date(tx.time).toISOString().slice(0, 10)} {new Date(tx.time).toISOString().slice(11, 19)} GMT
                 </span>
-                <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)', fontVariantNumeric: 'tabular-nums' }}>
+                <span style={{ fontSize: '0.68rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>
                   {tx.id}
                 </span>
-                <span style={{ fontSize: '0.68rem', color: 'rgba(229,229,229,0.55)' }}>
+                <span style={{ fontSize: '0.68rem', color: txt1 }}>
                   {symLabel(tx.symbol).split(' ').slice(0, 2).join(' ')}
                 </span>
                 <span>
@@ -971,13 +975,13 @@ function ViewDetailModal({
                     <path d="M3 13L13 3M13 3H7M13 3V9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
                 </span>
-                <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>
-                  {tx.entrySpot?.toFixed(2) ?? '—'}
+                <span style={{ fontSize: '0.72rem', color: txt0, fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.entrySpot != null ? tx.entrySpot.toFixed(pipSize) : '—'}
                 </span>
-                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.6)', fontVariantNumeric: 'tabular-nums' }}>
-                  {tx.pending ? '—' : (tx.exitSpot?.toFixed(2) ?? '—')}
+                <span style={{ fontSize: '0.72rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>
+                  {tx.pending ? '—' : (tx.exitSpot != null ? tx.exitSpot.toFixed(pipSize) : '—')}
                 </span>
-                <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.7)', fontVariantNumeric: 'tabular-nums' }}>
+                <span style={{ fontSize: '0.72rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>
                   {tx.stake.toFixed(2)}
                 </span>
                 <span style={{
@@ -992,19 +996,19 @@ function ViewDetailModal({
         </div>
 
         {/* Summary row */}
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+        <div style={{ borderTop: `1px solid ${bdr}`, flexShrink: 0 }}>
           {/* Summary headers */}
           <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(8, 1fr)',
             padding: '0.5rem 1rem',
-            background: '#07111e',
+            background: bg1,
             gap: '0.5rem',
           }}>
             {['Account','No. of runs','Total stake','Total payout','Win','Loss','Total profit/loss','Balance'].map(h => (
               <span key={h} style={{
                 fontSize: '0.62rem', fontWeight: 700,
-                color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.04em',
+                color: txt2, textTransform: 'uppercase', letterSpacing: '0.04em',
               }}>{h}</span>
             ))}
           </div>
@@ -1013,10 +1017,10 @@ function ViewDetailModal({
             display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)',
             padding: '0.6rem 1rem 0.9rem', gap: '0.5rem',
           }}>
-            <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.65)' }}>{accountId || '—'}</span>
-            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.runs}</span>
-            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.totalStake.toFixed(2)}</span>
-            <span style={{ fontSize: '0.72rem', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>{stats.totalPayout.toFixed(2)}</span>
+            <span style={{ fontSize: '0.72rem', color: txt1 }}>{accountId || '—'}</span>
+            <span style={{ fontSize: '0.72rem', color: txt0, fontVariantNumeric: 'tabular-nums' }}>{stats.runs}</span>
+            <span style={{ fontSize: '0.72rem', color: txt0, fontVariantNumeric: 'tabular-nums' }}>{stats.totalStake.toFixed(2)}</span>
+            <span style={{ fontSize: '0.72rem', color: txt0, fontVariantNumeric: 'tabular-nums' }}>{stats.totalPayout.toFixed(2)}</span>
             <span style={{ fontSize: '0.72rem', color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>{stats.won}</span>
             <span style={{ fontSize: '0.72rem', color: '#ef4444', fontVariantNumeric: 'tabular-nums' }}>{stats.lost}</span>
             <span style={{
@@ -1025,7 +1029,7 @@ function ViewDetailModal({
             }}>
               {stats.profit >= 0 ? '+' : ''}{stats.profit.toFixed(2)} {currency}
             </span>
-            <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.55)', fontVariantNumeric: 'tabular-nums' }}>—</span>
+            <span style={{ fontSize: '0.72rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>—</span>
           </div>
         </div>
       </div>
@@ -1061,8 +1065,8 @@ function RunBar({
       left: 0,
       right: 0,
       height: '48px',
-      background: '#050505',
-      borderTop: '1px solid var(--border)',
+      background: bg1,
+      borderTop: `1px solid ${bdr}`,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -1106,7 +1110,7 @@ function RunBar({
         onClick={onCycleSpeed}
         style={{
           background: 'transparent',
-          border: '1px solid var(--border)',
+          border: '1px solid var(--bdr)',
           borderRadius: '8px',
           padding: '0.35rem 0.75rem',
           cursor: 'pointer',
@@ -1115,13 +1119,13 @@ function RunBar({
           gap: '0.4rem',
         }}
       >
-        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+        <span style={{ fontSize: '0.62rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
           Speed
         </span>
-        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'rgba(229,229,229,0.7)' }}>
+        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: txt1 }}>
           {SPEED_LABELS[speed]}
         </span>
-        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="rgba(229,229,229,0.35)" strokeWidth="1.5" strokeLinecap="round">
+        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="var(--txt2)" strokeWidth="1.5" strokeLinecap="round">
           <polyline points="1,1 5,5 9,1"/>
         </svg>
       </button>
@@ -1129,20 +1133,14 @@ function RunBar({
   )
 }
 
-/* ─── Scanner iframe ────────────────────────────────────── */
+/* ─── Scanner ────────────────────────────────────────────── */
+
 function ScannerView() {
   return (
     <iframe
       src="https://signals-scanner.vercel.app/"
       title="Signal Scanner"
-      style={{
-        width: '100%',
-        flex: 1,
-        border: 'none',
-        display: 'block',
-        minHeight: 'calc(100vh - 160px)',
-      }}
-      allow="autoplay"
+      style={{ flex: 1, width: '100%', border: 'none', display: 'block' }}
     />
   )
 }
@@ -1342,6 +1340,7 @@ export default function AnalysisPage() {
 
       /* ── Get OTP-authenticated WS URL from server ── */
       let wsUrl = ''
+      let wsToken = ''
       try {
         const res = await fetch('/api/user/ws-url')
         if (!res.ok) {
@@ -1354,7 +1353,7 @@ export default function AnalysisPage() {
           scheduleReconnect()
           return
         }
-        ;({ wsUrl } = await res.json() as { wsUrl: string })
+        ;({ wsUrl, token: wsToken } = await res.json() as { wsUrl: string; token: string })
       } catch {
         setBotError('Network error — retrying…')
         scheduleReconnect()
@@ -1370,23 +1369,25 @@ export default function AnalysisPage() {
       ws.onopen = () => {
         reconnectCount.current = 0
         setBotError(null)
-        /* New Deriv API: connection is already authenticated via OTP in URL.
-           Subscribe to transaction stream immediately.
-           req_id: 100 reserved for transaction subscription */
-        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
-        // Subscribe to balance updates — server pushes on every balance change
-        // Source: balance_request.schema.json — subscribe: 1, auth_required
-        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+        // Legacy Deriv WS: must authorize before any other calls
+        ws!.send(JSON.stringify({ authorize: wsToken }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
-        setBotReady(true)
-        if (runningRef.current) executeTrade(ws!)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
+
+        // Legacy WS: authorize response — now safe to subscribe
+        if (msg.authorize) {
+          setBotReady(true)
+          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+          if (runningRef.current) executeTrade(ws!)
+          return
+        }
 
         if (msg.error) {
           const err = msg.error as { message: string; code?: string }
@@ -1942,7 +1943,7 @@ export default function AnalysisPage() {
 
   /* Circle styling */
   function circleStyle(digit: number): React.CSSProperties {
-    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = 'rgba(229,229,229,0.65)'
+    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = txt1
     if      (digit === highest)    { bg = '#FCA311'; border = '2px solid #FCA311'; color = '#000' }
     else if (digit === secondHigh) { bg = 'rgba(252,163,17,0.2)'; border = '2px solid rgba(252,163,17,0.5)'; color = '#FCA311' }
     else if (digit === lowest)     { bg = 'rgba(239,68,68,0.22)'; border = '2px solid #ef4444'; color = '#ef4444' }
@@ -1971,13 +1972,13 @@ export default function AnalysisPage() {
   /* ── Render ── */
   return (
     <div style={{
-      background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column', paddingBottom: '48px',
+      background: bg0, minHeight: '100%', display: 'flex', flexDirection: 'column', paddingBottom: '48px',
       paddingRight: runOpen ? '340px' : '0',
       transition: 'padding-right 0.28s cubic-bezier(0.4,0,0.2,1)',
     }}>
 
       {/* ── Circles / Scanner toggle ── */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--bdr)' }}>
         {(['circles', 'scanner'] as const).map(t => (
           <button
             key={t}
@@ -1987,7 +1988,7 @@ export default function AnalysisPage() {
               fontSize: '0.82rem', fontWeight: 700,
               cursor: 'pointer', border: 'none',
               background: activeTab === t ? 'rgba(252,163,17,0.12)' : '#050505',
-              color: activeTab === t ? 'var(--gold)' : 'rgba(229,229,229,0.4)',
+              color: activeTab === t ? 'var(--gold)' : txt2,
               borderBottom: activeTab === t ? '2px solid var(--gold)' : '2px solid transparent',
               textTransform: 'capitalize', transition: 'all 0.15s',
             }}
@@ -2006,15 +2007,15 @@ export default function AnalysisPage() {
             position: 'relative',
             display: 'flex', alignItems: 'center', gap: '1rem',
             padding: '0.75rem 1.25rem',
-            borderBottom: '1px solid var(--border)',
-            background: '#050505', flexWrap: 'wrap',
+            borderBottom: `1px solid ${bdr}`,
+            background: bg1, flexWrap: 'wrap',
           }}>
             <select
               value={symbol}
               onChange={e => setSymbol(e.target.value)}
               style={{
-                background: '#0d0d0d', border: '1px solid var(--border)',
-                color: '#fff', padding: '0.4rem 0.75rem',
+                background: bg1, border: `1px solid ${bdr}`,
+                color: txt0, padding: '0.4rem 0.75rem',
                 borderRadius: '8px', fontSize: '0.82rem', cursor: 'pointer',
                 minWidth: '200px',
               }}
@@ -2025,7 +2026,7 @@ export default function AnalysisPage() {
             </select>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(229,229,229,0.5)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              <label style={{ fontSize: '0.75rem', fontWeight: 600, color: txt2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Ticks
               </label>
               <input
@@ -2035,8 +2036,8 @@ export default function AnalysisPage() {
                 max={MAX_HISTORY}
                 onChange={e => setTickCount(Math.min(MAX_HISTORY, Math.max(10, parseInt(e.target.value) || 1000)))}
                 style={{
-                  width: '80px', background: '#0d0d0d', border: '1px solid var(--border)',
-                  color: '#fff', padding: '0.4rem 0.5rem',
+                  width: '80px', background: bg1, border: `1px solid ${bdr}`,
+                  color: txt0, padding: '0.4rem 0.5rem',
                   borderRadius: '8px', fontSize: '0.82rem', textAlign: 'center',
                 }}
               />
@@ -2047,7 +2048,7 @@ export default function AnalysisPage() {
               position: 'absolute', left: '50%', transform: 'translateX(-50%)',
               textAlign: 'center', pointerEvents: 'none',
             }}>
-              <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              <div style={{ fontSize: '0.6rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Live Price
               </div>
               <div style={{
@@ -2055,15 +2056,15 @@ export default function AnalysisPage() {
                 fontVariantNumeric: 'tabular-nums',
                 animation: livePrice ? 'priceFlash 0.3s ease' : 'none',
               }}>
-                {livePrice?.toFixed(2) ?? '—'}
+                {livePrice != null ? livePrice.toFixed(pipSizeRef.current) : '—'}
               </div>
             </div>
           </div>
 
           {/* ── Digit circles ── */}
-          <div style={{ padding: '1.25rem 1rem 0.75rem', borderBottom: '1px solid var(--border)', background: '#020c1a' }}>
+          <div style={{ padding: '1.25rem 1rem 0.75rem', borderBottom: `1px solid ${bdr}`, background: bg0 }}>
             {loading ? (
-              <div style={{ textAlign: 'center', padding: '1rem', fontSize: '0.78rem', color: 'rgba(229,229,229,0.35)' }}>
+              <div style={{ textAlign: 'center', padding: '1rem', fontSize: '0.78rem', color: txt2 }}>
                 Loading {tickCount} ticks for {MARKETS.find(m => m.symbol === symbol)?.label ?? symbol}…
               </div>
             ) : (
@@ -2099,7 +2100,7 @@ export default function AnalysisPage() {
               display: 'grid',
               gridTemplateColumns: 'repeat(2, 1fr)',
               gap: '1px',
-              background: 'var(--border)',
+              background: 'var(--bdr)',
               flex: 1,
             }}>
               {/* flash fires on the last Sequence box of the active contract type's card only */}
@@ -2159,6 +2160,7 @@ export default function AnalysisPage() {
         txLog={txLog}
         onViewDetail={() => setShowDetailModal(true)}
         lastContractSummary={lastContractSummary}
+        pipSize={pipSizeRef.current}
       />
 
       {/* ── View Detail Modal ── */}
@@ -2169,6 +2171,7 @@ export default function AnalysisPage() {
           stats={runStats}
           accountId={activeAccountId}
           currency={currency}
+          pipSize={pipSizeRef.current}
         />
       )}
 

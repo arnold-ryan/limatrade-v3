@@ -10,6 +10,56 @@
   --down:   #ef4444;
   --border: rgba(252, 163, 17, 0.18);
   --glass:  rgba(20, 33, 61, 0.6);
+
+  /* ── Dashboard palette — dark (default) ── */
+  --bg0:        #0d1117;
+  --bg1:        #161b22;
+  --bg2:        #21262d;
+  --bdr:        #30363d;
+  --txt0:       #f0f6fc;
+  --txt1:       #8b949e;
+  --txt2:       #484f58;
+  --clr-green:  #3fb950;
+  --clr-red:    #f85149;
+  --clr-amber:  #e6b429;
+  --clr-blue:   #58a6ff;
+  /* AppHeader */
+  --hdr-bg:     rgba(7,17,30,0.97);
+  --hdr-bdr:    rgba(255,255,255,0.06);
+  --hdr-txt:    #E5E5E5;
+  --drop-bg:    #0d1821;
+  --drop-bg2:   #0a131d;
+  --drop-bdr:   rgba(255,255,255,0.09);
+  --drop-sep:   rgba(255,255,255,0.04);
+  --drop-row:   rgba(255,255,255,0.04);
+  --drop-txt:   rgba(255,255,255,0.7);
+  --drop-muted: rgba(255,255,255,0.5);
+}
+
+/* ── Dashboard palette — light ── */
+html.light {
+  --bg0:        #ffffff;
+  --bg1:        #f6f8fa;
+  --bg2:        #eaeef2;
+  --bdr:        #d0d7de;
+  --txt0:       #1f2328;
+  --txt1:       #57606a;
+  --txt2:       #8c959f;
+  --clr-green:  #1a7f37;
+  --clr-red:    #cf222e;
+  --clr-amber:  #9a6700;
+  --clr-blue:   #0969da;
+  /* AppHeader */
+  --hdr-bg:     rgba(255,255,255,0.97);
+  --hdr-bdr:    rgba(0,0,0,0.08);
+  --hdr-txt:    #1f2328;
+  --drop-bg:    #ffffff;
+  --drop-bg2:   #f6f8fa;
+  --drop-bdr:   rgba(0,0,0,0.12);
+  --drop-sep:   rgba(0,0,0,0.04);
+  --drop-row:   rgba(0,0,0,0.03);
+  --drop-txt:   rgba(0,0,0,0.7);
+  --drop-muted: rgba(0,0,0,0.5);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

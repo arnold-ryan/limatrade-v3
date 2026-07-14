@@ -18,6 +18,15 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
+      <head>
+        {/* Flash-prevention: apply saved theme before first paint */}
+        <script dangerouslySetInnerHTML={{ __html: `
+          try {
+            var t = localStorage.getItem('lima-theme');
+            if (t === 'light') document.documentElement.classList.add('light');
+          } catch(e) {}
+        ` }} />
+      </head>
       <body className={inter.className}>
         {children}
       </body>

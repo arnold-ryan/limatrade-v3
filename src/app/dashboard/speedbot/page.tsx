@@ -1,12 +1,13 @@
 'use client'
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /**
  * Speedbot — High-speed digit trading with dual strategy
  *
  * Deriv API (verified against docs):
- *  • Public ticks WS : wss://api.derivws.com/trading/v1/options/ws/public
+ *  • Public ticks WS : wss://ws.binaryws.com/websockets/v3?app_id=1089
  *  • Authenticated WS: /api/user/ws-url → OTP URL from Deriv REST
  *  • Buy            : { buy:'1', price:1000, parameters:{ underlying_symbol, contract_type, ... } }
  *  • Transaction    : { transaction:1, subscribe:1 } — auth_required, scope:trade
@@ -24,7 +25,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
  */
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
-const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
+const PUBLIC_WS_URL = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
 
 const MARKETS = [
   { symbol: '1HZ100V',  label: 'Volatility 100 (1s) Index' },
@@ -85,6 +86,9 @@ interface TxRow {
   won:          boolean
   settled:      boolean        // false while contract is still open
   currentPnl?:  number        // live P/L from proposal_open_contract (undefined = no data yet)
+  exitDigit?:   number        // last digit of exit tick (0-9), set on settlement
+  entrySpot?:   number        // live price captured at buy response time
+  exitSpot?:    number        // raw exit price from exit_spot or livePriceRef fallback
 }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
@@ -131,10 +135,10 @@ function SbBar({ label, color, count, total }: {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
       <span style={{ width: '44px', fontSize: '0.72rem', fontWeight: 600, color, flexShrink: 0 }}>{label}</span>
-      <div style={{ flex: 1, height: '8px', background: 'rgba(255,255,255,0.06)', borderRadius: '99px', overflow: 'hidden' }}>
+      <div style={{ flex: 1, height: '8px', background: 'var(--bg2)', borderRadius: '99px', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '99px', transition: 'width 0.5s ease' }} />
       </div>
-      <span style={{ width: '42px', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(229,229,229,0.7)', textAlign: 'right', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
+      <span style={{ width: '42px', fontSize: '0.72rem', fontWeight: 600, color: txt1, textAlign: 'right', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
         {pct.toFixed(1)}%
       </span>
     </div>
@@ -170,7 +174,7 @@ function SbSequence({ seq, colorMap, rawDigits, flashWon, flashExitDigit, ticksT
       {seq.map((s, i) => {
         const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
         const isFlashing = (i === flashIdx) && flashWon != null
-        const display   = rawDigits != null ? String(rawDigits[i] ?? s) : s
+        const display   = (s === 'E' || s === 'O' || s === 'M' || s === 'D') ? s : rawDigits != null ? String(rawDigits[i] ?? s) : s
         return (
           <div key={i} style={{
             width: '26px', height: '26px', borderRadius: '6px',
@@ -204,7 +208,7 @@ function SbDigitPicker({ selected, onSelect, disabled }: { selected: number; onS
           fontSize: '0.72rem', fontWeight: 700, cursor: disabled ? 'default' : 'pointer',
           border: `1.5px solid ${selected === d ? '#FCA311' : 'rgba(255,255,255,0.14)'}`,
           background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
-          color: selected === d ? '#FCA311' : 'rgba(229,229,229,0.55)',
+          color: selected === d ? '#FCA311' : txt1,
           transition: 'all 0.15s',
         }}>{d}</button>
       ))}
@@ -220,10 +224,11 @@ function SbDigitPicker({ selected, onSelect, disabled }: { selected: number; onS
  * - history.prices[] — initial batch
  * - tick.quote       — each live tick after subscribe
  */
-function PriceChart({ prices, livePrice, label }: {
+function PriceChart({ prices, livePrice, label, pipSize = 2 }: {
   prices: number[]
   livePrice: number | null
   label: string
+  pipSize?: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const visible = prices.slice(-300)
@@ -267,7 +272,7 @@ function PriceChart({ prices, livePrice, label }: {
       ctx.fillStyle = 'rgba(255,255,255,0.28)'
       ctx.font = `10px monospace`
       ctx.textAlign = 'right'
-      ctx.fillText(priceVal.toFixed(2), padL - 4, y + 4)
+      ctx.fillText(priceVal.toFixed(pipSize), padL - 4, y + 4)
     }
 
     // vertical grid lines
@@ -313,7 +318,7 @@ function PriceChart({ prices, livePrice, label }: {
       ctx.fillStyle = '#fff'
       ctx.font = 'bold 9px monospace'
       ctx.textAlign = 'left'
-      ctx.fillText(livePrice.toFixed(2), W - padR + 5, ly + 3.5)
+      ctx.fillText(livePrice.toFixed(pipSize), W - padR + 5, ly + 3.5)
     }
 
     // last-tick dot
@@ -327,19 +332,19 @@ function PriceChart({ prices, livePrice, label }: {
 
   if (prices.length < 2) {
     return (
-      <div style={{ height: '160px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(229,229,229,0.2)', fontSize: '0.78rem' }}>
+      <div style={{ height: '160px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: txt2, fontSize: '0.78rem' }}>
         Waiting for tick data…
       </div>
     )
   }
 
   return (
-    <div style={{ background: '#060f1c', borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.07)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 12px 5px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+    <div style={{ background: bg1, borderRadius: '10px', overflow: 'hidden', border: `1px solid ${bdr}` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 12px 5px', borderBottom: `1px solid ${bdr}` }}>
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: txt1, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
           {label}
         </span>
-        <span style={{ fontSize: '0.68rem', color: 'rgba(255,255,255,0.22)' }}>
+        <span style={{ fontSize: '0.68rem', color: txt2 }}>
           last {Math.min(prices.length, 300)} ticks
         </span>
       </div>
@@ -386,6 +391,10 @@ export default function SpeedbotPage() {
   })
   const [txLog,       setTxLog]      = useState<TxRow[]>([])
 
+  /* ── Mobile layout state ── */
+  const [isMobile,  setIsMobile]  = useState(false)
+  const [mobileTab, setMobileTab] = useState<'config' | 'chart' | 'txns'>('chart')
+
   /* ── Tick state ── */
   const [livePrice,   setLivePrice]  = useState<number | null>(null)
   const [prices,      setPrices]      = useState<number[]>([])
@@ -426,6 +435,7 @@ export default function SpeedbotPage() {
   const inTradeRef        = useRef(false)   // prevent concurrent trades
   const pocSubsRef        = useRef<Map<number, string>>(new Map()) // contract_id → subscription_id
   const pocExitDigitsRef  = useRef<Map<number, number>>(new Map()) // contract_id → exit tick last digit
+  const pocExitSpotsRef   = useRef<Map<number, number>>(new Map()) // contract_id → raw exit price
   /* ── Tick-gate: fire next trade on tick count, not on Deriv's async sell notification ── */
   const ticksCountRef        = useRef(0)              // sync tick counter (ref copy of ticksTotal)
   const ticksAtBuyRef        = useRef<number | null>(null)   // ticksCount when buy response arrived
@@ -459,9 +469,7 @@ export default function SpeedbotPage() {
   useEffect(() => { currencyRef.current    = currency    }, [currency])
   // keep effectiveTypeRef in sync when trade type changes manually (reset zigzag state)
   useEffect(() => { effectiveTypeRef.current = tradeType }, [tradeType])
-  // Sync analysis card digit with the trade barrier so the card always reflects
-  // what you're actually trading. The user can still override it in the card picker.
-  useEffect(() => { if (!running) setAnalysisDigit(prediction) }, [prediction, running])
+  // analysisDigit is fully independent — only changes via the picker
 
   /* ── Tick WebSocket (public — no auth) ── */
   useEffect(() => {
@@ -646,8 +654,9 @@ export default function SpeedbotPage() {
         }
       } catch { /* non-fatal */ }
 
-      /* Get OTP WS URL */
+      /* Get legacy WS URL + token */
       let wsUrl = ''
+      let wsToken = ''
       try {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
@@ -656,7 +665,7 @@ export default function SpeedbotPage() {
           scheduleReconnect()
           return
         }
-        ;({ wsUrl } = await r.json() as { wsUrl: string })
+        ;({ wsUrl, token: wsToken } = await r.json() as { wsUrl: string; token: string })
       } catch {
         setBotError('Network error — retrying…')
         scheduleReconnect()
@@ -669,22 +678,26 @@ export default function SpeedbotPage() {
 
       ws.onopen = () => {
         reconnectCount.current = 0
-        setBotError(null)
-        setBotReady(true)
-        // Subscribe to transaction stream (req_id 100 reserved)
-        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
-        // Subscribe to balance updates — server pushes on every balance change
-        // Source: balance_request.schema.json — subscribe: 1, auth_required
-        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+        // Legacy Deriv WS: must authorize before any other calls
+        ws!.send(JSON.stringify({ authorize: wsToken }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
-        if (runningRef.current) executeTrade(ws!)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
+
+        // Legacy WS: authorize response — now safe to subscribe
+        if (msg.authorize) {
+          setBotError(null)
+          setBotReady(true)
+          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+          if (runningRef.current) executeTrade(ws!)
+          return
+        }
 
         /* ── Error handling ── */
         if (msg.error) {
@@ -738,7 +751,10 @@ export default function SpeedbotPage() {
           // Arm the tick gate for this contract
           ticksAtBuyRef.current      = ticksCountRef.current
           openContractIdRef.current  = buy.contract_id
-          tickGateFiredIdRef.current = null   // clear any stale gate from previous contract
+          // NOTE: tickGateFiredIdRef is intentionally NOT cleared here.
+          // If cleared here, the sell handler for the previous tick-gated contract
+          // arrives after this and sees tickGateFiredIdRef=null → wasTickGated=false
+          // → fires a duplicate executeTrade while a new trade is already in flight.
 
           // Update statsRef synchronously, then mirror to state for rendering
           statsRef.current = {
@@ -758,6 +774,7 @@ export default function SpeedbotPage() {
             won:          false,
             settled:      false,
             currentPnl:   undefined,
+            entrySpot:    livePriceRef.current ?? undefined,
           }, ...prev].slice(0, 60))
 
           // Subscribe to real-time P/L for this contract
@@ -772,24 +789,32 @@ export default function SpeedbotPage() {
         /* ── Live contract P/L (proposal_open_contract subscription) ── */
         if (msg.msg_type === 'proposal_open_contract') {
           const poc = msg.proposal_open_contract as {
-            contract_id:             number
-            profit:                  number
-            exit_tick_display_value?: string  // present when contract has settled
-            subscription?:           { id: string }
+            contract_id:   number
+            profit:        number
+            // Per proposal_open_contract_response.schema.json (new Deriv API):
+            // exit_tick_display_value does NOT exist. The correct field is exit_spot (string).
+            exit_spot?:    string | null  // present when contract has settled
+            is_sold?:      number         // 1 when settled
+            subscription?: { id: string }
           }
           if (poc.subscription?.id) {
             pocSubsRef.current.set(poc.contract_id, poc.subscription.id)
           }
-          // Capture exit tick digit the moment Deriv reports it — this is the
-          // ACTUAL digit the contract was decided on, not whatever the tick stream
-          // happens to be showing at the time the sell event arrives.
-          if (poc.exit_tick_display_value) {
-            const exitPrice = parseFloat(poc.exit_tick_display_value)
+          // Capture exit digit from exit_spot when the contract has settled.
+          // exit_spot is the correct field per the new Deriv API schema.
+          if (poc.exit_spot) {
+            const exitPrice = parseFloat(poc.exit_spot)
             if (!isNaN(exitPrice)) {
-              pocExitDigitsRef.current.set(
-                poc.contract_id,
-                lastDigit(exitPrice, pipSizeRef.current)
-              )
+              const exitDig = lastDigit(exitPrice, pipSizeRef.current)
+              pocExitDigitsRef.current.set(poc.contract_id, exitDig)
+              pocExitSpotsRef.current.set(poc.contract_id, exitPrice)
+              // Stamp onto txLog entry from both sides (sell event and POC can
+              // arrive in either order — whichever comes second wins).
+              setTxLog(prev => prev.map(tx =>
+                tx.id === poc.contract_id && tx.exitDigit == null
+                  ? { ...tx, exitDigit: exitDig, exitSpot: exitPrice }
+                  : tx
+              ))
             }
           }
           setTxLog(prev => prev.map(tx =>
@@ -824,9 +849,20 @@ export default function SpeedbotPage() {
 
             /* ── Flash the correct digit bubble with result color ──
              * Prefer exit digit from proposal_open_contract (captured above).
-             * Falls back to undefined — SbSequence will flash the last box. */
+             * Falls back to live price digit — on 1-tick contracts the sell arrives
+             * after the exit tick has already been broadcast via the tick stream, so
+             * livePriceRef.current IS the exit price at this moment.
+             * The POC subscription is forgotten below, so POC-based capture is a
+             * race — the live price fallback guarantees we always have a digit. */
             const exitDigit = pocExitDigitsRef.current.get(tx.contract_id)
+              ?? (livePriceRef.current != null
+                  ? lastDigit(livePriceRef.current, pipSizeRef.current)
+                  : undefined)
+            const exitSpot = pocExitSpotsRef.current.get(tx.contract_id)
+              ?? livePriceRef.current
+              ?? undefined
             pocExitDigitsRef.current.delete(tx.contract_id)
+            pocExitSpotsRef.current.delete(tx.contract_id)
             setTradeFlash({ won, exitDigit })
             setTimeout(() => setTradeFlash(null), 900)
 
@@ -860,7 +896,7 @@ export default function SpeedbotPage() {
               if (idx !== -1) {
                 // Update existing pending entry
                 const updated = [...prev]
-                updated[idx] = { ...updated[idx], payout, won, settled: true, currentPnl: undefined }
+                updated[idx] = { ...updated[idx], payout, won, settled: true, currentPnl: undefined, exitDigit, exitSpot }
                 return updated
               }
               // Fallback — shouldn't happen but keep list safe
@@ -907,6 +943,10 @@ export default function SpeedbotPage() {
              * Martingale: must wait for sell result to set correct stake, fire here as usual.
              */
             const wasTickGated = tx.contract_id === tickGateFiredIdRef.current
+            // Clear the gate ID here — after checking it — not in the buy response handler.
+            // This ensures the sell for a tick-gated contract always recognises wasTickGated=true
+            // even when the new buy response has already arrived and armed its own tick gate.
+            if (wasTickGated) tickGateFiredIdRef.current = null
             if (runningRef.current && ws?.readyState === WebSocket.OPEN && !wasTickGated) {
               const delay = execSpeedRef.current === 'turbo' ? 0
                           : execSpeedRef.current === 'fast'  ? 400
@@ -965,6 +1005,7 @@ export default function SpeedbotPage() {
       }
       pocSubsRef.current.clear()
       pocExitDigitsRef.current.clear()
+      pocExitSpotsRef.current.clear()
       ws?.close()
       botWsRef.current = null
     }
@@ -984,6 +1025,14 @@ export default function SpeedbotPage() {
   useEffect(() => {
     runningRef.current = running
   }, [running])
+
+  /* ── Mobile breakpoint detector ── */
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 900)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
 
   /* ── Account-change watchdog (same as analysis page) ── */
   useEffect(() => {
@@ -1021,10 +1070,7 @@ export default function SpeedbotPage() {
     if (isNaN(s) || s < 0.35) { setBotError('Stake must be at least 0.35 USD'); return }
     setBotError(null)
     setStopReason(null)
-    const emptyStats = { runs: 0, won: 0, lost: 0, profit: 0, totalStake: 0, totalPayout: 0, consecLosses: 0 }
-    statsRef.current = emptyStats
-    setStats(emptyStats)
-    setTxLog([])
+    // Stats and txLog intentionally NOT cleared here — persist across runs until Reset
 
     // Initialize accumulator refs SYNCHRONOUSLY so the first trade uses correct values
     // even before the useEffect runs (which happens after the React render cycle).
@@ -1063,18 +1109,18 @@ export default function SpeedbotPage() {
 
   /* ── Styles ── */
   const inputSt: React.CSSProperties = {
-    background: '#0a0f1a', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '8px', color: '#fff', fontSize: '0.82rem',
+    background: bg1, border: `1px solid ${bdr}`,
+    borderRadius: '8px', color: txt0, fontSize: '0.82rem',
     padding: '0.45rem 0.65rem', width: '100%', outline: 'none',
     boxSizing: 'border-box',
   }
   const labelSt: React.CSSProperties = {
-    fontSize: '0.62rem', fontWeight: 700, color: 'rgba(229,229,229,0.38)',
+    fontSize: '0.62rem', fontWeight: 700, color: txt2,
     textTransform: 'uppercase', letterSpacing: '0.07em',
     display: 'block', marginBottom: '0.3rem',
   }
   const sectionSt: React.CSSProperties = {
-    background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)',
+    background: bg1, border: `1px solid ${bdr}`,
     borderRadius: '12px', padding: '1rem',
   }
 
@@ -1119,7 +1165,7 @@ export default function SpeedbotPage() {
     if (type === 'DIGITOVER' || type === 'DIGITUNDER') {
       const over  = sbDigits.filter(d => d > pred).length
       const under = sbDigits.filter(d => d <= pred).length
-      const seq   = slice.map(d => d > pred ? 'O' : 'U')
+      const seq   = slice.map(d => d > pred ? 'V' : 'U')
       const raw   = slice
       const { count, val } = trailingStreak(seq)
       return { title: `Over / Under (barrier ${pred})`, seq, raw,
@@ -1128,10 +1174,10 @@ export default function SpeedbotPage() {
           { label: 'Under', color: '#3b82f6', count: under },
         ],
         colorMap: {
-          O: { bg: 'rgba(34,197,94,0.15)',  border: '#22c55e', text: '#22c55e' },
+          V: { bg: 'rgba(34,197,94,0.15)',  border: '#22c55e', text: '#22c55e' },
           U: { bg: 'rgba(59,130,246,0.15)', border: '#3b82f6', text: '#3b82f6' },
         } as Record<string, SeqColor>,
-        streak: count, streakLabel: val === 'O' ? 'Over' : 'Under',
+        streak: count, streakLabel: val === 'V' ? 'Over' : 'Under',
         picker: true,
       }
     }
@@ -1163,7 +1209,7 @@ export default function SpeedbotPage() {
 
   return (
     <div style={{
-      background: '#000',
+      background: bg0,
       height: '100%',
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
@@ -1172,15 +1218,15 @@ export default function SpeedbotPage() {
       {/* ── Page header ── */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '0.9rem 1.5rem',
-        borderBottom: '1px solid rgba(255,255,255,0.07)',
-        background: '#050505', flexShrink: 0,
+        padding: isMobile ? '0.6rem 1rem' : '0.9rem 1.5rem',
+        borderBottom: `1px solid ${bdr}`,
+        background: bg1, flexShrink: 0,
       }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '1rem', fontWeight: 800, color: '#fff', letterSpacing: '-0.01em' }}>
+          <h1 style={{ margin: 0, fontSize: '1rem', fontWeight: 800, color: txt0, letterSpacing: '-0.01em' }}>
             Speed Bot
           </h1>
-          <p style={{ margin: 0, fontSize: '0.7rem', color: 'rgba(229,229,229,0.35)', marginTop: '1px' }}>
+          <p style={{ margin: 0, fontSize: '0.7rem', color: txt2, marginTop: '1px' }}>
             High-speed digit trading · {execSpeed === 'turbo' ? 'Turbo mode' : execSpeed === 'fast' ? 'Fast mode' : 'Normal mode'}
           </p>
         </div>
@@ -1189,11 +1235,11 @@ export default function SpeedbotPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
           {livePrice && (
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              <div style={{ fontSize: '0.58rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Live
               </div>
               <div style={{ fontSize: '1rem', fontWeight: 800, color: '#FCA311', fontVariantNumeric: 'tabular-nums' }}>
-                {livePrice.toFixed(2)}
+                {livePrice.toFixed(pipSizeRef.current)}
               </div>
             </div>
           )}
@@ -1204,7 +1250,7 @@ export default function SpeedbotPage() {
               boxShadow: botReady && !botError ? '0 0 6px #22c55e88' : 'none',
               animation: botReady && !botError ? 'pulse 2s ease infinite' : 'none',
             }} />
-            <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.5)' }}>
+            <span style={{ fontSize: '0.72rem', color: txt2 }}>
               {botError ? 'Error' : botReady ? `${accountLabel || 'Connected'} · ${currency}` : 'Connecting…'}
             </span>
           </div>
@@ -1242,10 +1288,40 @@ export default function SpeedbotPage() {
         </div>
       )}
 
-      {/* ── Two-column body ── */}
+      {/* ── Mobile panel tab switcher ── */}
+      {isMobile && (
+        <div style={{
+          display: 'flex', flexShrink: 0,
+          borderBottom: `1px solid ${bdr}`,
+          background: bg1,
+        }}>
+          {([
+            { key: 'config', label: '⚙ Config' },
+            { key: 'chart',  label: '📊 Chart'  },
+            { key: 'txns',   label: '📋 Trades' },
+          ] as { key: 'config' | 'chart' | 'txns'; label: string }[]).map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setMobileTab(tab.key)}
+              style={{
+                flex: 1, padding: '0.65rem 0',
+                background: 'none', border: 'none',
+                borderBottom: mobileTab === tab.key
+                  ? '2px solid #FCA311'
+                  : '2px solid transparent',
+                color: mobileTab === tab.key ? '#FCA311' : txt2,
+                fontSize: '0.75rem', fontWeight: 700,
+                cursor: 'pointer', transition: 'color 0.15s',
+              }}
+            >{tab.label}</button>
+          ))}
+        </div>
+      )}
+
+      {/* ── Body ── */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '340px 1fr 300px',
+        gridTemplateColumns: isMobile ? '1fr' : '340px 1fr 300px',
         flex: 1,
         minHeight: 0,
         overflow: 'hidden',
@@ -1253,11 +1329,12 @@ export default function SpeedbotPage() {
 
         {/* ════ LEFT: Config Panel ════ */}
         <div style={{
-          borderRight: '1px solid rgba(255,255,255,0.07)',
+          borderRight: isMobile ? 'none' : '1px solid rgba(255,255,255,0.07)',
           overflowY: 'auto',
           padding: '1.25rem 1rem',
-          display: 'flex', flexDirection: 'column', gap: '1rem',
-          background: '#030d1a',
+          display: isMobile && mobileTab !== 'config' ? 'none' : 'flex',
+          flexDirection: 'column', gap: '1rem',
+          background: bg0,
         }}>
 
           {/* Strategy selector */}
@@ -1280,7 +1357,7 @@ export default function SpeedbotPage() {
                       : 'rgba(255,255,255,0.04)',
                     color: strategy === s
                       ? (s === 'martingale' ? '#ef4444' : '#FCA311')
-                      : 'rgba(229,229,229,0.45)',
+                      : txt2,
                     fontWeight: 700, fontSize: '0.82rem',
                     cursor: running ? 'not-allowed' : 'pointer',
                     transition: 'all 0.15s', textTransform: 'capitalize',
@@ -1290,7 +1367,7 @@ export default function SpeedbotPage() {
                 </button>
               ))}
             </div>
-            <p style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)', margin: '0.5rem 0 0', lineHeight: 1.5 }}>
+            <p style={{ fontSize: '0.65rem', color: txt2, margin: '0.5rem 0 0', lineHeight: 1.5 }}>
               {strategy === 'martingale'
                 ? 'Stake multiplies after each loss, resets to base on win.'
                 : 'Fixed stake each trade. Optional zigzag / alternate-on-loss.'}
@@ -1357,7 +1434,7 @@ export default function SpeedbotPage() {
                     borderRadius: '8px',
                     border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.08)'}`,
                     background: execSpeed === sp ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
-                    color: execSpeed === sp ? '#FCA311' : 'rgba(229,229,229,0.45)',
+                    color: execSpeed === sp ? '#FCA311' : txt2,
                     fontWeight: 600, fontSize: '0.75rem',
                     cursor: running ? 'not-allowed' : 'pointer',
                   }}
@@ -1448,13 +1525,13 @@ export default function SpeedbotPage() {
                 <div key={item.key} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
                   padding: '0.65rem 0',
-                  borderBottom: item.key === 'zigzag' ? '1px solid rgba(255,255,255,0.06)' : 'none',
+                  borderBottom: item.key === 'zigzag' ? `1px solid ${bdr}` : 'none',
                 }}>
                   <div style={{ paddingRight: '0.75rem' }}>
-                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: item.val ? '#fff' : 'rgba(229,229,229,0.6)' }}>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 600, color: item.val ? txt0 : txt1 }}>
                       {item.label}
                     </div>
-                    <div style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.28)', marginTop: '2px', lineHeight: 1.4 }}>
+                    <div style={{ fontSize: '0.65rem', color: txt2, marginTop: '2px', lineHeight: 1.4 }}>
                       {item.desc}
                     </div>
                   </div>
@@ -1488,7 +1565,7 @@ export default function SpeedbotPage() {
                 <input type="number" min="1.1" step="0.1" value={martMult}
                   onChange={e => setMartMult(e.target.value)} disabled={running}
                   style={inputSt} />
-                <p style={{ fontSize: '0.63rem', color: 'rgba(229,229,229,0.28)', margin: '0.35rem 0 0', lineHeight: 1.4 }}>
+                <p style={{ fontSize: '0.63rem', color: txt2, margin: '0.35rem 0 0', lineHeight: 1.4 }}>
                   After a loss, next stake = accumulated_losses × multiplier. Resets on win.
                 </p>
               </div>
@@ -1500,7 +1577,7 @@ export default function SpeedbotPage() {
                   background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.15)',
                   borderRadius: '8px', marginTop: '0.5rem',
                 }}>
-                  <span style={{ fontSize: '0.72rem', color: 'rgba(229,229,229,0.45)' }}>Next stake</span>
+                  <span style={{ fontSize: '0.72rem', color: txt2 }}>Next stake</span>
                   <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
                     {fmt2(currentStakeRef.current)} {currency}
                   </span>
@@ -1513,11 +1590,12 @@ export default function SpeedbotPage() {
 
         </div>
 
-        {/* ════ RIGHT: Live Panel ════ */}
+        {/* ════ MIDDLE: Live Panel ════ */}
         <div style={{
-          display: 'flex', flexDirection: 'column',
+          display: isMobile && mobileTab !== 'chart' ? 'none' : 'flex',
+          flexDirection: 'column',
           overflow: 'hidden',
-          background: '#000',
+          background: bg0,
         }}>
           {/* Chart — full width, fixed height */}
           <div style={{ padding: '1rem 1.25rem 0', flexShrink: 0 }}>
@@ -1525,6 +1603,7 @@ export default function SpeedbotPage() {
               prices={prices}
               livePrice={livePrice}
               label={MARKETS.find(m => m.symbol === symbol)?.label ?? symbol}
+              pipSize={pipSizeRef.current}
             />
           </div>
 
@@ -1549,7 +1628,7 @@ export default function SpeedbotPage() {
                       {sbCard.streak}x {sbCard.streakLabel}
                     </span>
                   )}
-                  <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>
+                  <span style={{ fontSize: '0.65rem', color: txt2 }}>
                     {ticksTotal.toLocaleString()} ticks
                   </span>
                 </div>
@@ -1596,12 +1675,12 @@ export default function SpeedbotPage() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', marginBottom: '0.75rem' }}>
               {[
-                { label: 'Total Stake',  value: `${fmt2(stats.totalStake)} ${currency}`, color: '#fff' },
-                { label: 'Total Payout', value: `${fmt2(stats.totalPayout)} ${currency}`, color: '#fff' },
-                { label: 'No. of Runs',  value: String(stats.runs), color: '#fff' },
+                { label: 'Total Stake',  value: `${fmt2(stats.totalStake)} ${currency}`, color: txt0 },
+                { label: 'Total Payout', value: `${fmt2(stats.totalPayout)} ${currency}`, color: txt0 },
+                { label: 'No. of Runs',  value: String(stats.runs), color: txt0 },
               ].map(s => (
-                <div key={s.label} style={{ textAlign: 'center', padding: '0.6rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', marginBottom: '3px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.label}</div>
+                <div key={s.label} style={{ textAlign: 'center', padding: '0.6rem', background: 'var(--bg2)', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '0.6rem', color: txt2, marginBottom: '3px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.label}</div>
                   <div style={{ fontSize: '0.88rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
                 </div>
               ))}
@@ -1609,16 +1688,16 @@ export default function SpeedbotPage() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem' }}>
               {[
-                { label: 'Won',       value: String(stats.won),    color: stats.won  > 0 ? '#22c55e' : '#fff' },
-                { label: 'Lost',      value: String(stats.lost),   color: stats.lost > 0 ? '#ef4444' : '#fff' },
+                { label: 'Won',       value: String(stats.won),    color: stats.won  > 0 ? '#22c55e' : txt0 },
+                { label: 'Lost',      value: String(stats.lost),   color: stats.lost > 0 ? '#ef4444' : txt0 },
                 {
                   label: 'Profit/Loss',
                   value: `${stats.profit >= 0 ? '+' : ''}${fmt2(stats.profit)} ${currency}`,
                   color: profitColor,
                 },
               ].map(s => (
-                <div key={s.label} style={{ textAlign: 'center', padding: '0.6rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px' }}>
-                  <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', marginBottom: '3px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.label}</div>
+                <div key={s.label} style={{ textAlign: 'center', padding: '0.6rem', background: 'var(--bg2)', borderRadius: '8px' }}>
+                  <div style={{ fontSize: '0.6rem', color: txt2, marginBottom: '3px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.label}</div>
                   <div style={{ fontSize: '0.88rem', fontWeight: 700, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
                 </div>
               ))}
@@ -1630,12 +1709,12 @@ export default function SpeedbotPage() {
                 {/* Win rate bar */}
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
-                    <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.4)' }}>Win Rate</span>
+                    <span style={{ fontSize: '0.62rem', color: txt2 }}>Win Rate</span>
                     <span style={{ fontSize: '0.62rem', fontWeight: 700, color: stats.won > stats.lost ? '#22c55e' : '#ef4444' }}>
                       {stats.runs > 0 ? ((stats.won / stats.runs) * 100).toFixed(1) : '0.0'}%
                     </span>
                   </div>
-                  <div style={{ height: '5px', background: 'rgba(255,255,255,0.06)', borderRadius: '99px', overflow: 'hidden' }}>
+                  <div style={{ height: '5px', background: 'var(--bg2)', borderRadius: '99px', overflow: 'hidden' }}>
                     <div style={{
                       height: '100%', borderRadius: '99px',
                       width: `${stats.runs > 0 ? (stats.won / stats.runs) * 100 : 0}%`,
@@ -1668,39 +1747,40 @@ export default function SpeedbotPage() {
 
         {/* ════ RIGHT: Transactions Panel ════ */}
         <div style={{
-          borderLeft: '1px solid rgba(255,255,255,0.07)',
-          background: '#020a14',
-          display: 'flex', flexDirection: 'column',
+          borderLeft: isMobile ? 'none' : `1px solid ${bdr}`,
+          background: bg1,
+          display: isMobile && mobileTab !== 'txns' ? 'none' : 'flex',
+          flexDirection: 'column',
           overflow: 'hidden',
           paddingBottom: '64px',
         }}>
           {/* Header */}
           <div style={{
             padding: '1rem 1rem 0.75rem',
-            borderBottom: '1px solid rgba(255,255,255,0.06)',
+            borderBottom: `1px solid ${bdr}`,
             flexShrink: 0,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
-            <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>Transactions</span>
-            <span style={{ fontSize: '0.65rem', color: 'rgba(229,229,229,0.3)' }}>{txLog.length} records</span>
+            <span style={{ fontSize: '0.82rem', fontWeight: 700, color: txt0 }}>Transactions</span>
+            <span style={{ fontSize: '0.65rem', color: txt2 }}>{txLog.length} records</span>
           </div>
 
           {/* Scrollable list */}
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 0.75rem' }}>
             {txLog.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '3rem 0', color: 'rgba(229,229,229,0.2)', fontSize: '0.75rem' }}>
+              <div style={{ textAlign: 'center', padding: '3rem 0', color: txt2, fontSize: '0.75rem' }}>
                 No trades yet.<br />Press START to begin.
               </div>
             ) : (
               <>
                 {/* Column headers */}
                 <div style={{
-                  display: 'grid', gridTemplateColumns: '1fr 60px 55px 65px',
+                  display: 'grid', gridTemplateColumns: '36px 1fr 55px 65px',
                   padding: '0.5rem 0.25rem 0.25rem',
-                  position: 'sticky', top: 0, background: '#020a14', zIndex: 1,
+                  position: 'sticky', top: 0, background: bg1, zIndex: 1,
                 }}>
-                  {['Time','Type','Stake','P/L'].map(h => (
-                    <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</span>
+                  {['Digit','Entry / Exit','Stake','P/L'].map(h => (
+                    <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: txt2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</span>
                   ))}
                 </div>
                 {txLog.map(tx => {
@@ -1716,25 +1796,52 @@ export default function SpeedbotPage() {
                       : 'rgba(251,191,36,0.8)'   // amber = waiting for first POC tick
                   return (
                     <div key={tx.id} style={{
-                      display: 'grid', gridTemplateColumns: '1fr 60px 55px 65px',
+                      display: 'grid', gridTemplateColumns: '36px 1fr 55px 65px',
                       alignItems: 'center', padding: '0.45rem 0.25rem',
-                      borderBottom: '1px solid rgba(255,255,255,0.04)',
+                      borderBottom: `1px solid ${bdr}`,
                     }}>
-                      <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
-                        {new Date(tx.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                        <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: dotBg }} />
-                        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)' }}>
-                          {TRADE_TYPES.find(t => t.value === tx.contractType)?.label ?? tx.contractType}
-                        </span>
+                      {/* Exit digit bubble — shown when settled, dash while pending */}
+                      <div style={{
+                        width: '22px', height: '22px', borderRadius: '50%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '0.65rem', fontWeight: 700,
+                        background: tx.settled
+                          ? (tx.won ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)')
+                          : 'rgba(255,255,255,0.06)',
+                        border: `1px solid ${tx.settled ? (tx.won ? '#22c55e' : '#ef4444') : 'rgba(255,255,255,0.12)'}`,
+                        color: tx.settled
+                          ? (tx.won ? '#22c55e' : '#ef4444')
+                          : txt2,
+                      }}>
+                        {tx.settled && tx.exitDigit != null ? tx.exitDigit : '·'}
                       </div>
-                      <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)', fontVariantNumeric: 'tabular-nums' }}>
+                      <div>
+                        {/* Entry spot — filled red dot + price */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                          <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: '#ef4444' }} />
+                          <span style={{ fontSize: '0.62rem', color: txt1, fontVariantNumeric: 'tabular-nums' }}>
+                            {tx.entrySpot != null ? tx.entrySpot.toFixed(pipSizeRef.current) : '···'}
+                          </span>
+                        </div>
+                        {/* Exit spot — empty circle + price (settled) or dash */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginTop: '1px' }}>
+                          <span style={{ width: '5px', height: '5px', borderRadius: '50%', flexShrink: 0, background: 'transparent', border: `1px solid ${bdr}` }} />
+                          <span style={{ fontSize: '0.62rem', fontVariantNumeric: 'tabular-nums',
+                            color: tx.settled ? (tx.won ? '#22c55e' : '#ef4444') : txt2 }}>
+                            {tx.settled && tx.exitSpot != null ? tx.exitSpot.toFixed(pipSizeRef.current) : '─'}
+                          </span>
+                        </div>
+                        {/* Trade type label */}
+                        <div style={{ fontSize: '0.54rem', color: txt2, marginTop: '2px', letterSpacing: '0.03em' }}>
+                          {TRADE_TYPES.find(t => t.value === tx.contractType)?.label ?? tx.contractType}
+                        </div>
+                      </div>
+                      <span style={{ fontSize: '0.62rem', color: txt2, fontVariantNumeric: 'tabular-nums' }}>
                         {fmt2(tx.stake)}
                       </span>
                       <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
                         color: noData
-                          ? 'rgba(229,229,229,0.25)'
+                          ? txt2
                           : pl != null && pl >= 0 ? '#22c55e' : '#ef4444',
                         filter: noData ? 'blur(3px)' : 'none',
                       }}>
@@ -1755,8 +1862,8 @@ export default function SpeedbotPage() {
       {/* ── Sticky START / STOP bar ── */}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 150,
-        background: 'rgba(5,5,5,0.96)', backdropFilter: 'blur(12px)',
-        borderTop: '1px solid rgba(255,255,255,0.07)',
+        background: bg1, backdropFilter: 'blur(12px)',
+        borderTop: `1px solid ${bdr}`,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         gap: '0.75rem', padding: '10px 24px', height: '64px',
       }}>
@@ -1801,13 +1908,13 @@ export default function SpeedbotPage() {
           style={{
             height: '44px', padding: '0 1.25rem',
             borderRadius: '10px',
-            border: '1px solid rgba(255,255,255,0.12)',
-            background: 'transparent', color: 'rgba(229,229,229,0.5)',
+            border: `1px solid ${bdr}`,
+            background: 'transparent', color: txt2,
             fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer',
             transition: 'all 0.15s',
           }}
           onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff' }}
-          onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = 'rgba(229,229,229,0.5)' }}
+          onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = txt2 }}
         >
           Reset
         </button>

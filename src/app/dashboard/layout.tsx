@@ -21,7 +21,8 @@ export default async function DashboardLayout({
         flexDirection: 'column',
         height: '100dvh',
         overflow: 'hidden',
-        background: '#000',
+        background: 'var(--bg0)',
+        color: 'var(--txt0)',
       }}
     >
       <AppHeader />
@@ -30,6 +31,9 @@ export default async function DashboardLayout({
       <main
         style={{
           flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
           overflowY: 'auto',
           overflowX: 'hidden',
         }}

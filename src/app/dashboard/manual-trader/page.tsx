@@ -1,9 +1,10 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
-const PUBLIC_WS_URL  = 'wss://api.derivws.com/trading/v1/options/ws/public'
+const PUBLIC_WS_URL  = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
 const MAX_HISTORY    = 5000
 const MAX_RECONNECT  = 99   // effectively unlimited — never stop retrying in a long session
 
@@ -113,10 +114,10 @@ function Bar({ label, color, count, total }: {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
       <span style={{ width: '44px', fontSize: '0.72rem', fontWeight: 600, color, flexShrink: 0 }}>{label}</span>
-      <div style={{ flex: 1, height: '8px', background: 'rgba(255,255,255,0.06)', borderRadius: '99px', overflow: 'hidden' }}>
+      <div style={{ flex: 1, height: '8px', background: 'var(--bg2)', borderRadius: '99px', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: '99px', transition: 'width 0.5s ease' }} />
       </div>
-      <span style={{ width: '42px', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(229,229,229,0.7)', textAlign: 'right', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
+      <span style={{ width: '42px', fontSize: '0.72rem', fontWeight: 600, color: txt1, textAlign: 'right', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
         {pct.toFixed(1)}%
       </span>
     </div>
@@ -161,7 +162,7 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
           fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
           border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
           background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
-          color: selected === d ? 'var(--gold)' : 'rgba(229,229,229,0.55)',
+          color: selected === d ? 'var(--gold)' : txt1,
           transition: 'all 0.15s',
         }}>{d}</button>
       ))}
@@ -192,8 +193,8 @@ function TradeControls({
   onDigitSelect?: (d: number) => void; digitLabel?: string
 }) {
   const inp: React.CSSProperties = {
-    background: '#0a0f1a', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: '6px', color: '#fff', fontSize: '0.78rem',
+    background: bg1, border: `1px solid ${bdr}`,
+    borderRadius: '6px', color: txt0, fontSize: '0.78rem',
     padding: '0.3rem 0.45rem', outline: 'none', boxSizing: 'border-box',
   }
   const busy = buyingA || buyingB
@@ -201,12 +202,12 @@ function TradeControls({
   const canB = !!propB?.id && !propB.error && !busy && wsReady
 
   return (
-    <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '0.8rem', paddingTop: '0.8rem' }}>
+    <div style={{ borderTop: `1px solid ${bdr}`, marginTop: '0.8rem', paddingTop: '0.8rem' }}>
 
       {/* Stake + Digit (optional) + Duration — all in one row */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem' }}>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
+          <div style={{ fontSize: '0.57rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
             Stake ({currency})
           </div>
           <input type="number" min="0.35" step="0.01" value={stake}
@@ -217,7 +218,7 @@ function TradeControls({
         {/* Inline digit dropdown — only for OU / MD */}
         {showDigitPicker && selectedDigit !== undefined && onDigitSelect && (
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
+            <div style={{ fontSize: '0.57rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
               {digitLabel ?? 'Digit'}
             </div>
             <select
@@ -233,7 +234,7 @@ function TradeControls({
         )}
 
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '0.57rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
+          <div style={{ fontSize: '0.57rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>
             Duration
           </div>
           <div style={{ display: 'flex', gap: '0.3rem' }}>
@@ -248,7 +249,7 @@ function TradeControls({
                 <option value="h">H</option>
               </select>
             ) : (
-              <span style={{ ...inp, width: '50px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(229,229,229,0.3)', fontSize: '0.65rem' }}>
+              <span style={{ ...inp, width: '50px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: txt2, fontSize: '0.65rem' }}>
                 Ticks
               </span>
             )}
@@ -263,11 +264,11 @@ function TradeControls({
           { label: labelB, prop: propB, color: colorB },
         ].map(({ label, prop, color }) => (
           <div key={label} style={{
-            background: 'rgba(255,255,255,0.03)', borderRadius: '6px',
+            background: 'var(--bg2)', borderRadius: '6px',
             padding: '0.28rem 0.5rem', textAlign: 'center',
-            border: '1px solid rgba(255,255,255,0.05)',
+            border: `1px solid ${bdr}`,
           }}>
-            <div style={{ fontSize: '0.56rem', color: 'rgba(229,229,229,0.3)', marginBottom: '1px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
+            <div style={{ fontSize: '0.56rem', color: txt2, marginBottom: '1px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
             {prop?.error ? (
               <div style={{ fontSize: '0.58rem', color: '#ef4444', lineHeight: 1.2 }}>{prop.error.slice(0, 28)}</div>
             ) : prop?.ask_price ? (
@@ -275,7 +276,7 @@ function TradeControls({
                 {fmt2(prop.ask_price)} · {fmt2(prop.payout)}
               </div>
             ) : (
-              <div style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.18)' }}>—</div>
+              <div style={{ fontSize: '0.6rem', color: txt2 }}>—</div>
             )}
           </div>
         ))}
@@ -307,9 +308,9 @@ function Card({ title, streakCount, streakLabel, children }: {
   title: string; streakCount: number; streakLabel: string; children: React.ReactNode
 }) {
   return (
-    <div style={{ background: '#050505', padding: '1rem 1.25rem', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ background: bg1, padding: '1rem 1.25rem', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.9rem' }}>
-        <span style={{ fontSize: '0.84rem', fontWeight: 700, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        <span style={{ fontSize: '0.84rem', fontWeight: 700, color: txt0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           {title}
         </span>
         {streakCount > 0 && (
@@ -347,9 +348,9 @@ function PositionsPanel({
     <div style={{
       position: 'fixed', top: '100px', right: 0, bottom: 0,
       width: open ? '300px' : '0',
-      background: '#070f1e',
-      borderLeft: open ? '1px solid rgba(255,255,255,0.08)' : 'none',
-      borderTop: '1px solid rgba(255,255,255,0.08)',
+      background: bg1,
+      borderLeft: open ? `1px solid ${bdr}` : 'none',
+      borderTop: `1px solid ${bdr}`,
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
       transition: 'width 0.28s cubic-bezier(0.4,0,0.2,1)',
@@ -358,9 +359,9 @@ function PositionsPanel({
       <div style={{ minWidth: '300px', display: 'flex', flexDirection: 'column', height: '100%' }}>
 
         {/* Header */}
-        <div style={{ padding: '1rem', borderBottom: '1px solid rgba(255,255,255,0.07)', flexShrink: 0 }}>
+        <div style={{ padding: '1rem', borderBottom: `1px solid ${bdr}`, flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
-            <span style={{ fontSize: '0.84rem', fontWeight: 700, color: '#fff' }}>Positions</span>
+            <span style={{ fontSize: '0.84rem', fontWeight: 700, color: txt0 }}>Positions</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               {openList.length > 0 && (
                 <span style={{ fontSize: '0.72rem', fontWeight: 700, color: totalPL >= 0 ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
@@ -368,7 +369,7 @@ function PositionsPanel({
                 </span>
               )}
               <button onClick={onClose} style={{
-                background: 'none', border: 'none', color: 'rgba(229,229,229,0.4)',
+                background: 'none', border: 'none', color: txt2,
                 cursor: 'pointer', fontSize: '1rem', lineHeight: 1,
               }}>✕</button>
             </div>
@@ -378,7 +379,7 @@ function PositionsPanel({
               <button key={t} onClick={() => setTab(t)} style={{
                 flex: 1, padding: '0.35rem', borderRadius: '6px', border: 'none',
                 background: tab === t ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)',
-                color: tab === t ? 'var(--gold)' : 'rgba(229,229,229,0.4)',
+                color: tab === t ? 'var(--gold)' : txt2,
                 fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer', textTransform: 'capitalize',
               }}>
                 {t}{t === 'positions' && openList.length > 0 ? ` (${openList.length})` : ''}
@@ -392,7 +393,7 @@ function PositionsPanel({
 
           {tab === 'positions' && (
             openList.length === 0 ? (
-              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem' }}>
+              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: txt2, fontSize: '0.75rem' }}>
                 No open positions.
               </div>
             ) : (
@@ -402,16 +403,16 @@ function PositionsPanel({
                 const pl  = pos.profit
                 return (
                   <div key={pos.contract_id} style={{
-                    padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                    padding: '0.75rem 1rem', borderBottom: `1px solid ${bdr}`,
                     background: settled ? (won ? 'rgba(34,197,94,0.04)' : 'rgba(239,68,68,0.04)') : 'transparent',
                     transition: 'background 0.3s',
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
                       <div>
-                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#fff' }}>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: txt0 }}>
                           {CT_LABELS[pos.contract_type] ?? pos.contract_type}
                         </span>
-                        <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', marginLeft: '6px' }}>
+                        <span style={{ fontSize: '0.6rem', color: txt2, marginLeft: '6px' }}>
                           {pos.underlying.replace('_', ' ')}
                         </span>
                       </div>
@@ -420,7 +421,7 @@ function PositionsPanel({
                       </span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.3)', fontVariantNumeric: 'tabular-nums' }}>
+                      <span style={{ fontSize: '0.6rem', color: txt2, fontVariantNumeric: 'tabular-nums' }}>
                         {fmtTime(pos.purchase_time)} · {fmt2(pos.buy_price)} {pos.currency}
                       </span>
                       {!settled && pos.is_valid_to_sell === 1 ? (
@@ -431,7 +432,7 @@ function PositionsPanel({
                           fontSize: '0.62rem', fontWeight: 700, cursor: 'pointer',
                         }}>Sell</button>
                       ) : (
-                        <span style={{ fontSize: '0.6rem', fontWeight: 600, color: settled ? (won ? '#22c55e' : '#ef4444') : 'rgba(229,229,229,0.2)' }}>
+                        <span style={{ fontSize: '0.6rem', fontWeight: 600, color: settled ? (won ? '#22c55e' : '#ef4444') : txt2 }}>
                           {settled ? (won ? '✓ Won' : '✗ Lost') : 'Running…'}
                         </span>
                       )}
@@ -444,15 +445,15 @@ function PositionsPanel({
 
           {tab === 'history' && (
             history.length === 0 ? (
-              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'rgba(229,229,229,0.22)', fontSize: '0.75rem', flex: 1 }}>No trades yet.<br /><span style={{ fontSize: '0.65rem', opacity: 0.6 }}>Trades placed here will appear after settlement.</span></div>
+              <div style={{ padding: '3rem 1rem', textAlign: 'center', color: txt2, fontSize: '0.75rem', flex: 1 }}>No trades yet.<br /><span style={{ fontSize: '0.65rem', opacity: 0.6 }}>Trades placed here will appear after settlement.</span></div>
             ) : (
               <>
                 {/* Scrollable list */}
                 <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: '#070f1e', zIndex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.5rem 1rem 0.25rem', position: 'sticky', top: 0, background: bg1, zIndex: 1 }}>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', flex: 1 }}>
                       {['Time','Type','Stake','P/L'].map(h => (
-                        <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: 'rgba(229,229,229,0.28)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
+                        <span key={h} style={{ fontSize: '0.57rem', fontWeight: 700, color: txt2, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</span>
                       ))}
                     </div>
                     <button onClick={onClearHistory} style={{
@@ -465,15 +466,15 @@ function PositionsPanel({
                     const pl  = row.sell_price - row.buy_price
                     const won = pl > 0
                     return (
-                      <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.04)', width: '100%' }}>
-                        <span style={{ fontSize: '0.6rem', color: 'rgba(229,229,229,0.35)', fontVariantNumeric: 'tabular-nums' }}>
+                      <div key={row.contract_id} style={{ display: 'grid', gridTemplateColumns: '1fr 48px 52px 58px', alignItems: 'center', padding: '0.45rem 1rem', borderBottom: `1px solid ${bdr}`, width: '100%' }}>
+                        <span style={{ fontSize: '0.6rem', color: txt2, fontVariantNumeric: 'tabular-nums' }}>
                           {row.purchase_time ? fmtTime(row.purchase_time) : '—'}
                         </span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
                           <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: won ? '#22c55e' : '#ef4444', flexShrink: 0 }} />
-                          <span style={{ fontSize: '0.58rem', color: 'rgba(229,229,229,0.5)' }}>{CT_LABELS[row.contract_type] ?? row.contract_type}</span>
+                          <span style={{ fontSize: '0.58rem', color: txt2 }}>{CT_LABELS[row.contract_type] ?? row.contract_type}</span>
                         </div>
-                        <span style={{ fontSize: '0.62rem', color: 'rgba(229,229,229,0.5)', fontVariantNumeric: 'tabular-nums' }}>{fmt2(row.buy_price)}</span>
+                        <span style={{ fontSize: '0.62rem', color: txt2, fontVariantNumeric: 'tabular-nums' }}>{fmt2(row.buy_price)}</span>
                         <span style={{ fontSize: '0.62rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: won ? '#22c55e' : '#ef4444' }}>
                           {won ? '+' : ''}{fmt2(pl)}
                         </span>
@@ -484,12 +485,12 @@ function PositionsPanel({
                 {/* P/L footer */}
                 <div style={{
                   flexShrink: 0, padding: '0.75rem 1rem',
-                  borderTop: '1px solid rgba(255,255,255,0.08)',
-                  background: '#070f1e',
+                  borderTop: `1px solid ${bdr}`,
+                  background: bg1,
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 }}>
                   <div>
-                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>
+                    <div style={{ fontSize: '0.55rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>
                       Total P/L ({history.length} trades)
                     </div>
                     <div style={{ fontSize: '1rem', fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: historyPL >= 0 ? '#22c55e' : '#ef4444' }}>
@@ -497,8 +498,8 @@ function PositionsPanel({
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Win Rate</div>
-                    <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'rgba(229,229,229,0.75)' }}>
+                    <div style={{ fontSize: '0.55rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Win Rate</div>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 700, color: txt1 }}>
                       {history.length > 0 ? ((history.filter(r => r.sell_price > r.buy_price).length / history.length) * 100).toFixed(0) : '0'}%
                     </div>
                   </div>
@@ -690,27 +691,36 @@ export default function ManualTraderPage() {
       } catch { /**/ }
 
       let wsUrl = ''
+      let wsToken = ''
       try {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) { if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }; setWsError('Connection failed — retrying…'); scheduleReconnect(); return }
-        ;({ wsUrl } = await r.json() as { wsUrl: string })
+        ;({ wsUrl, token: wsToken } = await r.json() as { wsUrl: string; token: string })
       } catch { setWsError('Network error — retrying…'); scheduleReconnect(); return }
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
 
       ws.onopen = () => {
-        reconnectCount.current = 0; setWsError(null); setWsReady(true)
-        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-        ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
-        ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
-        resubscribeAll(ws!)
+        reconnectCount.current = 0
+        // Legacy Deriv WS: must authorize before any other calls
+        ws!.send(JSON.stringify({ authorize: wsToken }))
         ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 30_000)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
+
+        // Legacy WS: authorize response — now safe to subscribe
+        if (msg.authorize) {
+          setWsError(null); setWsReady(true)
+          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+          ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
+          ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
+          resubscribeAll(ws!)
+          return
+        }
 
         if (msg.error) {
           const err = msg.error as { message: string; code?: string }
@@ -986,7 +996,7 @@ export default function ManualTraderPage() {
 
   /* Circle style */
   function circleStyle(d: number): React.CSSProperties {
-    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = 'rgba(229,229,229,0.65)'
+    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = txt1
     if      (d === highest)    { bg = '#FCA311'; border = '2px solid #FCA311'; color = '#000' }
     else if (d === secondHigh) { bg = 'rgba(252,163,17,0.2)'; border = '2px solid rgba(252,163,17,0.5)'; color = '#FCA311' }
     else if (d === lowest)     { bg = 'rgba(239,68,68,0.22)'; border = '2px solid #ef4444'; color = '#ef4444' }
@@ -1001,7 +1011,7 @@ export default function ManualTraderPage() {
   /* ── Render ── */
   return (
     <div style={{
-      background: '#000', minHeight: '100%', display: 'flex', flexDirection: 'column',
+      background: bg0, minHeight: '100%', display: 'flex', flexDirection: 'column',
       paddingRight: panelOpen ? '300px' : '0',
       transition: 'padding-right 0.28s cubic-bezier(0.4,0,0.2,1)',
     }}>
@@ -1009,25 +1019,25 @@ export default function ManualTraderPage() {
       {/* ── Controls bar ── */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: '1rem',
-        padding: '0.65rem 1.5rem', borderBottom: '1px solid rgba(255,255,255,0.07)',
-        background: '#050505', flexShrink: 0, flexWrap: 'wrap',
+        padding: '0.65rem 1.5rem', borderBottom: `1px solid ${bdr}`,
+        background: bg1, flexShrink: 0, flexWrap: 'wrap',
       }}>
         <select value={symbol} onChange={e => setSymbol(e.target.value)} style={{
-          background: '#0a0f1a', border: '1px solid rgba(255,255,255,0.12)',
-          borderRadius: '8px', color: '#fff', fontSize: '0.8rem',
+          background: bg1, border: `1px solid ${bdr}`,
+          borderRadius: '8px', color: txt0, fontSize: '0.8rem',
           padding: '0.38rem 0.6rem', cursor: 'pointer', outline: 'none',
         }}>
           {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.label}</option>)}
         </select>
 
-        <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'rgba(229,229,229,0.4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>TICKS</span>
+        <span style={{ fontSize: '0.7rem', fontWeight: 600, color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>TICKS</span>
         <input type="number" min="100" max="5000" step="100" value={tickCount}
           onChange={e => setTickCount(Math.min(5000, Math.max(100, parseInt(e.target.value) || 1000)))}
-          style={{ background: '#0a0f1a', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '8px', color: '#fff', fontSize: '0.8rem', padding: '0.38rem 0.6rem', outline: 'none', width: '72px' }} />
+          style={{ background: bg1, border: `1px solid ${bdr}`, borderRadius: '8px', color: txt0, fontSize: '0.8rem', padding: '0.38rem 0.6rem', outline: 'none', width: '72px' }} />
 
         {livePrice != null && (
           <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-            <div style={{ fontSize: '0.55rem', color: 'rgba(229,229,229,0.35)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>LIVE PRICE</div>
+            <div style={{ fontSize: '0.55rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>LIVE PRICE</div>
             <div style={{ fontSize: '1.2rem', fontWeight: 800, color: '#FCA311', fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 }}>
               {livePrice.toFixed(pipSizeRef.current)}
             </div>
@@ -1041,7 +1051,7 @@ export default function ManualTraderPage() {
             boxShadow: wsReady && !wsError ? '0 0 6px #22c55e88' : 'none',
             animation: wsReady && !wsError ? 'pulse 2s ease infinite' : 'none',
           }} />
-          <span style={{ fontSize: '0.7rem', color: 'rgba(229,229,229,0.45)' }}>
+          <span style={{ fontSize: '0.7rem', color: txt2 }}>
             {wsError ? 'Error' : wsReady ? `${accountLabel || 'Live'} · ${currency}` : 'Connecting…'}
           </span>
         </div>
@@ -1051,7 +1061,7 @@ export default function ManualTraderPage() {
           padding: '0.32rem 0.65rem', borderRadius: '7px',
           border: `1px solid ${panelOpen ? 'rgba(252,163,17,0.4)' : 'rgba(255,255,255,0.12)'}`,
           background: panelOpen ? 'rgba(252,163,17,0.1)' : 'rgba(255,255,255,0.04)',
-          color: panelOpen ? '#FCA311' : 'rgba(229,229,229,0.55)',
+          color: panelOpen ? '#FCA311' : txt1,
           fontSize: '0.7rem', fontWeight: 700, cursor: 'pointer',
         }}>
           Positions
@@ -1070,9 +1080,9 @@ export default function ManualTraderPage() {
       )}
 
       {/* ── Digit Circles ── */}
-      <div style={{ padding: '1rem 1.5rem 0.75rem', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+      <div style={{ padding: '1rem 1.5rem 0.75rem', borderBottom: `1px solid ${bdr}`, flexShrink: 0 }}>
         {loading ? (
-          <div style={{ textAlign: 'center', color: 'rgba(229,229,229,0.25)', fontSize: '0.78rem' }}>Loading tick data…</div>
+          <div style={{ textAlign: 'center', color: txt2, fontSize: '0.78rem' }}>Loading tick data…</div>
         ) : (
           <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
             {[0,1,2,3,4,5,6,7,8,9].map(d => {
@@ -1124,7 +1134,7 @@ export default function ManualTraderPage() {
         </Card>
 
         {/* MATCH / DIFFER */}
-        <div style={{ borderLeft: '1px solid rgba(255,255,255,0.07)' }}>
+        <div style={{ borderLeft: `1px solid ${bdr}` }}>
           <Card title="Match / Differ" streakCount={mdData.streak} streakLabel={mdData.streakLabel}>
             <DigitPicker selected={mdAnalysisDigit} onSelect={setMdAnalysisDigit} />
             <Bar label="Match"  color="#ef4444" count={mdData.match}  total={total} />
@@ -1146,7 +1156,7 @@ export default function ManualTraderPage() {
         </div>
 
         {/* EVEN / ODD */}
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+        <div style={{ borderTop: `1px solid ${bdr}` }}>
           <Card title="Even / Odd" streakCount={eoData.streak} streakLabel={eoData.streakLabel}>
             <Bar label="Even" color="#FCA311" count={eoData.even} total={total} />
             <Bar label="Odd"  color="#6366f1" count={eoData.odd}  total={total} />
@@ -1166,7 +1176,7 @@ export default function ManualTraderPage() {
         </div>
 
         {/* RISE / FALL */}
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.07)', borderLeft: '1px solid rgba(255,255,255,0.07)' }}>
+        <div style={{ borderTop: `1px solid ${bdr}`, borderLeft: `1px solid ${bdr}` }}>
           <Card title="Rise / Fall" streakCount={rfData.streak} streakLabel={rfData.streakLabel}>
             <Bar label="Rise" color="#22c55e" count={rfData.rise} total={rfData.total} />
             <Bar label="Fall" color="#ef4444" count={rfData.fall} total={rfData.total} />
@@ -1198,11 +1208,11 @@ export default function ManualTraderPage() {
       <button onClick={() => setPanelOpen(v => !v)} style={{
         position: 'fixed', right: panelOpen ? '300px' : '0',
         top: 'calc(50% + 50px)', transform: 'translateY(-50%)',
-        background: '#070f1e',
-        border: '1px solid rgba(255,255,255,0.12)',
+        background: bg1,
+        border: `1px solid ${bdr}`,
         borderRight: 'none', borderRadius: '8px 0 0 8px',
         padding: '0.65rem 0.32rem', cursor: 'pointer', zIndex: 42,
-        color: panelOpen ? '#FCA311' : openCount > 0 ? '#FCA311' : 'rgba(229,229,229,0.5)',
+        color: panelOpen ? '#FCA311' : openCount > 0 ? '#FCA311' : txt2,
         fontSize: '0.9rem', fontWeight: 700, lineHeight: 1,
         transition: 'right 0.28s cubic-bezier(0.4,0,0.2,1)',
         borderColor: openCount > 0 || panelOpen ? 'rgba(252,163,17,0.35)' : 'rgba(255,255,255,0.1)',

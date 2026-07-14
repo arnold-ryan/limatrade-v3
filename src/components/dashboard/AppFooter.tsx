@@ -41,15 +41,15 @@ export default function AppFooter() {
     <footer
       style={{
         height: '36px',
-        background: '#000',
-        borderTop: '1px solid var(--border)',
+        background: 'var(--bg1)',
+        borderTop: '1px solid var(--bdr)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '0 1.25rem',
         flexShrink: 0,
         fontSize: '0.7rem',
-        color: 'rgba(229,229,229,0.35)',
+        color: 'var(--txt2)',
       }}
     >
       {/* Left: disclaimer */}

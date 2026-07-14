@@ -25,61 +25,91 @@ export default function TabNav() {
   const pathname = usePathname()
 
   return (
-    <nav
-      style={{
-        background: '#050505',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'stretch',
-          height: '44px',
-          width: '100%',
-        }}
-      >
-        {TABS.filter(tab => tab.visible).map(tab => {
-          // Active: exact match for /dashboard, prefix match for sub-pages
-          const isActive =
-            tab.href === '/dashboard'
-              ? pathname === '/dashboard'
-              : pathname.startsWith(tab.href)
+    <>
+      <style>{`
+        .tabnav {
+          background: var(--bg1);
+          border-bottom: 1px solid var(--bdr);
+          flex-shrink: 0;
+        }
+        .tabnav-inner {
+          display: flex;
+          align-items: stretch;
+          height: 44px;
+          width: 100%;
+        }
+        .tabnav-link {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 0.4rem;
+          font-size: 0.75rem;
+          white-space: nowrap;
+          text-decoration: none;
+          transition: color 0.15s;
+          padding: 0;
+        }
+        /* ── Mobile / tablet: horizontal scroll ── */
+        @media (max-width: 767px) {
+          .tabnav {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+          }
+          .tabnav::-webkit-scrollbar { display: none; }
+          .tabnav-inner {
+            width: max-content;
+            min-width: 100%;
+          }
+          .tabnav-link {
+            flex: none;
+            padding: 0 14px;
+            font-size: 0.7rem;
+            gap: 0.3rem;
+          }
+          .tabnav-icon { font-size: 0.85rem !important; }
+          .tabnav-label { display: none; }
+        }
+        /* ── Tablet: show labels again, slightly smaller ── */
+        @media (min-width: 480px) and (max-width: 767px) {
+          .tabnav-label { display: inline; }
+          .tabnav-link { padding: 0 10px; font-size: 0.68rem; }
+        }
+      `}</style>
 
-          return (
-            <Link
-              key={tab.href + tab.label}
-              href={tab.href}
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '0.4rem',
-                fontSize: '0.75rem',
-                fontWeight: isActive ? 700 : 500,
-                color: isActive ? 'var(--gold)' : 'rgba(229,229,229,0.5)',
-                textDecoration: 'none',
-                whiteSpace: 'nowrap',
-                transition: 'color 0.15s',
-                borderBottom: isActive
-                  ? '2px solid var(--gold)'
-                  : '2px solid transparent',
-              }}
-              onMouseOver={e => {
-                if (!isActive) e.currentTarget.style.color = '#fff'
-              }}
-              onMouseOut={e => {
-                if (!isActive) e.currentTarget.style.color = 'rgba(229,229,229,0.5)'
-              }}
-            >
-              <span style={{ fontSize: '0.8rem', lineHeight: 1 }}>{tab.icon}</span>
-              {tab.label}
-            </Link>
-          )
-        })}
-      </div>
-    </nav>
+      <nav className="tabnav">
+        <div className="tabnav-inner">
+          {TABS.filter(tab => tab.visible).map(tab => {
+            const isActive =
+              tab.href === '/dashboard'
+                ? pathname === '/dashboard'
+                : pathname.startsWith(tab.href)
+
+            return (
+              <Link
+                key={tab.href + tab.label}
+                href={tab.href}
+                className="tabnav-link"
+                style={{
+                  fontWeight: isActive ? 700 : 500,
+                  color: isActive ? 'var(--gold)' : 'var(--txt1)',
+                  borderBottom: isActive ? '2px solid var(--gold)' : '2px solid transparent',
+                }}
+                onMouseOver={e => {
+                  if (!isActive) e.currentTarget.style.color = 'var(--txt0)'
+                }}
+                onMouseOut={e => {
+                  if (!isActive) e.currentTarget.style.color = 'var(--txt1)'
+                }}
+              >
+                <span className="tabnav-icon" style={{ fontSize: '0.8rem', lineHeight: 1 }}>{tab.icon}</span>
+                <span className="tabnav-label">{tab.label}</span>
+              </Link>
+            )
+          })}
+        </div>
+      </nav>
+    </>
   )
 }

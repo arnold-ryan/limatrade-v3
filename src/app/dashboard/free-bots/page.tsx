@@ -10,6 +10,7 @@
 
 import { useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import { bg0, bg1, bg2, bdr, txt0, txt1, txt2, amber } from '@/lib/colors'
 
 const LS_KEY = 'lima_trade_pending_bot'
 
@@ -118,15 +119,6 @@ function defaultParams(params: DerivStrategy['parameters']) {
   for (const p of params) out[p.name] = p.default
   return out
 }
-
-const bg0   = '#0d1117'
-const bg1   = '#161b22'
-const bg2   = '#21262d'
-const bdr   = '#30363d'
-const txt0  = '#f0f6fc'
-const txt1  = '#8b949e'
-const txt2  = '#484f58'
-const amber = '#e6b429'
 
 export default function FreeBotsPage() {
   const router = useRouter()

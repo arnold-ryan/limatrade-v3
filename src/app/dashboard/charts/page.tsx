@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Lima Trade — Charts Page v109
+ * Lima Trade — Charts Page v167
  *
  * All fixes consolidated:
  *  - proposal request uses `underlying_symbol` (required by new API, not `symbol`)
@@ -29,7 +29,7 @@
  *   └──────────────┴──────────────────────────────┴─────────────────────┘
  *
  * Two-WebSocket architecture (unchanged from v82):
- *   PUBLIC  wss://api.derivws.com/trading/v1/options/ws/public
+ *   PUBLIC  wss://ws.binaryws.com/websockets/v3?app_id=1089
  *   AUTH    OTP URL from /api/user/ws-url
  */
 
@@ -38,9 +38,10 @@ import {
   createChart, IChartApi, UTCTimestamp,
   ISeriesApi, LineData, CandlestickData, AreaData,
 } from 'lightweight-charts'
+import { bg0, bg1, bg2, bdr, txt0, txt1, txt2, green, red, amber, blue } from '@/lib/colors'
 
 // ─── Constants (unchanged from v82) ──────────────────────────────────────────
-const PUB_WS = 'wss://api.derivws.com/trading/v1/options/ws/public'
+const PUB_WS = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
 
 const TT = [
   { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', lA: 'Over',  lB: 'Under',  cA: '#22c55e', cB: '#3b82f6', barrier: true  },
@@ -179,7 +180,31 @@ export default function ChartsPage() {
   useEffect(() => { propARef.current = propA }, [propA])
   useEffect(() => { propBRef.current = propB }, [propB])
   // Track which side was bought — read inside WS onmessage which has a stale buyingA/B closure
-  const buyingSideRef = useRef<'A'|'B'|null>(null)
+  const buyingSideRef  = useRef<'A'|'B'|null>(null)
+  // Auto-reset buying state if buy confirmation never arrives (lost response, server error, etc.)
+  const buyTimeoutRef  = useRef<ReturnType<typeof setTimeout>|null>(null)
+
+  // ── Signal Analyzer ───────────────────────────────────────────────────────
+  const [sigState,  setSigState]  = useState<'analyzing'|'waiting'|'enter'|'cooloff'>('analyzing')
+  const [sigRec,    setSigRec]    = useState<{type:'OVER'|'UNDER'|'EVEN'|'ODD'|'MATCH'|'DIFFER'|'RISE'|'FALL'; barrier?:number; edge:number; rsi?:number; channelPos?:number}|null>(null)
+  const [digitFreq, setDigitFreq] = useState<number[]>(Array(10).fill(0.1))
+  const [sigEdges,  setSigEdges]  = useState<Record<string, number>>({})
+  const sigDigitsRef = useRef<number[]>([])
+  const sigStateRef  = useRef<'analyzing'|'waiting'|'enter'|'cooloff'>('analyzing')
+  const sigTimerRef  = useRef<ReturnType<typeof setTimeout>|null>(null)
+  // Keep sigStateRef in sync with React state so WS closure reads fresh value
+  useEffect(() => { sigStateRef.current = sigState }, [sigState])
+  // Stable refs so settlement handler can read signal state without stale closure
+  const sigRecRef        = useRef<{type:'OVER'|'UNDER'|'EVEN'|'ODD'|'MATCH'|'DIFFER'|'RISE'|'FALL'; barrier?:number; edge:number; rsi?:number; channelPos?:number}|null>(null)
+  const sigConsecLossRef = useRef(0)
+  useEffect(() => { sigRecRef.current = sigRec }, [sigRec])
+  // Rise/Fall indicator readings (updated every tick for live panel display)
+  const [rfSigData, setRfSigData] = useState<{emaVote:number; rsi:number; rsiVote:number; streak:number; streakVote:number; channelPos:number; channelVote:number; score:number; dir:'RISE'|'FALL'|null}|null>(null)
+  const rfPricesRef = useRef<number[]>([])
+  // Background recs: best signal for each trade type, kept current every tick
+  type BgRec  = { type: 'OVER'|'UNDER'|'EVEN'|'ODD'|'DIFFER'; barrier?: number; edge: number; z: number } | null
+  type RFRec  = { type: 'RISE'|'FALL'; score: number; rsi: number; channelPos: number; emaVote: number; streakVote: number; channelVote: number } | null
+  const bgRecsRef = useRef<{ OU: BgRec; EO: BgRec; MD: BgRec; RF: RFRec }>({ OU: null, EO: null, MD: null, RF: null })
 
   // ── Account-switch listener (unchanged from v82) ──────────────────────────
   useEffect(() => {
@@ -193,18 +218,219 @@ export default function ChartsPage() {
     return () => window.removeEventListener('deriv-account-switch', h)
   }, [])
 
+  // ── Visibility: clear stuck buying state when tab regains focus ───────────
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        setBuyingA(false)
+        setBuyingB(false)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
+
+  // ── Signal: compute signal from rolling digit window (all types, every tick) ─
+  const runSigCycle = useCallback(() => {
+    const arr = sigDigitsRef.current
+    if (arr.length < 60) return  // need ≥60 ticks for statistical confidence
+
+    // ── Shared windows (computed once, reused for all three trade types) ──
+    const slice   = arr.slice(-100); const n = slice.length
+    const freq    = Array(10).fill(0); slice.forEach((d: number) => freq[d]++)
+    const f       = freq.map((c: number) => c / n)
+
+    const slice50 = arr.slice(-50)
+    const freq50  = Array(10).fill(0); slice50.forEach((d: number) => freq50[d]++)
+    const f50     = freq50.map((c: number) => c / slice50.length)
+
+    const slice25 = arr.slice(-25)
+    const freq25  = Array(10).fill(0); slice25.forEach((d: number) => freq25[d]++)
+    const f25     = freq25.map((c: number) => c / slice25.length)
+
+    const slice10 = arr.slice(-10)
+    const freq10  = Array(10).fill(0); slice10.forEach((d: number) => freq10[d]++)
+    const f10     = freq10.map((c: number) => c / slice10.length)
+
+    // ── Background: compute best for ALL trade types, every tick ──────────
+    // This runs regardless of active state so switching is always instant.
+
+    // MD — Differ only (cold digit across four windows)
+    let bestMD: BgRec = null
+    {
+      const p_exp = 0.1
+      for (let d = 0; d <= 9; d++) {
+        const edge = f[d] - p_exp
+        const z    = edge / Math.sqrt(p_exp * (1 - p_exp) / n)
+        if (z <= -1.5 && (f50[d] - p_exp) <= -0.02 && (f25[d] - p_exp) <= 0 && f10[d] <= 0.10) {
+          const absZ = -z
+          if (!bestMD || absZ > bestMD.z) bestMD = { type: 'DIFFER', barrier: d, edge: -edge, z: absZ }
+        }
+      }
+    }
+
+    // EO — Even/Odd (triple window + streak guard)
+    let bestEO: BgRec = null
+    {
+      const EVEN = [0, 2, 4, 6, 8]; const p_exp = 0.5
+      let obsEven = 0, obsEven50 = 0, obsEven25 = 0
+      EVEN.forEach(d => { obsEven += f[d]; obsEven50 += f50[d]; obsEven25 += f25[d] })
+      const zEven = (obsEven - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
+      let evenCount10 = 0; slice10.forEach((d: number) => { if (d % 2 === 0) evenCount10++ })
+      const evenFreq10 = evenCount10 / slice10.length
+      if (zEven >= 1.45 && (obsEven50 - p_exp) > 0 && (obsEven25 - p_exp) > 0 && evenFreq10 >= 0.40) {
+        bestEO = { type: 'EVEN', edge: obsEven - p_exp, z: zEven }
+      } else if (-zEven >= 1.45 && ((1-obsEven50) - p_exp) > 0 && ((1-obsEven25) - p_exp) > 0 && evenFreq10 <= 0.60) {
+        bestEO = { type: 'ODD', edge: (1-obsEven) - p_exp, z: -zEven }
+      }
+    }
+
+    // OU — Over/Under (dual window)
+    let bestOU: BgRec = null
+    {
+      for (let b = 1; b <= 5; b++) {
+        const p_exp = (9-b)/10; let obs = 0, obs50 = 0
+        for (let d = b+1; d <= 9; d++) { obs += f[d]; obs50 += f50[d] }
+        const edge = obs - p_exp; const z = edge / Math.sqrt(p_exp*(1-p_exp)/n)
+        if (z >= 1.28 && (obs50-p_exp) > 0) {
+          if (!bestOU || z > bestOU.z) bestOU = { type: 'OVER', barrier: b, edge, z }
+        }
+      }
+      for (let b = 6; b <= 8; b++) {
+        const p_exp = b/10; let obs = 0, obs50 = 0
+        for (let d = 0; d < b; d++) { obs += f[d]; obs50 += f50[d] }
+        const edge = obs - p_exp; const z = edge / Math.sqrt(p_exp*(1-p_exp)/n)
+        if (z >= 1.28 && (obs50-p_exp) > 0) {
+          if (!bestOU || z > bestOU.z) bestOU = { type: 'UNDER', barrier: b, edge, z }
+        }
+      }
+    }
+
+    // ── RF — Rise/Fall multi-indicator consensus (computed every tick) ───────
+    let bestRF: RFRec = null
+    {
+      const rfArr = rfPricesRef.current
+      if (rfArr.length >= 25) {
+        const last25 = rfArr.slice(-25)
+        // EMA: fast(5) vs slow(20)
+        const calcEMA = (prices: number[], n: number) => {
+          const k = 2 / (n + 1); let ema = prices[0]
+          for (let i = 1; i < prices.length; i++) ema = prices[i] * k + ema * (1 - k)
+          return ema
+        }
+        const emaFast  = calcEMA(last25.slice(-10), 5)
+        const emaSlow  = calcEMA(last25, 20)
+        const emaVote  = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
+        // RSI (14 periods = last 15 prices)
+        const rsiPrices = last25.slice(-15); let gains = 0, losses = 0
+        for (let i = 1; i < rsiPrices.length; i++) {
+          const diff = rsiPrices[i] - rsiPrices[i - 1]
+          if (diff > 0) gains += diff; else losses -= diff
+        }
+        const avgGain = gains / 14; const avgLoss = losses / 14
+        const rsi      = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss))
+        const rsiVote  = rsi < 35 ? 1 : rsi > 65 ? -1 : 0
+        // Streak: mean-reversion vote on ≥4 consecutive ticks same direction
+        const recent   = last25.slice(-8); let streak = 1
+        const lastDir  = recent[recent.length - 1] > recent[recent.length - 2]
+        for (let i = recent.length - 2; i > 0; i--) {
+          if ((recent[i] > recent[i - 1]) === lastDir) streak++; else break
+        }
+        const streakVote  = streak >= 4 ? (lastDir ? -1 : 1) : 0
+        // Price channel: where current price sits in 20-tick high/low
+        const win20       = last25.slice(-20)
+        const hiW = Math.max(...win20); const loW = Math.min(...win20)
+        const channelPos  = (hiW - loW) === 0 ? 0.5 : (win20[win20.length - 1] - loW) / (hiW - loW)
+        const channelVote = channelPos < 0.25 ? 1 : channelPos > 0.75 ? -1 : 0
+        const totalScore  = emaVote + rsiVote + streakVote + channelVote
+        const rfDir: 'RISE'|'FALL'|null = Math.abs(totalScore) >= 3 ? (totalScore > 0 ? 'RISE' : 'FALL') : null
+        setRfSigData({ emaVote, rsi, rsiVote, streak, streakVote, channelPos, channelVote, score: Math.abs(totalScore), dir: rfDir })
+        if (rfDir) bestRF = { type: rfDir, score: Math.abs(totalScore), rsi, channelPos, emaVote, streakVote, channelVote }
+      }
+    }
+
+    bgRecsRef.current = { MD: bestMD, EO: bestEO, OU: bestOU, RF: bestRF }
+
+    // ── Active type: state machine + edge tile colors ──────────────────────
+    // Early return only applies to the state machine, not background computation.
+    if (sigStateRef.current === 'cooloff' || sigStateRef.current === 'enter') return
+
+    const tid  = ttRef.current.id
+
+    // ── RF active handling ─────────────────────────────────────────────────
+    if (tid === 'RF') {
+      if (bestRF) {
+        setSigRec({ type: bestRF.type, edge: (bestRF.score - 2) / 2, rsi: bestRF.rsi, channelPos: bestRF.channelPos })
+        setSigState('enter')
+        if (sigTimerRef.current) clearTimeout(sigTimerRef.current)
+        sigTimerRef.current = setTimeout(() => {
+          setSigState('cooloff')
+          sigTimerRef.current = setTimeout(() => setSigState('analyzing'), 15000)
+        }, 5000)
+      } else {
+        setSigState('waiting')
+      }
+      return
+    }
+
+    const best = tid === 'MD' ? bestMD : tid === 'EO' ? bestEO : bestOU
+
+    // Tile edge colors for active type
+    const edges: Record<string, number> = {}
+    if (tid === 'MD') {
+      const p_exp = 0.1
+      for (let d = 0; d <= 9; d++) edges[`D${d}`] = f[d] - p_exp
+    } else if (tid === 'EO') {
+      const EVEN = [0,2,4,6,8]; let obsEven = 0
+      EVEN.forEach(d => obsEven += f[d])
+      edges['EV'] = obsEven - 0.5; edges['OD'] = (1-obsEven) - 0.5
+    } else {
+      for (let b = 1; b <= 5; b++) {
+        const p_exp = (9-b)/10; let obs = 0
+        for (let d = b+1; d <= 9; d++) obs += f[d]
+        edges[`O${b}`] = obs - p_exp
+      }
+      for (let b = 6; b <= 8; b++) {
+        const p_exp = b/10; let obs = 0
+        for (let d = 0; d < b; d++) obs += f[d]
+        edges[`U${b}`] = obs - p_exp
+      }
+    }
+    setSigEdges(edges)
+
+    if (best) {
+      setSigRec({ type: best.type, barrier: best.barrier, edge: best.edge })
+      setSigState('enter')
+      if (sigTimerRef.current) clearTimeout(sigTimerRef.current)
+      // enter (5s) → cooloff (15s) → analyzing
+      sigTimerRef.current = setTimeout(() => {
+        setSigState('cooloff')
+        sigTimerRef.current = setTimeout(() => setSigState('analyzing'), 15000)
+      }, 5000)
+    } else {
+      setSigState('waiting')
+    }
+  }, [])
+  // Stable ref so WS closure always calls the latest version
+  const runSigCycleRef = useRef(runSigCycle)
+  useEffect(() => { runSigCycleRef.current = runSigCycle }, [runSigCycle])
+
+  // Tick handler drives signal checks — no timer needed for analyzing state
+
   // ══════════════════════════════════════════════════════════════════════════
   // Chart (unchanged from v82)
   // ══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (!chartEl.current) return
+    const cs = getComputedStyle(document.documentElement)
+    const cv = (v: string) => cs.getPropertyValue(v).trim()
     const chart = createChart(chartEl.current, {
-      layout:    { background: { color: '#0d1117' }, textColor: '#8b949e' },
-      grid:      { vertLines: { color: '#161b22' }, horzLines: { color: '#161b22' } },
+      layout:    { background: { color: cv('--bg0') }, textColor: cv('--txt1') },
+      grid:      { vertLines: { color: cv('--bg1') }, horzLines: { color: cv('--bg1') } },
       crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#21262d' },
+      rightPriceScale: { borderColor: cv('--bg2') },
       timeScale: {
-        borderColor:   '#21262d',
+        borderColor:   cv('--bg2'),
         timeVisible:   true,
         secondsVisible: false,
         rightOffset:   10,   // COSMETIC: breathing room for smooth tracking
@@ -275,6 +501,7 @@ export default function ChartsPage() {
   useEffect(() => {
     let ws: WebSocket
     let alive = true
+    let pingId: ReturnType<typeof setInterval>
 
     const connect = () => {
       ws = new WebSocket(PUB_WS)
@@ -285,6 +512,10 @@ export default function ChartsPage() {
         ws.send(JSON.stringify({ active_symbols: 'brief' }))
         ws.send(JSON.stringify({ ticks: symbolRef.current, subscribe: 1 }))
         loadHistory(symbolRef.current, TFS[tfIdxRef.current].gran)
+        clearInterval(pingId)
+        pingId = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
+        }, 30000)
       }
 
       ws.onmessage = (e) => {
@@ -315,6 +546,38 @@ export default function ChartsPage() {
             prevPriceRef.current = prev
             return p
           })
+
+          // ── Signal: last digit using correct pip size (same lastDigit helper) ──
+          const sigDig = lastDigit(p, dpRef.current)
+          sigDigitsRef.current.push(sigDig)
+          if (sigDigitsRef.current.length > 200) sigDigitsRef.current.splice(0, 100)
+          // RF: track raw prices for Rise/Fall indicator computation
+          rfPricesRef.current.push(p)
+          if (rfPricesRef.current.length > 200) rfPricesRef.current.splice(0, 100)
+          const sigWin  = sigDigitsRef.current.slice(-100)
+          const sigF    = Array(10).fill(0)
+          sigWin.forEach((d: number) => sigF[d]++)
+          const sigFreq = sigF.map((c: number) => c / (sigWin.length || 1))
+          setDigitFreq(sigFreq)
+          // Update live edge colors (all types computed each tick)
+          const liveEdges: Record<string, number> = {}
+          for (let b = 1; b <= 5; b++) {
+            let obs = 0; for (let d = b + 1; d <= 9; d++) obs += sigFreq[d]
+            liveEdges[`O${b}`] = obs - (9 - b) / 10
+          }
+          for (let b = 6; b <= 8; b++) {
+            let obs = 0; for (let d = 0; d < b; d++) obs += sigFreq[d]
+            liveEdges[`U${b}`] = obs - b / 10
+          }
+          let obsEvenLive = 0; for (const d of [0,2,4,6,8]) obsEvenLive += sigFreq[d]
+          liveEdges['EV'] = obsEvenLive - 0.5
+          liveEdges['OD'] = (1 - obsEvenLive) - 0.5
+          for (let d = 0; d <= 9; d++) liveEdges[`D${d}`] = sigFreq[d] - 0.1
+          setSigEdges(liveEdges)
+          // Drive signal checks on every tick — works for both analyzing and waiting
+          if (sigStateRef.current === 'analyzing' || sigStateRef.current === 'waiting') {
+            runSigCycleRef.current()
+          }
 
           if (isTickRef.current && seriesRef.current) {
             pricesRef.current.push(p)
@@ -374,11 +637,18 @@ export default function ChartsPage() {
         }
       }
 
-      ws.onclose = () => { if (alive) setTimeout(connect, 2000) }
+      ws.onclose = () => {
+        clearInterval(pingId)
+        if (alive) setTimeout(connect, 2000)
+      }
     }
 
     connect()
-    return () => { alive = false; ws?.close() }
+    return () => {
+      alive = false
+      clearInterval(pingId)
+      ws?.close()
+    }
   }, [loadHistory, chartType]) // eslint-disable-line
 
   // Update series precision when symbol changes (keeps chart price in sync with digit circles)
@@ -397,12 +667,69 @@ export default function ChartsPage() {
     pricesRef.current = []; tsRef.current = []
     rebuildSeries(chartType, maOn, maPeriod, [], [])
     loadHistory(symbol, tf.gran)
+    // Reset signal on market switch
+    if (sigTimerRef.current) clearTimeout(sigTimerRef.current)
+    sigDigitsRef.current = []
+    rfPricesRef.current = []
+    sigConsecLossRef.current = 0
+    bgRecsRef.current = { OU: null, EO: null, MD: null, RF: null }
+    setDigitFreq(Array(10).fill(0.1))
+    setRfSigData(null)
+    setSigRec(null)
+    setSigEdges({})
+    setSigState('analyzing')
   }, [symbol, tfIdx]) // eslint-disable-line
 
   useEffect(() => {
     rebuildSeries(chartType, maOn, maPeriod, pricesRef.current, tsRef.current)
     loadHistory(symbol, tf.gran)
   }, [chartType, maOn]) // eslint-disable-line
+
+  // Trade type switch: immediately surface precomputed background rec (no tick wait)
+  useEffect(() => {
+    if (sigTimerRef.current) clearTimeout(sigTimerRef.current)
+    sigConsecLossRef.current = 0
+    setSigEdges({})  // edges recomputed on next tick for new type
+
+    const tid = TT[ttIdx].id
+
+    // RF branch — surface precomputed Rise/Fall signal instantly
+    if (tid === 'RF') {
+      const rfRec = bgRecsRef.current.RF
+      if (rfRec) {
+        setSigRec({ type: rfRec.type, edge: (rfRec.score - 2) / 2, rsi: rfRec.rsi, channelPos: rfRec.channelPos })
+        setSigState('enter')
+        sigStateRef.current = 'enter'
+        sigTimerRef.current = setTimeout(() => {
+          setSigState('cooloff'); sigStateRef.current = 'cooloff'
+          sigTimerRef.current = setTimeout(() => { setSigState('analyzing'); sigStateRef.current = 'analyzing' }, 15000)
+        }, 5000)
+      } else {
+        setSigRec(null); setSigState('analyzing'); sigStateRef.current = 'analyzing'
+      }
+      return
+    }
+
+    const bgRec = bgRecsRef.current[tid as 'OU' | 'EO' | 'MD']
+
+    if (bgRec) {
+      // Instantly show precomputed signal — no waiting for next tick
+      setSigRec({ type: bgRec.type, barrier: bgRec.barrier, edge: bgRec.edge })
+      setSigState('enter')
+      sigStateRef.current = 'enter'
+      sigTimerRef.current = setTimeout(() => {
+        setSigState('cooloff')
+        sigStateRef.current = 'cooloff'
+        sigTimerRef.current = setTimeout(() => {
+          setSigState('analyzing'); sigStateRef.current = 'analyzing'
+        }, 15000)
+      }, 5000)
+    } else {
+      setSigRec(null)
+      setSigState('analyzing')
+      sigStateRef.current = 'analyzing'
+    }
+  }, [ttIdx]) // eslint-disable-line
 
   // ══════════════════════════════════════════════════════════════════════════
   // Auth WS — balance, proposals, buy  ← UNCHANGED from v82
@@ -444,15 +771,21 @@ export default function ChartsPage() {
     const connect = async () => {
       try {
         const r = await fetch('/api/user/ws-url')
-        if (!r.ok) { setAuthErr('Not logged in'); return }
-        const { wsUrl } = await r.json()
+        if (!r.ok) {
+          if (!alive) return
+          // Don't give up — could be a transient server hiccup; retry after 3 s
+          setAuthErr('Reconnecting…')
+          setTimeout(connect, 3000)
+          return
+        }
+        const { wsUrl, token } = await r.json() as { wsUrl: string; token: string }
         ws = new WebSocket(wsUrl)
         authRef.current = ws
 
         ws.onopen = () => {
           if (!alive) return
-          ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
-          setAuthReady(true); setAuthErr(null)
+          // Legacy Deriv WS: must authorize before any other calls
+          ws.send(JSON.stringify({ authorize: token }))
         }
 
         ws.onmessage = (evt) => {
@@ -460,18 +793,43 @@ export default function ChartsPage() {
           try {
           const msg = JSON.parse(evt.data)
 
+          // Legacy WS: authorize response — now safe to subscribe
+          if (msg.authorize) {
+            ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+            setAuthReady(true); setAuthErr(null)
+            return
+          }
+
           if (msg.balance) {
-            setBalance(Number(msg.balance.balance) || 0)
-            setCurrency(msg.balance.currency ?? 'USD')
+            const b = Number(msg.balance.balance) || 0
+            const cur = msg.balance.currency ?? 'USD'
+            setBalance(b)
+            setCurrency(cur)
+            window.dispatchEvent(new CustomEvent('deriv-balance', { detail: { balance: b, currency: cur } }))
+          }
+
+          // Handle proposal errors — new API omits the `proposal` key on errors,
+          // so we must check msg.error BEFORE msg.proposal, or it never triggers.
+          if (msg.error && msg.echo_req?.proposal === 1) {
+            const errMsg = (msg.error as any)?.message ?? 'Error'
+            const pt   = (msg.passthrough as any) ?? {}
+            const side = pt.side as 'A' | 'B' | undefined
+            if      (side === 'A' || msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: errMsg })
+            else if (side === 'B' || msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: errMsg })
+            return
+          }
+
+          // Buy errors (insufficient balance, market closed, contract expired, etc.)
+          // Without this handler buyingA/B stays true forever → "..." stuck on button.
+          if (msg.error && (msg.echo_req?.buy !== undefined || msg.msg_type === 'buy')) {
+            if (buyTimeoutRef.current) { clearTimeout(buyTimeoutRef.current); buyTimeoutRef.current = null }
+            setBuyingA(false); setBuyingB(false)
+            buyingSideRef.current = null
+            console.warn('[Lima Trade] Buy error:', (msg.error as any)?.message)
+            return
           }
 
           if (msg.proposal) {
-            if (msg.error) {
-              const errMsg = msg.error?.message ?? 'Error'
-              if (msg.req_id === 10) setPropA({ id: '', ask: 0, payout: 0, err: errMsg })
-              if (msg.req_id === 11) setPropB({ id: '', ask: 0, payout: 0, err: errMsg })
-              return
-            }
             const p = msg.proposal as { id: string; ask_price: number; payout: number }
 
             // Layer 1: passthrough — official Deriv pattern; baked at send-time, verbatim on every update
@@ -495,6 +853,8 @@ export default function ChartsPage() {
           }
 
           if (msg.buy) {
+            // Clear the buy timeout — confirmation arrived, no need to auto-reset
+            if (buyTimeoutRef.current) { clearTimeout(buyTimeoutRef.current); buyTimeoutRef.current = null }
             const b = msg.buy
             ws.send(JSON.stringify({ forget_all: 'proposal' }))
             const cur = ttRef.current
@@ -521,9 +881,106 @@ export default function ChartsPage() {
             const pocProfit   = poc.profit    !== undefined ? Number(poc.profit)    : undefined
             const pocBidPrice = poc.bid_price !== undefined ? Number(poc.bid_price) : undefined
             if (poc.is_sold || poc.status === 'sold') {
-              const status = (pocProfit ?? 0) >= 0 ? 'won' : 'lost'
+              const profit = pocProfit ?? 0
+              const status = profit >= 0 ? 'won' : 'lost'
               setPositions(ps => ps.map(p => p.id === poc.contract_id
-                ? { ...p, status, profit: pocProfit ?? 0, bid: pocBidPrice ?? p.bid } : p))
+                ? { ...p, status, profit, bid: pocBidPrice ?? p.bid } : p))
+              // ── Signal re-validation on settlement ───────────────────────
+              if (status === 'won') {
+                sigConsecLossRef.current = 0
+              } else {
+                sigConsecLossRef.current++
+                const arr = sigDigitsRef.current
+                const rec = sigRecRef.current
+                let stillValid = false
+                // RF re-validation: recompute multi-indicator consensus on latest prices
+                if ((rec?.type === 'RISE' || rec?.type === 'FALL') && rfPricesRef.current.length >= 25 && sigConsecLossRef.current < 2) {
+                  const rfLast = rfPricesRef.current.slice(-25)
+                  const k5 = 2/6; let ef5 = rfLast[rfLast.length - 10]
+                  for (let i = rfLast.length - 9; i < rfLast.length; i++) ef5 = rfLast[i]*k5 + ef5*(1-k5)
+                  const k20 = 2/21; let ef20 = rfLast[0]
+                  for (let i = 1; i < rfLast.length; i++) ef20 = rfLast[i]*k20 + ef20*(1-k20)
+                  const rfEmaV = ef5 > ef20 ? 1 : ef5 < ef20 ? -1 : 0
+                  const rPr = rfLast.slice(-15); let gg=0,ll=0
+                  for (let i=1;i<rPr.length;i++){const dd=rPr[i]-rPr[i-1];if(dd>0)gg+=dd;else ll-=dd}
+                  const rfRsiVal = ll===0?100:100-(100/(1+(gg/14)/(ll/14)))
+                  const rfRsiV   = rfRsiVal<35?1:rfRsiVal>65?-1:0
+                  const r8=rfLast.slice(-8);let sk=1
+                  const rld=r8[r8.length-1]>r8[r8.length-2]
+                  for(let i=r8.length-2;i>0;i--){if((r8[i]>r8[i-1])===rld)sk++;else break}
+                  const rfStV=sk>=4?(rld?-1:1):0
+                  const w2=rfLast.slice(-20);const hv2=Math.max(...w2),lv2=Math.min(...w2)
+                  const rfCp=(hv2-lv2)===0?0.5:(rfLast[rfLast.length-1]-lv2)/(hv2-lv2)
+                  const rfChV=rfCp<0.25?1:rfCp>0.75?-1:0
+                  const sc2=rfEmaV+rfRsiV+rfStV+rfChV
+                  stillValid = Math.abs(sc2)>=3 && (sc2>0?'RISE':'FALL')===rec.type
+                }
+                if (rec && arr.length >= 60 && sigConsecLossRef.current < 2 && rec.type !== 'RISE' && rec.type !== 'FALL') {
+                  // Re-run the same z-score check used in runSigCycle
+                  const slice = arr.slice(-100)
+                  const n = slice.length
+                  const freq = Array(10).fill(0)
+                  slice.forEach((d: number) => freq[d]++)
+                  const f = freq.map((c: number) => c / n)
+                  const slice50 = arr.slice(-50)
+                  const freq50 = Array(10).fill(0)
+                  slice50.forEach((d: number) => freq50[d]++)
+                  const f50 = freq50.map((c: number) => c / slice50.length)
+                  if (rec.type === 'OVER') {
+                    const b = rec.barrier!
+                    const p_exp = (9 - b) / 10
+                    let obs = 0; for (let d = b + 1; d <= 9; d++) obs += f[d]
+                    const z = (obs - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
+                    let obs50 = 0; for (let d = b + 1; d <= 9; d++) obs50 += f50[d]
+                    stillValid = z >= 1.28 && (obs50 - p_exp) > 0
+                  } else if (rec.type === 'UNDER') {
+                    const b = rec.barrier!
+                    const p_exp = b / 10
+                    let obs = 0; for (let d = 0; d < b; d++) obs += f[d]
+                    const z = (obs - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
+                    let obs50 = 0; for (let d = 0; d < b; d++) obs50 += f50[d]
+                    stillValid = z >= 1.28 && (obs50 - p_exp) > 0
+                  } else if (rec.type === 'DIFFER') {
+                    const slice25 = arr.slice(-25)
+                    const freq25  = Array(10).fill(0)
+                    slice25.forEach((d: number) => freq25[d]++)
+                    const f25 = freq25.map((c: number) => c / slice25.length)
+                    const slice10 = arr.slice(-10)
+                    const freq10  = Array(10).fill(0)
+                    slice10.forEach((d: number) => freq10[d]++)
+                    const f10 = freq10.map((c: number) => c / slice10.length)
+                    const b = rec.barrier!
+                    const p_exp = 0.1
+                    const z = (f[b] - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
+                    stillValid = z <= -1.5 && (f50[b] - p_exp) <= -0.02 && (f25[b] - p_exp) <= 0 && f10[b] <= 0.10
+                  } else {
+                    // EVEN or ODD — triple window re-validation
+                    const slice25 = arr.slice(-25)
+                    const freq25  = Array(10).fill(0)
+                    slice25.forEach((d: number) => freq25[d]++)
+                    const f25 = freq25.map((c: number) => c / slice25.length)
+                    const EVEN    = [0, 2, 4, 6, 8]
+                    const isEven  = rec.type === 'EVEN'
+                    let obs = 0;   EVEN.forEach(d => obs   += f[d]);   if (!isEven) obs   = 1 - obs
+                    let obs50 = 0; EVEN.forEach(d => obs50 += f50[d]); if (!isEven) obs50 = 1 - obs50
+                    let obs25 = 0; EVEN.forEach(d => obs25 += f25[d]); if (!isEven) obs25 = 1 - obs25
+                    const z = (obs - 0.5) / Math.sqrt(0.25 / n)
+                    const sl10 = arr.slice(-10)
+                    let ec10 = 0; sl10.forEach((d: number) => { if (d % 2 === 0) ec10++ })
+                    const ef10 = ec10 / sl10.length
+                    const sgOk = isEven ? ef10 >= 0.40 : ef10 <= 0.60
+                    stillValid = z >= 1.45 && (obs50 - 0.5) > 0 && (obs25 - 0.5) > 0 && sgOk
+                  }
+                }
+                // Cancel signal if edge is gone OR hit 2 consecutive losses
+                if (!stillValid || sigConsecLossRef.current >= 2) {
+                  if (sigTimerRef.current) clearTimeout(sigTimerRef.current)
+                  sigConsecLossRef.current = 0
+                  setSigRec(null)
+                  setSigState('analyzing')
+                  sigStateRef.current = 'analyzing'
+                }
+              }
             } else {
               setPositions(ps => ps.map(p => p.id === poc.contract_id
                 ? { ...p, profit: pocProfit ?? p.profit, bid: pocBidPrice ?? p.bid } : p))
@@ -532,8 +989,19 @@ export default function ChartsPage() {
           } catch (err) { console.error('[Charts WS]', err) }  // prevent any handler error from crashing React
         }
 
-        ws.onclose = () => { if (alive) { setAuthReady(false); setTimeout(connect, 3000) } }
-      } catch { setAuthErr('Auth WS error') }
+        ws.onclose = () => {
+          if (alive) {
+            setAuthReady(false)
+            setBuyingA(false); setBuyingB(false)  // un-stick buttons if WS drops mid-buy
+            setTimeout(connect, 3000)
+          }
+        }
+      } catch {
+        if (!alive) return
+        // Network-level error (fetch threw) — retry after 3 s
+        setAuthErr('Reconnecting…')
+        setTimeout(connect, 3000)
+      }
     }
 
     connect()
@@ -555,13 +1023,34 @@ export default function ChartsPage() {
     const ws   = authRef.current
     // Read from refs for freshest value even if React hasn't re-rendered yet
     const prop = side === 'A' ? propARef.current : propBRef.current
-    if (!ws || !prop || !prop.id || prop.err) return
+    // Check readyState explicitly — prevents setBuyingA(true) then a failed send leaving the button stuck
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!prop || !prop.id || prop.err) return
     if (buyingA || buyingB) return
     // Guard: reject stale proposal from previous market
     if (prop.sym && prop.sym !== symbolRef.current) return
+    // Guard: reject if stake exceeds current balance
+    if (balance !== null && parseFloat(stakeRef.current) > balance) return
     buyingSideRef.current = side  // set before state update so WS callback sees it
     if (side === 'A') setBuyingA(true); else setBuyingB(true)
-    ws.send(JSON.stringify({ buy: prop.id, price: +(prop.ask * 1.02).toFixed(2) }))
+
+    // 10s safety net: if Deriv never sends msg.buy (lost packet, silent error, rate-limit),
+    // auto-reset the button so the user isn't permanently stuck.
+    if (buyTimeoutRef.current) clearTimeout(buyTimeoutRef.current)
+    buyTimeoutRef.current = setTimeout(() => {
+      buyTimeoutRef.current = null
+      setBuyingA(false); setBuyingB(false)
+      buyingSideRef.current = null
+    }, 10000)
+
+    try {
+      ws.send(JSON.stringify({ buy: prop.id, price: +(prop.ask * 1.02).toFixed(2) }))
+    } catch {
+      // WS closed between readyState check and send — un-stick the button immediately
+      if (buyTimeoutRef.current) { clearTimeout(buyTimeoutRef.current); buyTimeoutRef.current = null }
+      if (side === 'A') setBuyingA(false); else setBuyingB(false)
+      buyingSideRef.current = null
+    }
   }, [buyingA, buyingB]) // propA/B read from refs inside
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -577,24 +1066,13 @@ export default function ChartsPage() {
     return acc
   }, {})
 
-  // ─── Theme ────────────────────────────────────────────────────────────────
-  const bg0   = '#0d1117'
-  const bg1   = '#161b22'
-  const bg2   = '#21262d'
-  const bdr   = '#30363d'
-  const txt0  = '#f0f6fc'
-  const txt1  = '#8b949e'
-  const txt2  = '#484f58'
-  const amber = '#e6b429'
-  const green = '#3fb950'
-  const red   = '#f85149'
-  const blue  = '#58a6ff'
+  // ─── Theme colours come from CSS variables via @/lib/colors import ────────
 
   // ═════════════════════════════════════════════════════════════════════════
   // Render — LAYOUT changes only (positions moved left; everything else same)
   // ═════════════════════════════════════════════════════════════════════════
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: bg0, fontFamily: 'Inter, system-ui, sans-serif', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, background: bg0, fontFamily: 'Inter, system-ui, sans-serif', overflow: 'hidden' }}>
 
       {/* ══ TOP BAR ══════════════════════════════════════════════════════ */}
       <div style={{
@@ -865,22 +1343,217 @@ export default function ChartsPage() {
             </div>
           </div>
 
-          {/* DIGIT barrier */}
-          {tt.barrier && (
-            <div style={{ padding: '10px 12px', borderBottom: `1px solid ${bdr}` }}>
-              <div style={{ fontSize: 9, color: txt2, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Digit ({barrier})</div>
-              <div style={{ display: 'flex', gap: 3 }}>
-                {[0,1,2,3,4,5,6,7,8,9].map(d => (
-                  <button key={d} onClick={() => setBarrier(d)} style={{
-                    flex: 1, height: 28, fontSize: 11, fontWeight: 700,
-                    background: barrier === d ? amber : bg2,
-                    border: `1px solid ${barrier === d ? amber : bdr}`,
-                    borderRadius: 4, color: barrier === d ? '#000' : txt1, cursor: 'pointer',
-                  }}>{d}</button>
-                ))}
-              </div>
+          {/* ── SIGNAL ANALYZER ──────────────────────────────────── */}
+          <div style={{ padding: '10px 12px', borderBottom: `1px solid ${bdr}`, flexShrink: 0 }}>
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ fontSize: 9, color: txt2, textTransform: 'uppercase', letterSpacing: '0.08em' }}>◈ Signal</span>
+              <span style={{ fontSize: 8, color: txt2 }}>{Math.min(sigDigitsRef.current.length, 100)}/100 ticks</span>
             </div>
-          )}
+
+            {/* State badge */}
+            {sigState === 'enter' && sigRec ? (
+              // ── ENTER NOW — prominent orange banner like exwager ──────────
+              <div style={{
+                padding: '8px 10px', borderRadius: 6, marginBottom: 8,
+                background: 'linear-gradient(135deg, rgba(249,115,22,0.18) 0%, rgba(230,180,41,0.14) 100%)',
+                border: `1px solid #f97316`,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#f97316', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  🟠 ENTER NOW
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: sigRec.type === 'RISE' ? green : sigRec.type === 'FALL' ? red : green }}>
+                    {sigRec.type === 'RISE' ? '↑ Rise' : sigRec.type === 'FALL' ? '↓ Fall' : sigRec.type === 'OVER' ? `Over ${sigRec.barrier}` : sigRec.type === 'UNDER' ? `Under ${sigRec.barrier}` : sigRec.type === 'EVEN' ? 'Even' : sigRec.type === 'ODD' ? 'Odd' : sigRec.type === 'MATCH' ? `Match ${sigRec.barrier}` : `Differ ${sigRec.barrier}`}
+                  </span>
+                  <span style={{ fontSize: 10, background: `${green}22`, color: green, border: `1px solid ${green}55`, borderRadius: 4, padding: '1px 6px' }}>
+                    +{(sigRec.edge * 100).toFixed(1)}% edge
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    if (sigRec.type === 'RISE' || sigRec.type === 'FALL') {
+                      setTtIdx(3); setTickDur(5)
+                    } else {
+                      if (sigRec.type === 'OVER' || sigRec.type === 'UNDER') {
+                        setTtIdx(0); setBarrier(sigRec.barrier ?? 5)
+                      } else if (sigRec.type === 'MATCH' || sigRec.type === 'DIFFER') {
+                        setTtIdx(2); setBarrier(sigRec.barrier ?? 0)
+                      }
+                      setTickDur(3)
+                    }
+                  }}
+                  style={{
+                    width: '100%', padding: '5px 0', fontSize: 11, fontWeight: 700,
+                    background: 'rgba(249,115,22,0.15)', border: `1px solid #f97316`,
+                    borderRadius: 5, color: '#f97316', cursor: 'pointer',
+                  }}
+                >
+                  Set {sigRec.type === 'RISE' ? '↑ Rise' : sigRec.type === 'FALL' ? '↓ Fall' : sigRec.type === 'OVER' ? `Over ${sigRec.barrier}` : sigRec.type === 'UNDER' ? `Under ${sigRec.barrier}` : sigRec.type === 'EVEN' ? 'Even' : sigRec.type === 'ODD' ? 'Odd' : sigRec.type === 'MATCH' ? `Match ${sigRec.barrier}` : `Differ ${sigRec.barrier}`} · {sigRec.type === 'RISE' || sigRec.type === 'FALL' ? '5' : '3'}t →
+                </button>
+              </div>
+            ) : (
+              <div style={{
+                padding: '7px 10px', borderRadius: 6, marginBottom: 8, textAlign: 'center',
+                background: sigState === 'cooloff' ? 'rgba(230,180,41,0.06)' : bg0,
+                border: `1px solid ${sigState === 'cooloff' ? amber : sigState === 'waiting' ? `${green}44` : bdr}`,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: sigState === 'cooloff' ? amber : sigState === 'waiting' ? green : txt2, marginBottom: sigRec && sigState !== 'analyzing' ? 4 : 0 }}>
+                  {sigState === 'analyzing' ? 'Analyzing…'
+                  : sigState === 'waiting'  ? 'Waiting for signal'
+                  : 'Cooling off…'}
+                </div>
+                {/* Show last sigRec recommendation during waiting and cooloff */}
+                {sigRec && sigState !== 'analyzing' && (
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    padding: '2px 8px', borderRadius: 4,
+                    background: sigState === 'cooloff' ? `${amber}18` : `${green}18`,
+                    border: `1px solid ${sigState === 'cooloff' ? `${amber}55` : `${green}55`}`,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: sigState === 'cooloff' ? amber : green }}>
+                      {sigRec.type === 'RISE' ? '↑ Rise' : sigRec.type === 'FALL' ? '↓ Fall' : sigRec.type === 'OVER' ? `Over ${sigRec.barrier}` : sigRec.type === 'UNDER' ? `Under ${sigRec.barrier}` : sigRec.type === 'EVEN' ? 'Even' : sigRec.type === 'ODD' ? 'Odd' : sigRec.type === 'MATCH' ? `Match ${sigRec.barrier}` : `Differ ${sigRec.barrier}`}
+                    </span>
+                    <span style={{ fontSize: 9, color: txt2 }}>{tickDur}t</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Edge buttons / indicator panel */}
+            {tt.id === 'MD' ? (
+              // 10 digit tiles: hot = green (Match), cold = blue (Differ)
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 2, marginBottom: 8 }}>
+                {[0,1,2,3,4,5,6,7,8,9].map(d => {
+                  const edge   = sigEdges[`D${d}`] ?? 0
+                  const isBest = sigRec && sigState === 'enter' && sigRec.barrier === d
+                  const isHot  = false           // Match signals removed
+                  const isCold = edge <= -0.03  // ≤7%  — approaching Differ signal strength
+                  return (
+                    <div key={d} style={{
+                      padding: '4px 2px', borderRadius: 4, textAlign: 'center',
+                      background: isBest ? `${green}28` : isHot ? `${green}12` : isCold ? `${blue}12` : bg2,
+                      border: `1px solid ${isBest ? green : isHot ? `${green}55` : isCold ? `${blue}55` : bdr}`,
+                      color: isBest ? green : isHot ? green : isCold ? blue : txt2,
+                      transition: 'all 0.3s',
+                    }}>
+                      <div style={{ fontSize: 10, fontWeight: 700 }}>{d}</div>
+                      <div style={{ fontSize: 7, marginTop: 1 }}>{edge >= 0 ? '+' : ''}{(edge * 100).toFixed(0)}%</div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : tt.id === 'EO' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                {(['EV','OD'] as const).map(key => {
+                  const edge   = sigEdges[key] ?? 0
+                  const label  = key === 'EV' ? 'EVEN' : 'ODD'
+                  const isBest = sigRec && sigState === 'enter' && ((key === 'EV' && sigRec.type === 'EVEN') || (key === 'OD' && sigRec.type === 'ODD'))
+                  const isGood = edge >= 0.03
+                  const isBad  = edge <= -0.02
+                  return (
+                    <div key={key} style={{
+                      padding: '5px 4px', borderRadius: 4, textAlign: 'center',
+                      background: isBest ? `${green}28` : isGood ? `${green}12` : isBad ? `${red}12` : bg2,
+                      border: `1px solid ${isBest ? green : isGood ? `${green}55` : isBad ? `${red}55` : bdr}`,
+                      color: isBest ? green : isGood ? green : isBad ? red : txt2,
+                      transition: 'all 0.3s',
+                    }}>
+                      <div style={{ fontSize: 10, fontWeight: 700 }}>{label}</div>
+                      <div style={{ fontSize: 8, fontWeight: 400, marginTop: 1 }}>{edge >= 0 ? '+' : ''}{(edge * 100).toFixed(1)}%</div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : tt.id === 'RF' ? (
+              // ── Rise/Fall multi-indicator panel ───────────────────────────
+              <div style={{ marginBottom: 8 }}>
+                {rfSigData ? (
+                  <>
+                    {/* Consensus summary row */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, padding: '5px 8px', borderRadius: 5, background: rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `${green}12` : `${red}12`) : bg2, border: `1px solid ${rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `${green}44` : `${red}44`) : bdr}` }}>
+                      <span style={{ fontSize: 10, color: txt2 }}>Consensus</span>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? green : red) : txt2 }}>
+                        {rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? '↑ RISE' : '↓ FALL') : 'WAIT'} {rfSigData.score}/4
+                      </span>
+                    </div>
+                    {/* Indicator rows */}
+                    {([
+                      { name: 'EMA Trend', vote: rfSigData.emaVote,    reading: rfSigData.emaVote > 0 ? 'Bullish' : rfSigData.emaVote < 0 ? 'Bearish' : 'Flat' },
+                      { name: 'RSI',       vote: rfSigData.rsiVote,    reading: `${rfSigData.rsi.toFixed(0)} ${rfSigData.rsiVote > 0 ? '(OS)' : rfSigData.rsiVote < 0 ? '(OB)' : ''}` },
+                      { name: 'Streak',    vote: rfSigData.streakVote, reading: rfSigData.streakVote !== 0 ? `${rfSigData.streak}t → Rev` : `${rfSigData.streak}t` },
+                      { name: 'Channel',   vote: rfSigData.channelVote,reading: rfSigData.channelPos < 0.25 ? 'Near low' : rfSigData.channelPos > 0.75 ? 'Near high' : 'Mid-range' },
+                    ] as {name:string;vote:number;reading:string}[]).map(ind => (
+                      <div key={ind.name} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, padding: '4px 8px', borderRadius: 4, background: bg2, border: `1px solid ${ind.vote > 0 ? `${green}33` : ind.vote < 0 ? `${red}33` : bdr}` }}>
+                        <span style={{ fontSize: 10, color: txt2, width: 68, flexShrink: 0 }}>{ind.name}</span>
+                        <span style={{ fontSize: 10, color: txt1, flex: 1 }}>{ind.reading}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: ind.vote > 0 ? green : ind.vote < 0 ? red : txt2 }}>{ind.vote > 0 ? '↑' : ind.vote < 0 ? '↓' : '—'}</span>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <div style={{ textAlign: 'center', color: txt2, fontSize: 10, padding: '12px 0' }}>Collecting data (25 ticks)…</div>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 2, marginBottom: 8 }}>
+                {(['O1','O2','O3','O4','O5','U6','U7','U8'] as const).map(label => {
+                  const edge   = sigEdges[label] ?? 0
+                  const isBest = sigRec && sigState === 'enter' && label === `${sigRec.type[0]}${sigRec.barrier}`
+                  const isGood = edge >= 0.03
+                  const isBad  = edge <= -0.02
+                  return (
+                    <div key={label} style={{
+                      padding: '4px 1px', borderRadius: 4, textAlign: 'center',
+                      fontSize: 9, fontWeight: 700,
+                      background: isBest ? `${green}28` : isGood ? `${green}12` : isBad ? `${red}12` : bg2,
+                      border: `1px solid ${isBest ? green : isGood ? `${green}55` : isBad ? `${red}55` : bdr}`,
+                      color: isBest ? green : isGood ? green : isBad ? red : txt2,
+                      transition: 'all 0.3s',
+                    }}>{label}</div>
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Digit frequency bars — not shown for Rise/Fall */}
+            {tt.id !== 'RF' && (
+              <div style={{ display: 'flex', gap: 2 }}>
+                {digitFreq.map((f, i) => {
+                  const h     = Math.min(f / 0.25 * 100, 100)
+                  const isHot  = f >= 0.16
+                  const isWarm = f >= 0.13
+                  const isCool = f <= 0.06
+                  const barColor = isHot ? red : isWarm ? amber : isCool ? blue : txt2
+                  const isWinner = sigRec && sigState === 'enter' && (
+                    (sigRec.type === 'OVER'   && i > (sigRec.barrier ?? -1)) ||
+                    (sigRec.type === 'UNDER'  && i < (sigRec.barrier ?? 10)) ||
+                    (sigRec.type === 'EVEN'   && i % 2 === 0) ||
+                    (sigRec.type === 'ODD'    && i % 2 === 1) ||
+                    (sigRec.type === 'MATCH'  && i === sigRec.barrier) ||
+                    (sigRec.type === 'DIFFER' && i !== sigRec.barrier)
+                  )
+                  return (
+                    <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                      <div style={{
+                        width: '100%', height: 28, display: 'flex', alignItems: 'flex-end',
+                        background: 'rgba(0,0,0,0.2)', borderRadius: '2px 2px 0 0', overflow: 'hidden',
+                        outline: isWinner ? `1px solid ${green}` : 'none',
+                      }}>
+                        <div style={{
+                          width: '100%', height: `${h}%`,
+                          background: isWinner ? green : barColor,
+                          borderRadius: '2px 2px 0 0', transition: 'height 0.25s',
+                        }} />
+                      </div>
+                      <div style={{ fontSize: 8, color: isWinner ? green : txt2, fontWeight: 600 }}>{i}</div>
+                      <div style={{ fontSize: 7, color: txt2 }}>{(f * 100).toFixed(0)}%</div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
 
           {/* DURATION + STAKE */}
           <div style={{ padding: '10px 12px', borderBottom: `1px solid ${bdr}` }}>
@@ -925,9 +1598,31 @@ export default function ChartsPage() {
             </div>
           </div>
 
+          {/* DIGIT barrier */}
+          {tt.barrier && (
+            <div style={{ padding: '10px 12px', borderBottom: `1px solid ${bdr}` }}>
+              <div style={{ fontSize: 9, color: txt2, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Digit ({barrier})</div>
+              <div style={{ display: 'flex', gap: 3 }}>
+                {[0,1,2,3,4,5,6,7,8,9].map(d => (
+                  <button key={d} onClick={() => setBarrier(d)} style={{
+                    flex: 1, height: 28, fontSize: 11, fontWeight: 700,
+                    background: barrier === d ? amber : bg2,
+                    border: `1px solid ${barrier === d ? amber : bdr}`,
+                    borderRadius: 4, color: barrier === d ? '#000' : txt1, cursor: 'pointer',
+                  }}>{d}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* BUY CARDS — same structure as v82 */}
           <div style={{ padding: '10px 12px', flex: 1 }}>
             <div style={{ fontSize: 9, color: txt2, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>{tt.label}</div>
+            {balance !== null && parseFloat(stake) > balance && (
+              <div style={{ fontSize: 10, color: red, marginBottom: 6, textAlign: 'center' }}>
+                Insufficient balance ({currency} {f2(balance)})
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 6 }}>
               {(['A','B'] as const).map(side => {
                 const prop   = side === 'A' ? propA : propB
@@ -935,6 +1630,7 @@ export default function ChartsPage() {
                 const label  = side === 'A' ? tt.lA : tt.lB
                 const color  = side === 'A' ? tt.cA : tt.cB
                 const bgDim  = side === 'A' ? '#1a2e1a' : '#1a1a2e'
+                const noFunds = balance !== null && parseFloat(stake) > balance
                 return (
                   <div key={side} style={{ flex: 1 }}>
                     <div style={{ background: bg2, border: `1px solid ${bdr}`, borderRadius: 6, padding: '8px 10px', marginBottom: 6 }}>
@@ -950,15 +1646,20 @@ export default function ChartsPage() {
                         </span>
                       </div>
                     </div>
+                    {prop?.err && (
+                      <div style={{ fontSize: 10, color: red, textAlign: 'center', marginBottom: 4, lineHeight: 1.3 }}>
+                        {prop.err}
+                      </div>
+                    )}
                     <button
                       onClick={() => buy(side)}
-                      disabled={!prop || buying || buyingA || buyingB}
+                      disabled={!prop?.id || !!prop?.err || buying || buyingA || buyingB || noFunds}
                       style={{
                         width: '100%', padding: '9px 0', fontSize: 12, fontWeight: 700,
-                        background: prop && !buying ? color : bgDim,
+                        background: prop?.id && !prop.err && !buying && !noFunds ? color : bgDim,
                         border: 'none', borderRadius: 6, color: '#fff',
-                        cursor: prop && !buying ? 'pointer' : 'not-allowed',
-                        opacity: prop ? 1 : 0.5, transition: 'background 0.15s',
+                        cursor: prop?.id && !prop.err && !buying && !noFunds ? 'pointer' : 'not-allowed',
+                        opacity: prop?.id && !prop.err && !noFunds ? 1 : 0.5, transition: 'background 0.15s',
                       }}
                     >
                       {buying ? '…' : `Buy ${label}`}
@@ -968,6 +1669,7 @@ export default function ChartsPage() {
               })}
             </div>
           </div>
+
         </aside>
       </div>
     </div>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { bg1, txt0, txt1, txt2 } from '@/lib/colors'
 
 const QUOTES = [
   'Small consistent gains build extraordinary wealth.',
@@ -98,7 +99,7 @@ export default function DashboardPage() {
           style={{
             fontSize: 'clamp(1.6rem, 4vw, 2.4rem)',
             fontWeight: 800,
-            color: '#fff',
+            color: txt0,
             letterSpacing: '-0.03em',
           }}
         >
@@ -112,7 +113,7 @@ export default function DashboardPage() {
         style={{
           fontSize: '0.92rem',
           fontStyle: 'italic',
-          color: 'rgba(229,229,229,0.45)',
+          color: txt1,
           marginBottom: '2.5rem',
           animation: 'fadeIn 0.5s ease',
         }}
@@ -129,20 +130,20 @@ export default function DashboardPage() {
           marginBottom: '1.25rem',
         }}
       >
-        <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
+        <div style={{ flex: 1, height: '1px', background: 'var(--bdr)' }} />
         <span
           style={{
             fontSize: '0.7rem',
             fontWeight: 700,
             letterSpacing: '0.12em',
             textTransform: 'uppercase',
-            color: 'rgba(229,229,229,0.35)',
+            color: txt2,
             whiteSpace: 'nowrap',
           }}
         >
           Quick Actions
         </span>
-        <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
+        <div style={{ flex: 1, height: '1px', background: 'var(--bdr)' }} />
       </div>
 
       {/* Cards grid */}
@@ -161,8 +162,8 @@ export default function DashboardPage() {
           >
             <div
               style={{
-                background: '#080808',
-                border: '1px solid var(--border)',
+                background: bg1,
+                border: '1px solid var(--bdr)',
                 borderRadius: '14px',
                 overflow: 'hidden',
                 transition: 'border-color 0.2s, transform 0.2s, box-shadow 0.2s',
@@ -176,7 +177,7 @@ export default function DashboardPage() {
               }}
               onMouseOut={e => {
                 const el = e.currentTarget as HTMLDivElement
-                el.style.borderColor = 'var(--border)'
+                el.style.borderColor = 'var(--bdr)'
                 el.style.transform = 'translateY(0)'
                 el.style.boxShadow = 'none'
               }}
@@ -206,7 +207,7 @@ export default function DashboardPage() {
                   style={{
                     fontSize: '0.92rem',
                     fontWeight: 700,
-                    color: '#fff',
+                    color: txt0,
                     marginBottom: '0.4rem',
                   }}
                 >
@@ -215,7 +216,7 @@ export default function DashboardPage() {
                 <p
                   style={{
                     fontSize: '0.75rem',
-                    color: 'rgba(229,229,229,0.45)',
+                    color: txt1,
                     lineHeight: 1.5,
                     marginBottom: '1rem',
                   }}
