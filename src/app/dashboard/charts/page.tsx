@@ -29,7 +29,7 @@
  *   └──────────────┴──────────────────────────────┴─────────────────────┘
  *
  * Two-WebSocket architecture (unchanged from v82):
- *   PUBLIC  wss://ws.binaryws.com/websockets/v3?app_id=1089
+ *   PUBLIC  wss://api.derivws.com/trading/v1/options/ws/public
  *   AUTH    OTP URL from /api/user/ws-url
  */
 
@@ -41,7 +41,7 @@ import {
 import { bg0, bg1, bg2, bdr, txt0, txt1, txt2, green, red, amber, blue } from '@/lib/colors'
 
 // ─── Constants (unchanged from v82) ──────────────────────────────────────────
-const PUB_WS = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
+const PUB_WS = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
 const TT = [
   { id: 'OU', label: 'Over / Under',   ctA: 'DIGITOVER',  ctB: 'DIGITUNDER', lA: 'Over',  lB: 'Under',  cA: '#22c55e', cB: '#3b82f6', barrier: true  },
@@ -778,27 +778,20 @@ export default function ChartsPage() {
           setTimeout(connect, 3000)
           return
         }
-        const { wsUrl, token } = await r.json() as { wsUrl: string; token: string }
+        const { wsUrl } = await r.json()
         ws = new WebSocket(wsUrl)
         authRef.current = ws
 
         ws.onopen = () => {
           if (!alive) return
-          // Legacy Deriv WS: must authorize before any other calls
-          ws.send(JSON.stringify({ authorize: token }))
+          ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+          setAuthReady(true); setAuthErr(null)
         }
 
         ws.onmessage = (evt) => {
           if (!alive) return
           try {
           const msg = JSON.parse(evt.data)
-
-          // Legacy WS: authorize response — now safe to subscribe
-          if (msg.authorize) {
-            ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
-            setAuthReady(true); setAuthErr(null)
-            return
-          }
 
           if (msg.balance) {
             const b = Number(msg.balance.balance) || 0

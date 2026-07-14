@@ -275,32 +275,26 @@ export default function BotBuilderPage() {
           setTimeout(connect, 3000)
           return
         }
-        const { wsUrl, token } = await r.json() as { wsUrl: string; token: string }
+        const { wsUrl } = await r.json()
         ws = new WebSocket(wsUrl)
         authRef.current = ws
 
         ws.onopen = () => {
           if (!alive) return
-          // Legacy Deriv WS: must authorize before any other calls
-          ws.send(JSON.stringify({ authorize: token }))
+          ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+          setAuthReady(true); setAuthErr(null)
+          // Resume trading loop if bot was running when WS dropped
+          if (runningRef.current && !pausedRef.current) {
+            proposalIdRef.current = null
+            if (nextTradeTimerRef.current) clearTimeout(nextTradeTimerRef.current)
+            nextTradeTimerRef.current = setTimeout(subscribeProposal, 400)
+          }
         }
 
         ws.onmessage = (e) => {
           if (!alive) return
           try {
             const msg = JSON.parse(e.data)
-
-            // Legacy WS: authorize response — now safe to subscribe
-            if (msg.authorize) {
-              ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
-              setAuthReady(true); setAuthErr(null)
-              if (runningRef.current && !pausedRef.current) {
-                proposalIdRef.current = null
-                if (nextTradeTimerRef.current) clearTimeout(nextTradeTimerRef.current)
-                nextTradeTimerRef.current = setTimeout(subscribeProposal, 400)
-              }
-              return
-            }
 
             if (msg.balance) {
               const b   = Number(msg.balance.balance) || 0
@@ -456,7 +450,7 @@ export default function BotBuilderPage() {
   useEffect(() => {
     let ws: WebSocket
     let alive = true
-    const PUB = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
+    const PUB = 'wss://api.derivws.com/trading/v1/options/ws/public'
     const connect = () => {
       ws = new WebSocket(PUB)
       pubWsRef.current = ws

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
-const PUBLIC_WS_URL  = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
+const PUBLIC_WS_URL  = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const MAX_HISTORY    = 5000
 const MAX_RECONNECT  = 99   // effectively unlimited — never stop retrying in a long session
 
@@ -691,36 +691,27 @@ export default function ManualTraderPage() {
       } catch { /**/ }
 
       let wsUrl = ''
-      let wsToken = ''
       try {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) { if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }; setWsError('Connection failed — retrying…'); scheduleReconnect(); return }
-        ;({ wsUrl, token: wsToken } = await r.json() as { wsUrl: string; token: string })
+        ;({ wsUrl } = await r.json() as { wsUrl: string })
       } catch { setWsError('Network error — retrying…'); scheduleReconnect(); return }
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
 
       ws.onopen = () => {
-        reconnectCount.current = 0
-        // Legacy Deriv WS: must authorize before any other calls
-        ws!.send(JSON.stringify({ authorize: wsToken }))
+        reconnectCount.current = 0; setWsError(null); setWsReady(true)
+        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+        ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
+        ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
+        resubscribeAll(ws!)
         ping = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 })) }, 30_000)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
-
-        // Legacy WS: authorize response — now safe to subscribe
-        if (msg.authorize) {
-          setWsError(null); setWsReady(true)
-          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-          ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
-          ws!.send(JSON.stringify({ proposal_open_contract: 1, subscribe: 1, req_id: 300 }))
-          resubscribeAll(ws!)
-          return
-        }
 
         if (msg.error) {
           const err = msg.error as { message: string; code?: string }
