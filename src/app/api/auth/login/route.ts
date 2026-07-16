@@ -61,6 +61,7 @@ export async function GET(req: NextRequest) {
     state,
     code_challenge:        codeChallenge,
     code_challenge_method: 'S256',
+    prompt:                'login',
   })
 
   return NextResponse.redirect(`${DERIV_OAUTH_URL}?${authParams.toString()}`)

@@ -15,7 +15,7 @@ const TABS = [
   // ── Not yet built — keep routes, hide tabs ──────────────────────────────
   { label: 'AI Software',    href: '/dashboard/ai-software',   icon: '✦', visible: false },
   { label: 'Auto Trader',    href: '/dashboard/auto-trader',   icon: '↺', visible: false },
-  { label: 'Bulk Trader',    href: '/dashboard/bulk-trader',   icon: '⣿', visible: false },
+  { label: 'Bulk Trader',    href: '/dashboard/bulk-trader',   icon: '⣿', visible: true  },
   { label: 'Copy Trader',    href: '/dashboard/copy-trader',   icon: '⊕', visible: false },
   { label: 'Risk Calculator',href: '/dashboard/risk-calc',     icon: '⚖', visible: false },
   { label: 'Trade Academy',  href: '/dashboard/academy',       icon: '🎓', visible: false },
