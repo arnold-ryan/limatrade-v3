@@ -1,31 +1,28 @@
 /**
- * Deriv New API (2024+) constants
+ * Deriv Legacy OAuth + WebSocket constants
  *
- * The NEW Deriv API uses OAuth 2.0 Authorization Code + PKCE.
- * App IDs registered at developers.deriv.com have alphanumeric format (e.g. "33EsxEGxJdpnIFRvtiSpY").
+ * Lima Trade uses the proven legacy Deriv OAuth flow (oauth.deriv.com).
+ * This is the system used by all documented Deriv third-party apps.
  *
  * OAuth flow:
- *   1. Generate PKCE (code_verifier + code_challenge + state)
- *   2. Redirect to DERIV_OAUTH_URL with client_id, redirect_uri, scope, state, code_challenge
- *   3. Deriv redirects back: {redirect_uri}?code=AUTH_CODE&state=STATE
- *   4. Exchange code → Bearer token: POST DERIV_TOKEN_URL with code + code_verifier
- *   5. Use Bearer token in all REST + WS calls
+ *   1. Redirect to DERIV_OAUTH_URL with app_id
+ *   2. User logs in on Deriv
+ *   3. Deriv redirects back: {redirect_uri}?acct1=CR...&token1=a1-...&cur1=USD&acct2=...
+ *   4. Parse tokens and save to session
+ *   5. Connect to DERIV_LEGACY_WS_URL?app_id=APP_ID, send { authorize: "a1-..." }
  *
- * WebSocket (trading):
- *   - Get OTP:     POST {DERIV_API_URL}/trading/v1/options/accounts/{accountId}/otp
- *   - Connect:     wss://api.derivws.com/trading/v1/options/ws/{type}?otp=...
- *   - Market data: wss://api.derivws.com/trading/v1/options/ws/public (no auth)
+ * App registration:
+ *   - Go to https://api.deriv.com/dashboard → Applications
+ *   - Create or find your app → copy the numeric App ID (e.g. 12345)
+ *   - Set OAuth Redirect URL to: https://YOUR-DOMAIN.vercel.app/callback
+ *   - Set DERIV_CLIENT_ID env var to the numeric App ID
  */
-export const DERIV_OAUTH_URL  = 'https://auth.deriv.com/oauth2/auth'
-export const DERIV_TOKEN_URL  = 'https://auth.deriv.com/oauth2/token'
-export const DERIV_API_URL    = 'https://api.derivws.com'
-
-/** OAuth scopes for trading apps */
-export const DERIV_SCOPE = 'trade account_manage'
+export const DERIV_OAUTH_URL = 'https://oauth.deriv.com/oauth2/authorize'
 
 /**
- * Legacy WebSocket (still used for public market data — ticks, candles, active symbols).
- * Does NOT require auth for public endpoints.
+ * WebSocket for ALL trading and market data.
+ * Requires { authorize: "a1-..." } after connect for authenticated endpoints.
+ * Public ticks also need app_id in URL: ?app_id=YOUR_NUMERIC_APP_ID
  */
 export const DERIV_LEGACY_WS_URL = 'wss://ws.binaryws.com/websockets/v3'
 

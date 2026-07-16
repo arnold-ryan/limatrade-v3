@@ -72,7 +72,7 @@ export default function TradePanel() {
         const err = await urlRes.json().catch(() => ({}))
         throw new Error(err.error ?? `ws-url ${urlRes.status}`)
       }
-      const { wsUrl } = await urlRes.json()
+      const { wsUrl, token } = await urlRes.json() as { wsUrl: string; token: string }
       if (!wsUrl) throw new Error('no_ws_url')
 
       if (!mountedRef.current) return
@@ -83,36 +83,41 @@ export default function TradePanel() {
       ws.onopen = () => {
         if (!mountedRef.current) { ws.close(); return }
         setReconnectCount(0)
-        setWsReady(true)
-        setWsError(null)
-
-        // Request both CALL and PUT proposals
-        ws.send(JSON.stringify({
-          proposal: 1, subscribe: 1, req_id: 1,
-          amount: parseFloat(stake) || 1,
-          basis: 'stake',
-          contract_type: 'CALL',
-          currency: 'USD',
-          duration: DURATION,
-          duration_unit: DUR_UNIT,
-          underlying_symbol: SYMBOL,
-        }))
-        ws.send(JSON.stringify({
-          proposal: 1, subscribe: 1, req_id: 2,
-          amount: parseFloat(stake) || 1,
-          basis: 'stake',
-          contract_type: 'PUT',
-          currency: 'USD',
-          duration: DURATION,
-          duration_unit: DUR_UNIT,
-          underlying_symbol: SYMBOL,
-        }))
+        // Legacy Deriv WS: must authorize before any other calls
+        ws.send(JSON.stringify({ authorize: token }))
       }
 
       ws.onmessage = (e) => {
         if (!mountedRef.current) return
         try {
           const msg = JSON.parse(e.data)
+
+          // Legacy WS: authorize response — now safe to request proposals
+          if (msg.authorize) {
+            setWsReady(true)
+            setWsError(null)
+            ws.send(JSON.stringify({
+              proposal: 1, subscribe: 1, req_id: 1,
+              amount: parseFloat(stake) || 1,
+              basis: 'stake',
+              contract_type: 'CALL',
+              currency: 'USD',
+              duration: DURATION,
+              duration_unit: DUR_UNIT,
+              symbol: SYMBOL,
+            }))
+            ws.send(JSON.stringify({
+              proposal: 1, subscribe: 1, req_id: 2,
+              amount: parseFloat(stake) || 1,
+              basis: 'stake',
+              contract_type: 'PUT',
+              currency: 'USD',
+              duration: DURATION,
+              duration_unit: DUR_UNIT,
+              symbol: SYMBOL,
+            }))
+            return
+          }
 
           if (msg.error) {
             // Session / auth errors — don't reconnect

@@ -6,7 +6,7 @@ import { bg0, bg1, bg2, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 /* ─── Constants ─────────────────────────────────────────── */
 // New Deriv API public WebSocket — no auth/OTP needed for market data
 // Source: https://developers.deriv.com/docs/options/websocket/
-const WS_URL      = 'wss://api.derivws.com/trading/v1/options/ws/public'
+const WS_URL      = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
 // Bot WS URL is fetched via /api/user/ws-url (OTP-authenticated for trading)
 const MAX_HISTORY = 5000
 
@@ -1340,6 +1340,7 @@ export default function AnalysisPage() {
 
       /* ── Get OTP-authenticated WS URL from server ── */
       let wsUrl = ''
+      let wsToken = ''
       try {
         const res = await fetch('/api/user/ws-url')
         if (!res.ok) {
@@ -1352,7 +1353,7 @@ export default function AnalysisPage() {
           scheduleReconnect()
           return
         }
-        ;({ wsUrl } = await res.json() as { wsUrl: string })
+        ;({ wsUrl, token: wsToken } = await res.json() as { wsUrl: string; token: string })
       } catch {
         setBotError('Network error — retrying…')
         scheduleReconnect()
@@ -1368,23 +1369,25 @@ export default function AnalysisPage() {
       ws.onopen = () => {
         reconnectCount.current = 0
         setBotError(null)
-        /* New Deriv API: connection is already authenticated via OTP in URL.
-           Subscribe to transaction stream immediately.
-           req_id: 100 reserved for transaction subscription */
-        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
-        // Subscribe to balance updates — server pushes on every balance change
-        // Source: balance_request.schema.json — subscribe: 1, auth_required
-        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+        // Legacy Deriv WS: must authorize before any other calls
+        ws!.send(JSON.stringify({ authorize: wsToken }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
-        setBotReady(true)
-        if (runningRef.current) executeTrade(ws!)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
+
+        // Legacy WS: authorize response — now safe to subscribe
+        if (msg.authorize) {
+          setBotReady(true)
+          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
+          if (runningRef.current) executeTrade(ws!)
+          return
+        }
 
         if (msg.error) {
           const err = msg.error as { message: string; code?: string }

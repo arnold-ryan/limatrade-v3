@@ -5,48 +5,58 @@ import { useRouter } from 'next/navigation'
 
 /**
  * /callback
- * Handles the redirect from Deriv OAuth (new API).
+ * Handles the redirect from legacy Deriv OAuth (oauth.deriv.com).
  *
- * New Deriv API sends an AUTHORIZATION CODE (not tokens directly):
- *   ?code=AUTH_CODE&state=RANDOM_STATE
+ * Legacy Deriv OAuth sends tokens directly in the redirect URL — no code exchange:
+ *   ?acct1=CR799393&token1=a1-...&cur1=usd&acct2=VRTC...&token2=a1-...&cur2=usd
  *
- * We hand the code + state to the server-side /api/auth/token route,
- * which exchanges it for a Bearer token and fetches the user's accounts.
+ * We parse all acct/token/cur params and hand them to /api/auth/token to store in session.
  */
 export default function CallbackPage() {
   const router = useRouter()
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const code   = params.get('code')
-    const state  = params.get('state')
-    const error  = params.get('error')
 
-    // Deriv sent an error (e.g. user cancelled)
+    // Deriv error param
+    const error = params.get('error')
     if (error) {
       router.replace('/?auth_error=' + encodeURIComponent(error))
       return
     }
 
-    if (!code) {
-      router.replace('/?auth_error=no_code_received')
+    // Parse acct1/token1/cur1, acct2/token2/cur2, ...
+    const accounts: Array<{ accountId: string; token: string; currency: string; isDemo: boolean }> = []
+    let i = 1
+    while (params.get(`token${i}`)) {
+      const acct = params.get(`acct${i}`) ?? ''
+      const tok  = params.get(`token${i}`) ?? ''
+      const cur  = params.get(`cur${i}`) ?? 'USD'
+      if (tok) {
+        accounts.push({
+          accountId: acct,
+          token:     tok,
+          currency:  cur.toUpperCase(),
+          isDemo:    acct.toUpperCase().startsWith('VRT') || acct.toUpperCase().startsWith('DEMO'),
+        })
+      }
+      i++
+    }
+
+    if (accounts.length === 0) {
+      router.replace('/?auth_error=no_accounts_received')
       return
     }
 
-    // Exchange the auth code for a Bearer token (server-side)
     fetch('/api/auth/token', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ code, state }),
+      body:    JSON.stringify({ accounts }),
     })
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
           router.replace('/dashboard')
-        } else if (data.error === 'invalid_session' || data.error === 'missing_state') {
-          // State is stale or missing (browser back-button, expired TTL, etc.)
-          // Restart login automatically — user never sees an error
-          window.location.href = '/api/auth/login'
         } else {
           router.replace('/?auth_error=' + encodeURIComponent(data.error ?? 'unknown'))
         }
