@@ -7,7 +7,7 @@ import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
  * Speedbot — High-speed digit trading with dual strategy
  *
  * Deriv API (verified against docs):
- *  • Public ticks WS : wss://ws.binaryws.com/websockets/v3?app_id=1089
+ *  • Public ticks WS : wss://api.derivws.com/trading/v1/options/ws/public
  *  • Authenticated WS: /api/user/ws-url → OTP URL from Deriv REST
  *  • Buy            : { buy:'1', price:1000, parameters:{ underlying_symbol, contract_type, ... } }
  *  • Transaction    : { transaction:1, subscribe:1 } — auth_required, scope:trade
@@ -25,7 +25,7 @@ import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
  */
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
-const PUBLIC_WS_URL = 'wss://ws.binaryws.com/websockets/v3?app_id=1089'
+const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
 
 const MARKETS = [
   { symbol: '1HZ100V',  label: 'Volatility 100 (1s) Index' },
@@ -654,9 +654,8 @@ export default function SpeedbotPage() {
         }
       } catch { /* non-fatal */ }
 
-      /* Get legacy WS URL + token */
+      /* Get OTP WS URL */
       let wsUrl = ''
-      let wsToken = ''
       try {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
@@ -665,7 +664,7 @@ export default function SpeedbotPage() {
           scheduleReconnect()
           return
         }
-        ;({ wsUrl, token: wsToken } = await r.json() as { wsUrl: string; token: string })
+        ;({ wsUrl } = await r.json() as { wsUrl: string })
       } catch {
         setBotError('Network error — retrying…')
         scheduleReconnect()
@@ -678,26 +677,22 @@ export default function SpeedbotPage() {
 
       ws.onopen = () => {
         reconnectCount.current = 0
-        // Legacy Deriv WS: must authorize before any other calls
-        ws!.send(JSON.stringify({ authorize: wsToken }))
+        setBotError(null)
+        setBotReady(true)
+        // Subscribe to transaction stream (req_id 100 reserved)
+        ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
+        // Subscribe to balance updates — server pushes on every balance change
+        // Source: balance_request.schema.json — subscribe: 1, auth_required
+        ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
         ping = setInterval(() => {
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }))
         }, 30_000)
+        if (runningRef.current) executeTrade(ws!)
       }
 
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try { msg = JSON.parse(ev.data as string) } catch { return }
-
-        // Legacy WS: authorize response — now safe to subscribe
-        if (msg.authorize) {
-          setBotError(null)
-          setBotReady(true)
-          ws!.send(JSON.stringify({ transaction: 1, subscribe: 1, req_id: 100 }))
-          ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
-          if (runningRef.current) executeTrade(ws!)
-          return
-        }
 
         /* ── Error handling ── */
         if (msg.error) {

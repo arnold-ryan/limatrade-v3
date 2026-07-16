@@ -1,23 +1,29 @@
 import { getIronSession, IronSession } from 'iron-session'
 import { cookies } from 'next/headers'
 
-/** One Deriv trading account (legacy API format) */
+/** One Deriv trading account (new API format) */
 export interface AccountInfo {
-  accountId:  string   // Deriv loginid: "CR123456" (real) or "VRTC1234" (demo)
-  isDemo:     boolean
+  accountId:  string   // New format: "DOT90004580" (new API) or "CR123456" (legacy)
+  isDemo:     boolean  // true = demo account
   currency:   string   // e.g. "USD"
-  balance?:   number
-  type?:      string   // "real" | "demo"
+  balance?:   number   // populated when fetched from accounts endpoint
+  type?:      string   // "demo" | "real"
 }
 
 export interface SessionData {
-  /** Legacy Deriv token (format: "a1-...") from the OAuth redirect */
+  /** Bearer token from OAuth (format: "ory_at_...") */
   accessToken?:      string
-  /** ID of the currently active account (e.g. "CR123456") */
+  /** ID of the currently active account */
   activeAccountId?:  string
-  /** All accounts returned from the OAuth redirect */
+  /** All accounts returned from the accounts endpoint */
   accounts?:         AccountInfo[]
   isLoggedIn:        boolean
+
+  // ── Temporary PKCE state (stored during OAuth flow, cleared after token exchange) ──
+  /** code_verifier for PKCE — stored server-side, never sent to browser */
+  pkceVerifier?:     string
+  /** state for CSRF protection */
+  oauthState?:       string
 }
 
 /* Validate SESSION_SECRET at import time so errors surface immediately in logs */
@@ -38,7 +44,7 @@ const sessionOptions = {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: 'lax' as const,
-    maxAge:   60 * 60 * 8, // 8 hours — keeps users logged in through a trading day
+    maxAge:   60 * 60 * 1, // 1 hour — matches Bearer token expiry (expires_in: 3600)
     path:     '/',
   },
 }
