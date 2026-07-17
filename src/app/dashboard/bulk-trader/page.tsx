@@ -270,6 +270,7 @@ export default function BulkTraderPage() {
   const generalPersists  = useRef<Map<string,number>>(new Map())
 
   const scannerBotWsRef  = useRef<WebSocket|null>(null)
+  const stopScannerRef   = useRef<(() => void) | null>(null)
   const scanTradeTypeRef = useRef<'even_odd'|'over_under'|'matches_differs'>('even_odd')
   const scanStakeRef     = useRef('1.00')
   const scanCountRef     = useRef(3)
@@ -529,7 +530,7 @@ export default function BulkTraderPage() {
                       }))
                     }
                     void rId
-                    if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
+                    if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
                   }
                 } else {
                   log(`  ${sym} primary building (${pPersist+1}/2, score=${pResult.score})`, 'white')
@@ -568,7 +569,7 @@ export default function BulkTraderPage() {
                           parameters: { contract_type:rResult.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, barrier:String(rResult.barrier) },
                         }))
                       }
-                      if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
+                      if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
                     }
                   } else {
                     log(`  ${sym} recovery building (${rPersist+1}/2, score=${rResult.score})`, 'amber')
@@ -610,7 +611,7 @@ export default function BulkTraderPage() {
                     parameters: { contract_type:result.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, ...(result.barrier !== null ? { barrier:String(result.barrier) } : {}) },
                   }))
                 }
-                if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
+                if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
               }
             } else {
               log(`  ${sym} pattern building (${gPersist+1}/2, score=${result.score})`, 'white')
@@ -622,7 +623,7 @@ export default function BulkTraderPage() {
       }
       ws.onerror = () => log(`WS error: ${sym}`, 'red')
     })
-  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, stopScanner])
+  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log])
 
   const stopScanner = useCallback(() => {
     setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
@@ -636,6 +637,9 @@ export default function BulkTraderPage() {
     if (scannerBotWsRef.current) { try { scannerBotWsRef.current.close() } catch { /**/ } }
     scannerBotWsRef.current = null
   }, [log])
+
+  // wire ref so startScanner can call stopScanner without a forward-declaration error
+  stopScannerRef.current = stopScanner
 
   useEffect(() => () => { stopScanner() }, [stopScanner])
 
