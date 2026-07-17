@@ -271,6 +271,7 @@ export default function BulkTraderPage() {
 
   const scannerBotWsRef  = useRef<WebSocket|null>(null)
   const stopScannerRef   = useRef<(() => void) | null>(null)
+  const scanPendingCount = useRef(0)  // tracks unresolved scanner trades for One Shot cleanup
   const scanTradeTypeRef = useRef<'even_odd'|'over_under'|'matches_differs'>('even_odd')
   const scanStakeRef     = useRef('1.00')
   const scanCountRef     = useRef(3)
@@ -410,6 +411,7 @@ export default function BulkTraderPage() {
   const startScanner = useCallback(async () => {
     setScannerActive(true); setScannerStatus('scanning'); setLogLines([])
     recoveryMode.current = false; setRecoveryActive(false)
+    scanPendingCount.current = 0
     scanTradeTypeRef.current = tradeType
     scanStakeRef.current     = stake
     scanCountRef.current     = parseInt(bulkCount) || 1
@@ -452,15 +454,21 @@ export default function BulkTraderPage() {
         for (const [,v] of scanPending) { stk = v.stake; break }
         if (rowId != null) {
           settleTrade(rowId, payout, stk)
+          scanPendingCount.current = Math.max(0, scanPendingCount.current - 1)
           const won = payout > stk
           const src = entry?.source ?? 'scanner'
           const tag = src === 'recovery' ? '[RECOVERY] ' : ''
-          log(`  ${won ? '✓ WIN' : '✗ LOSS'} ${tag}${won?'+':''}${fmt2(payout-stk)} ${scanCurrencyRef.current}`, won ? 'green' : 'red')
+          log(`  ${won ? '\u2713 WIN' : '\u2717 LOSS'} ${tag}${won?'+':''}${fmt2(payout-stk)} ${scanCurrencyRef.current}`, won ? 'green' : 'red')
           if (!won && !recoveryMode.current && scanTradeTypeRef.current === 'over_under') {
             recoveryMode.current = true
             setRecoveryActive(true)
-            log('━━ RECOVERY MODE ACTIVATED ━━', 'amber')
-            log('  Now scanning Over 3 / Under 6 alongside primary (score≥80)', 'amber')
+            log('\u2501\u2501 RECOVERY MODE ACTIVATED \u2501\u2501', 'amber')
+            log('  Now scanning Over 3 / Under 6 alongside primary (score\u226580)', 'amber')
+          }
+          // One Shot: close bot WS only after all pending trades have settled
+          if (scanPendingCount.current === 0 && scanModeRef.current === 'once' && scannerBotWsRef.current) {
+            try { scannerBotWsRef.current.close() } catch { /**/ }
+            scannerBotWsRef.current = null
           }
         }
       }
@@ -520,6 +528,7 @@ export default function BulkTraderPage() {
                   if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
                     const rId = ++reqIdRef.current
                     const n   = scanCountRef.current
+                    scanPendingCount.current += n
                     for (let i = 0; i < n; i++) {
                       const reqId = ++reqIdRef.current
                       const rowId = addTrade(pResult.contractType, sym, parseFloat(scanStakeRef.current)||1, 'scanner')
@@ -530,7 +539,8 @@ export default function BulkTraderPage() {
                       }))
                     }
                     void rId
-                    if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
+                    // One Shot: stop feeds now; bot WS stays open until all trades settle
+                    if (scanModeRef.current === 'once') stopScannerRef.current?.()
                   }
                 } else {
                   log(`  ${sym} primary building (${pPersist+1}/2, score=${pResult.score})`, 'white')
@@ -560,6 +570,7 @@ export default function BulkTraderPage() {
                     setScannerStatus('recovery'); setTimeout(() => setScannerStatus('scanning'), 3000)
                     if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
                       const n = scanCountRef.current
+                      scanPendingCount.current += n
                       for (let i = 0; i < n; i++) {
                         const reqId = ++reqIdRef.current
                         const rowId = addTrade(rResult.contractType, sym, parseFloat(scanStakeRef.current)||1, 'recovery')
@@ -569,7 +580,7 @@ export default function BulkTraderPage() {
                           parameters: { contract_type:rResult.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, barrier:String(rResult.barrier) },
                         }))
                       }
-                      if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
+                      if (scanModeRef.current === 'once') stopScannerRef.current?.()
                     }
                   } else {
                     log(`  ${sym} recovery building (${rPersist+1}/2, score=${rResult.score})`, 'amber')
@@ -602,6 +613,7 @@ export default function BulkTraderPage() {
               setScannerStatus('fired'); setTimeout(() => setScannerStatus('scanning'), 3000)
               if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
                 const n = scanCountRef.current
+                scanPendingCount.current += n
                 for (let i = 0; i < n; i++) {
                   const reqId = ++reqIdRef.current
                   const rowId = addTrade(result.contractType, sym, parseFloat(scanStakeRef.current)||1, 'scanner')
@@ -611,7 +623,7 @@ export default function BulkTraderPage() {
                     parameters: { contract_type:result.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, ...(result.barrier !== null ? { barrier:String(result.barrier) } : {}) },
                   }))
                 }
-                if (scanModeRef.current === 'once') setTimeout(() => stopScannerRef.current?.(), 200)
+                if (scanModeRef.current === 'once') stopScannerRef.current?.()
               }
             } else {
               log(`  ${sym} pattern building (${gPersist+1}/2, score=${result.score})`, 'white')
@@ -625,7 +637,7 @@ export default function BulkTraderPage() {
     })
   }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log])
 
-  const stopScanner = useCallback(() => {
+  const stopScanner = useCallback((keepBotWs = false) => {
     setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
     recoveryMode.current = false
     log('━━━ SCANNER STOPPED ━━━', 'amber')
@@ -634,12 +646,16 @@ export default function BulkTraderPage() {
     primaryCooldowns.current.clear(); primaryPersists.current.clear()
     recoveryCooldowns.current.clear(); recoveryPersists.current.clear()
     generalCooldowns.current.clear(); generalPersists.current.clear()
-    if (scannerBotWsRef.current) { try { scannerBotWsRef.current.close() } catch { /**/ } }
-    scannerBotWsRef.current = null
+    // keepBotWs=true (One Shot): bot WS stays open to receive settle events; closed by settle handler
+    if (!keepBotWs) {
+      if (scannerBotWsRef.current) { try { scannerBotWsRef.current.close() } catch { /**/ } }
+      scannerBotWsRef.current = null
+    }
   }, [log])
 
   // wire ref so startScanner can call stopScanner without a forward-declaration error
-  stopScannerRef.current = stopScanner
+  // One Shot path calls stopScanner(true) to keep bot WS alive for settlement
+  stopScannerRef.current = () => stopScanner(scanModeRef.current === 'once')
 
   useEffect(() => () => { stopScanner() }, [stopScanner])
 
