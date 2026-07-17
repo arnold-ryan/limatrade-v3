@@ -735,7 +735,7 @@ export default function BulkTraderPage() {
                 <span style={{ color:ACCENT, fontWeight:800, fontSize:'.9rem', letterSpacing:'.06em' }}>⣿ AI BULK SCANNER</span>
                 {scannerActive && <span style={{ width:7, height:7, borderRadius:'50%', background:'#22c55e', boxShadow:'0 0 7px #22c55e', animation:'scanPulse 1.2s ease-in-out infinite', display:'inline-block' }} />}
               </div>
-              <div style={{ display:'flex', gap:.5, gap:'.45rem' }}>
+              <div style={{ display:'flex', gap:'.45rem' }}>
                 <button className="bt-btn" onClick={scannerActive ? stopScanner : startScanner}
                   style={{ padding:'.32rem .75rem', fontSize:'.76rem', background: scannerActive ? 'rgba(239,68,68,.12)' : `${ACCENT}1a`, color: scannerActive ? '#ef4444' : ACCENT, border:`1px solid ${scannerActive ? 'rgba(239,68,68,.28)' : `${ACCENT}40`}` }}>
                   {scannerActive ? '■ Stop' : '▶ Start'}
