@@ -1,31 +1,73 @@
 import { NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth/session'
-import { DERIV_LEGACY_WS_URL } from '@/lib/auth/constants'
+import { ensureValidToken } from '@/lib/auth/refresh'
+import { DERIV_API_URL } from '@/lib/auth/constants'
 
 /**
  * GET /api/user/ws-url
  *
- * Returns the legacy Deriv WebSocket URL and the session token.
+ * Returns a one-time authenticated WebSocket URL (OTP) for the active account.
+ * Silently refreshes the access token if it has expired.
  *
- * The client:
- *   1. Connects to wsUrl
- *   2. On open → sends { authorize: token }
- *   3. On msg.authorize → starts trading (balance, proposals, etc.)
- *
- * Public market data (ticks) can use the same WS URL without authorization.
+ * Client flow:
+ *   1. Call this endpoint to get { wsUrl }
+ *   2. Connect: new WebSocket(wsUrl)
+ *   3. Subscribe to transactions, balance, etc.
+ *   4. Buy contracts with: { buy: '1', price: ..., parameters: { ... } }
  */
 export async function GET() {
   const session = await getSession()
 
-  if (!session.isLoggedIn || !session.accessToken) {
+  if (!session.isLoggedIn) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const appId = process.env.DERIV_CLIENT_ID?.trim() ?? ''
-  const wsUrl = `${DERIV_LEGACY_WS_URL}?app_id=${appId}`
+  // Silently refresh the access token if expired
+  const valid = await ensureValidToken(session)
+  if (!valid) {
+    return NextResponse.json({ error: 'session_expired' }, { status: 401 })
+  }
 
-  return NextResponse.json({
-    wsUrl,
-    token: session.accessToken,
-  })
+  const accountId = session.activeAccountId
+  const clientId  = process.env.DERIV_CLIENT_ID?.trim() ?? ''
+
+  if (!accountId) {
+    return NextResponse.json({ error: 'no_active_account' }, { status: 400 })
+  }
+
+  try {
+    const otpRes = await fetch(
+      `${DERIV_API_URL}/trading/v1/options/accounts/${accountId}/otp`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.accessToken}`,
+          'Deriv-App-ID':  clientId,
+          'Content-Type':  'application/json',
+        },
+      }
+    )
+
+    if (!otpRes.ok) {
+      const errBody = await otpRes.text()
+      console.error('[Lima Trade] OTP fetch failed:', otpRes.status, errBody)
+      return NextResponse.json(
+        { error: 'otp_failed', status: otpRes.status },
+        { status: otpRes.status }
+      )
+    }
+
+    const otpData = await otpRes.json()
+    const wsUrl = otpData?.data?.url ?? otpData?.url
+
+    if (!wsUrl) {
+      console.error('[Lima Trade] No WS URL in OTP response:', JSON.stringify(otpData))
+      return NextResponse.json({ error: 'no_ws_url' }, { status: 500 })
+    }
+
+    return NextResponse.json({ wsUrl })
+  } catch (e) {
+    console.error('[Lima Trade] WS URL error:', e)
+    return NextResponse.json({ error: 'server_error' }, { status: 500 })
+  }
 }
