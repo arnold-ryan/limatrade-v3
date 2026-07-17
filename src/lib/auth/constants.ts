@@ -25,7 +25,7 @@ export const DERIV_API_URL    = 'https://api.derivws.com'
  * OAuth scopes for trading apps.
  * offline_access = get a refresh_token so we can silently renew without re-consent.
  */
-export const DERIV_SCOPE = 'trade account_manage offline_access'
+export const DERIV_SCOPE = 'trade account_manage'
 
 /**
  * Legacy WebSocket — used ONLY for public market data (ticks, candles).
