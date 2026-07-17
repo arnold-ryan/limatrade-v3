@@ -166,22 +166,29 @@ function detectSignal(
     }
   }
 
-  /* matches_differs */
-  let bestScore = 54
+  /* matches_differs — COLD digit strategy:
+     Pick the digit appearing LEAST in recent history.
+     DIFFERS wins when last digit ≠ barrier, so a cold digit (rarely appears) = high win rate.
+     e.g. digit at 2% observed → DIFFERS wins ~98% vs 90% natural.
+     Betting DIFFERS on a HOT digit is wrong (reduces win rate below natural). */
+  let bestScore = 59   // threshold 60 — fires when deficit is meaningful
   let best: ScanResult = NO_SIGNAL
   for (let d = 0; d <= 9; d++) {
-    const nat  = 0.10
-    const o60  = d60.filter(x => x === d).length / d60.length
-    const o30  = d30.filter(x => x === d).length / d30.length
-    if (o60 > nat + 0.03 && o30 > nat + 0.01) {
-      const base  = Math.min(50, (o60 - nat) * 600)
-      const agree = Math.min(25, (o30 - nat) * 500)
+    const nat   = 0.10
+    const o60   = d60.filter(x => x === d).length / d60.length
+    const o30   = d30.filter(x => x === d).length / d30.length
+    const def60 = nat - o60   // how cold the digit is (positive = below natural)
+    const def30 = nat - o30
+    // Only fire when digit is genuinely cold in both windows
+    if (def60 > 0.03 && def30 > 0.01) {
+      const base  = Math.min(50, def60 * 600)   // bigger deficit = higher score
+      const agree = Math.min(25, def30 * 500)
       const score = Math.min(100, base + agree + entropyBonus + persistBonus)
       if (score > bestScore) {
         bestScore = score
         best = {
           signal: true, score: Math.round(score), contractType: 'DIGITDIFF', barrier: d,
-          reason: `Digit ${d} hot — ${Math.round(o60*100)}% (60t) / ${Math.round(o30*100)}% (30t) vs 10% natural → Differs ${d}`,
+          reason: `Digit ${d} cold — ${Math.round(o60*100)}% (60t) / ${Math.round(o30*100)}% (30t) vs 10% natural → Differs ${d} (win rate ~${Math.round((1-o60)*100)}%)`,
           detail: `base=${Math.round(base)} agree=${Math.round(agree)} entropy=${entropyBonus} persist=${persistBonus}`,
         }
       }
@@ -704,7 +711,7 @@ export default function BulkTraderPage() {
                 ⚡ Recovery: Over 3 / Under 6 active
               </div>
             )}
-            <button className="bt-btn" onClick={scannerActive?stopScanner:startScanner}
+            <button className="bt-btn" onClick={scannerActive?()=>stopScanner():startScanner}
               style={{ width:'100%', padding:'.38rem', fontSize:'.77rem', background:scannerActive?'rgba(239,68,68,.12)':'#00e5cc18', color:scannerActive?'#ef4444':'#00e5cc', border:`1px solid ${scannerActive?'rgba(239,68,68,.3)':'#00e5cc44'}` }}>
               {scannerActive?'■  Stop Scanner':'▶  Start Scanner'}
             </button>
