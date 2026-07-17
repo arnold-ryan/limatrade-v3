@@ -228,6 +228,8 @@ export default function BulkTraderPage() {
   const [stake,     setStake]     = useState('1.00')
   const [bulkCount, setBulkCount] = useState('3')
   const [ticks,     setTicks]     = useState(60)
+  const [scanMode,  setScanMode]  = useState<'once'|'continuous'>('continuous')
+  const scanModeRef = useRef<'once'|'continuous'>('continuous')
 
   const [livePrice,    setLivePrice]    = useState<number|null>(null)
   const [recentDigits, setRecentDigits] = useState<number[]>([])
@@ -411,6 +413,7 @@ export default function BulkTraderPage() {
     scanStakeRef.current     = stake
     scanCountRef.current     = parseInt(bulkCount) || 1
     scanCurrencyRef.current  = currency
+    scanModeRef.current      = scanMode
 
     const isOU = tradeType === 'over_under'
     log('━━━ AI BULK SCANNER V2 ━━━', 'cyan')
@@ -526,6 +529,7 @@ export default function BulkTraderPage() {
                       }))
                     }
                     void rId
+                    if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
                   }
                 } else {
                   log(`  ${sym} primary building (${pPersist+1}/2, score=${pResult.score})`, 'white')
@@ -564,6 +568,7 @@ export default function BulkTraderPage() {
                           parameters: { contract_type:rResult.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, barrier:String(rResult.barrier) },
                         }))
                       }
+                      if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
                     }
                   } else {
                     log(`  ${sym} recovery building (${rPersist+1}/2, score=${rResult.score})`, 'amber')
@@ -605,6 +610,7 @@ export default function BulkTraderPage() {
                     parameters: { contract_type:result.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, ...(result.barrier !== null ? { barrier:String(result.barrier) } : {}) },
                   }))
                 }
+                if (scanModeRef.current === 'once') setTimeout(() => stopScanner(), 200)
               }
             } else {
               log(`  ${sym} pattern building (${gPersist+1}/2, score=${result.score})`, 'white')
@@ -616,7 +622,7 @@ export default function BulkTraderPage() {
       }
       ws.onerror = () => log(`WS error: ${sym}`, 'red')
     })
-  }, [tradeType, stake, bulkCount, currency, connectBotWs, addTrade, settleTrade, log])
+  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, stopScanner])
 
   const stopScanner = useCallback(() => {
     setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
@@ -805,6 +811,26 @@ export default function BulkTraderPage() {
                   }}>{n}</button>
                 ))}
               </div>
+            </div>
+            <div className="bt-card">
+              <div className="bt-lbl">Scanner Mode</div>
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                <button className="tw-chip" onClick={()=>setScanMode('once')} style={{
+                  padding:'.38rem 0',
+                  background:scanMode==='once'?'rgba(139,92,246,.15)':'rgba(255,255,255,.04)',
+                  border:`1px solid ${scanMode==='once'?'rgba(139,92,246,.5)':'rgba(255,255,255,.1)'}`,
+                  color:scanMode==='once'?'#a78bfa':'rgba(229,229,229,.44)',
+                }}>⚡ One Shot</button>
+                <button className="tw-chip" onClick={()=>setScanMode('continuous')} style={{
+                  padding:'.38rem 0',
+                  background:scanMode==='continuous'?'rgba(0,229,204,.12)':'rgba(255,255,255,.04)',
+                  border:`1px solid ${scanMode==='continuous'?'#00e5cc55':'rgba(255,255,255,.1)'}`,
+                  color:scanMode==='continuous'?'#00e5cc':'rgba(229,229,229,.44)',
+                }}>∞ Auto Scan</button>
+              </div>
+              <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'rgba(229,229,229,.26)' }}>
+                {scanMode==='once'?'Fires once then stops':'Runs until manually stopped'}
+              </p>
             </div>
           </div>
 
