@@ -361,29 +361,34 @@ export default function BulkTraderPage() {
   }, [])
 
   /**
-   * Requests a proposal for a contract instead of buying directly with a flat price
-   * cap. The actual buy is sent once the proposal response arrives (see the `proposal`
-   * message handling in each onmessage handler below), using Deriv's real ask_price —
-   * this is what makes the trade's slippage cap meaningful instead of a fixed $1000
-   * ceiling that silently rejects any trade whose ask_price exceeds it.
+   * Buys a contract directly, without a prior proposal — this is what lets Bulk
+   * Trader fire N identical contracts in the same instant. A `proposal` subscription
+   * is deduped by Deriv on its contract parameters (not req_id), so N concurrent
+   * proposal requests for the *same* contract collide and all but one get rejected
+   * with "You are already subscribed to proposal." A direct buy has no such
+   * subscription and no such limit — each is a self-contained quote-and-execute
+   * round trip, so all n fire truly simultaneously.
    *
-   * subscribe:0 (one-shot) is rejected outright by this API with
-   * "Input validation failed: subscribe" — it only accepts subscribe:1. So we
-   * subscribe, use the first response to buy, then `forget` the subscription
-   * immediately (see the proposal handler) so it doesn't keep streaming.
+   * `price` is the most the trader is willing to pay. With basis:'stake' the actual
+   * charge (ask_price) is always ~equal to `amount` by definition — you're specifying
+   * how much to risk, not a payout target — so capping slightly above the stake is
+   * the correct slippage guard here, not the flat $1000 ceiling this used to have
+   * (which silently rejected any stake whose real ask_price happened to exceed it).
    */
-  const requestProposal = useCallback((
+  const fireBuy = useCallback((
     ws: WebSocket, contractType: string, barrierVal: number|null,
     stakeVal: number, sym: string, cur: string, rowId: number,
-    proposalPending: Map<number,{rowId:number;stake:number}>,
+    pending: Map<number,{rowId:number;stake:number}>,
   ) => {
-    const propReqId = ++reqIdRef.current
-    proposalPending.set(propReqId, { rowId, stake:stakeVal })
+    const reqId = ++reqIdRef.current
+    pending.set(reqId, { rowId, stake:stakeVal })
     ws.send(JSON.stringify({
-      proposal:1, subscribe:1, req_id:propReqId,
-      contract_type:contractType, underlying_symbol:sym,
-      duration:5, duration_unit:'t', amount:stakeVal, basis:'stake', currency:cur,
-      ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
+      buy:'1', price:+(stakeVal * 1.02).toFixed(2), req_id:reqId,
+      parameters: {
+        contract_type:contractType, underlying_symbol:sym,
+        duration:5, duration_unit:'t', amount:stakeVal, basis:'stake', currency:cur,
+        ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
+      },
     }))
   }, [])
 
@@ -411,54 +416,24 @@ export default function BulkTraderPage() {
     } catch { return null }
   }, [])
 
-  const fireTrades = useCallback((
-    ws: WebSocket, contractType: string, barrierVal: number|null,
-    stakeVal: number, count: number, sym: string, cur: string,
-    source: TradeRow['source'],
-    proposalPending: Map<number,{rowId:number;stake:number}>,
-  ) => {
-    for (let i = 0; i < count; i++) {
-      const rowId = addTrade(contractType, sym, stakeVal, source)
-      requestProposal(ws, contractType, barrierVal, stakeVal, sym, cur, rowId, proposalPending)
-    }
-  }, [addTrade, requestProposal])
-
   const handleManualTrade = useCallback(async (contractType: string) => {
     if (isTrading) return
     setIsTrading(true); setTradeError(null)
     const stakeVal = parseFloat(stake) || 1
     const n        = parseInt(bulkCount) || 1
+    const barrierVal = (tradeType === 'over_under' || tradeType === 'matches_differs') ? digit : null
     const ws = await connectBotWs()
     if (!ws) { setTradeError('Connection failed'); setIsTrading(false); return }
     intentionalClose.current = false
-    const proposalPending = new Map<number,{rowId:number;stake:number}>()
     const pending  = new Map<number,{rowId:number;stake:number}>()
     const reqToRow = new Map<number,number>()
     const cidToStake = new Map<number,number>()
     let doneCount = 0
     const finishOne = () => { doneCount++; if (doneCount >= n) { intentionalClose.current = true; ws.close(); setIsTrading(false) } }
+
     ws.onmessage = (ev) => {
       let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
       if (msg.msg_type === 'balance') window.dispatchEvent(new CustomEvent('deriv-balance', { detail:{ balance:(msg.balance as Record<string,unknown>)?.balance, currency:(msg.balance as Record<string,unknown>)?.currency } }))
-      if (msg.msg_type === 'proposal') {
-        const pr = proposalPending.get(msg.req_id as number)
-        proposalPending.delete(msg.req_id as number)
-        if (pr) {
-          if (msg.error) {
-            failTrade(pr.rowId)
-            finishOne()
-          } else {
-            const prop = msg.proposal as Record<string,unknown>
-            const buyReqId = ++reqIdRef.current
-            pending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake })
-            ws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
-            // We subscribed (subscribe:0 is rejected by this API) just to get one
-            // price — cancel the stream now so it doesn't keep pushing updates.
-            const subId = (msg.subscription as Record<string,unknown>)?.id
-            if (subId) ws.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
-          }
-        }
-      }
       if (msg.msg_type === 'buy') {
         const ri = pending.get(msg.req_id as number)
         if (ri) {
@@ -479,14 +454,18 @@ export default function BulkTraderPage() {
         if (rowId != null) settleTrade(rowId, payout, stk)
         finishOne()
       }
-      if (msg.error && msg.msg_type !== 'proposal' && msg.msg_type !== 'buy') {
+      if (msg.error && msg.msg_type !== 'buy') {
         setTradeError((msg.error as Record<string,unknown>)?.message as string ?? 'Trade error'); intentionalClose.current = true; ws.close(); setIsTrading(false)
       }
     }
     ws.onclose = () => { if (!intentionalClose.current) setIsTrading(false) }
     ws.send(JSON.stringify({ transaction:1, subscribe:1, req_id:100 }))
-    fireTrades(ws, contractType, (tradeType === 'over_under' || tradeType === 'matches_differs') ? digit : null, stakeVal, n, symbol, currency, 'manual', proposalPending)
-  }, [isTrading, stake, bulkCount, tradeType, digit, symbol, currency, connectBotWs, fireTrades, settleTrade, failTrade])
+    // Fire all n buys in the same synchronous burst — true simultaneous execution.
+    for (let i = 0; i < n; i++) {
+      const rowId = addTrade(contractType, symbol, stakeVal, 'manual')
+      fireBuy(ws, contractType, barrierVal, stakeVal, symbol, currency, rowId, pending)
+    }
+  }, [isTrading, stake, bulkCount, tradeType, digit, symbol, currency, connectBotWs, addTrade, fireBuy, settleTrade, failTrade])
 
   const startScanner = useCallback(async () => {
     setScannerActive(true); setScannerStatus('scanning'); setLogLines([])
@@ -511,8 +490,6 @@ export default function BulkTraderPage() {
     const bws = await connectBotWs()
     if (!bws) { log('ERROR: trading WS failed', 'red'); setScannerActive(false); setScannerStatus('idle'); return }
     scannerBotWsRef.current = bws
-    const scanProposalPending = new Map<number,{rowId:number;stake:number}>()
-    const scanRowSource = new Map<number,TradeRow['source']>()
     const scanPending  = new Map<number,{rowId:number;stake:number;source:TradeRow['source']}>()
     const scanReqToRow = new Map<number,number>()
     const scanCidToStake = new Map<number,number>()
@@ -526,27 +503,29 @@ export default function BulkTraderPage() {
       }
     }
 
+    // Fires a contract directly (no proposal) — Deriv dedupes proposal subscriptions
+    // by contract parameters, so firing scanCountRef.current identical proposals at
+    // once for one signal gets all but one rejected as "already subscribed to
+    // proposal". A direct buy has no such subscription, so all of them fire truly
+    // simultaneously. price is capped just above the stake since basis:'stake'
+    // means the actual charge always ~equals the stake by definition.
+    const scanFireBuy = (ct: string, barrierVal: number|null, sym: string, rowId: number, source: TradeRow['source']) => {
+      const stakeVal = parseFloat(scanStakeRef.current) || 1
+      const reqId = ++reqIdRef.current
+      scanPending.set(reqId, { rowId, stake:stakeVal, source })
+      bws.send(JSON.stringify({
+        buy:'1', price:+(stakeVal * 1.02).toFixed(2), req_id:reqId,
+        parameters: {
+          contract_type:ct, underlying_symbol:sym, duration:5, duration_unit:'t',
+          amount:stakeVal, basis:'stake', currency:scanCurrencyRef.current,
+          ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
+        },
+      }))
+    }
+
     bws.onmessage = (ev) => {
       let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
       if (msg.msg_type === 'balance') window.dispatchEvent(new CustomEvent('deriv-balance', { detail:{ balance:(msg.balance as Record<string,unknown>)?.balance, currency:(msg.balance as Record<string,unknown>)?.currency } }))
-      if (msg.msg_type === 'proposal') {
-        const pr = scanProposalPending.get(msg.req_id as number)
-        scanProposalPending.delete(msg.req_id as number)
-        if (pr) {
-          if (msg.error) {
-            log(`  ✗ Proposal rejected: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
-            failTrade(pr.rowId)
-            scanFinishOne()
-          } else {
-            const prop = msg.proposal as Record<string,unknown>
-            const buyReqId = ++reqIdRef.current
-            scanPending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake, source: scanRowSource.get(pr.rowId) ?? 'scanner' })
-            bws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
-            const subId = (msg.subscription as Record<string,unknown>)?.id
-            if (subId) bws.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
-          }
-        }
-      }
       if (msg.msg_type === 'buy') {
         const ri = scanPending.get(msg.req_id as number)
         if (ri) {
@@ -584,7 +563,7 @@ export default function BulkTraderPage() {
           scanFinishOne()
         }
       }
-      if (msg.error && msg.msg_type !== 'proposal' && msg.msg_type !== 'buy') {
+      if (msg.error && msg.msg_type !== 'buy') {
         log(`  ERROR: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
       }
     }
@@ -645,8 +624,7 @@ export default function BulkTraderPage() {
                     scanPendingCount.current += n
                     for (let i = 0; i < n; i++) {
                       const rowId = addTrade(pResult.contractType, sym, stakeVal, 'scanner')
-                      scanRowSource.set(rowId, 'scanner')
-                      requestProposal(scannerBotWsRef.current, pResult.contractType, pResult.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
+                      scanFireBuy(pResult.contractType, pResult.barrier, sym, rowId, 'scanner')
                     }
                     // One Shot: stop feeds now; bot WS stays open until all trades settle
                     if (scanModeRef.current === 'once') stopScannerRef.current?.()
@@ -683,8 +661,7 @@ export default function BulkTraderPage() {
                       scanPendingCount.current += n
                       for (let i = 0; i < n; i++) {
                         const rowId = addTrade(rResult.contractType, sym, stakeVal, 'recovery')
-                        scanRowSource.set(rowId, 'recovery')
-                        requestProposal(scannerBotWsRef.current, rResult.contractType, rResult.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
+                        scanFireBuy(rResult.contractType, rResult.barrier, sym, rowId, 'recovery')
                       }
                       if (scanModeRef.current === 'once') stopScannerRef.current?.()
                     }
@@ -723,8 +700,7 @@ export default function BulkTraderPage() {
                 scanPendingCount.current += n
                 for (let i = 0; i < n; i++) {
                   const rowId = addTrade(result.contractType, sym, stakeVal, 'scanner')
-                  scanRowSource.set(rowId, 'scanner')
-                  requestProposal(scannerBotWsRef.current, result.contractType, result.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
+                  scanFireBuy(result.contractType, result.barrier, sym, rowId, 'scanner')
                 }
                 if (scanModeRef.current === 'once') stopScannerRef.current?.()
               }
@@ -738,7 +714,7 @@ export default function BulkTraderPage() {
       }
       ws.onerror = () => log(`WS error: ${sym}`, 'red')
     })
-  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, requestProposal, failTrade])
+  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, failTrade])
 
   const stopScanner = useCallback((keepBotWs = false) => {
     setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
