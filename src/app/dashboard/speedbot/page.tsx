@@ -9,7 +9,8 @@ import { bg0, bg1, bg2, bdr, txt0, txt1, txt2 } from '@/lib/colors'
  * Deriv API (verified against docs):
  *  • Public ticks WS : wss://api.derivws.com/trading/v1/options/ws/public
  *  • Authenticated WS: /api/user/ws-url → OTP URL from Deriv REST
- *  • Buy            : one-shot { proposal:1, subscribe:0, ... } then { buy: id, price: ask_price*1.02 }
+ *  • Buy            : { proposal:1, subscribe:1, ... } (subscribe:0 is rejected by this
+ *                      API) → buy at ask_price*1.02 → forget the proposal subscription
  *  • Transaction    : { transaction:1, subscribe:1 } — auth_required, scope:trade
  *  • forget_all     : sent on WS cleanup to prevent server-side subscription leaks
  *
@@ -236,11 +237,23 @@ function PriceChart({ prices, livePrice, label, pipSize = 2 }: {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const visible = prices.slice(-300)
 
+  // Canvas drawing is imperative — it has no idea `html.light` exists, so it
+  // needs to be told explicitly when the theme toggles and redraw itself.
+  const [themeTick, setThemeTick] = useState(0)
+  useEffect(() => {
+    const obs = new MutationObserver(() => setThemeTick(t => t + 1))
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => obs.disconnect()
+  }, [])
+
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || visible.length < 2) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+
+    const cs = getComputedStyle(document.documentElement)
+    const cv = (name: string) => cs.getPropertyValue(name).trim()
 
     const dpr = window.devicePixelRatio || 1
     const W = canvas.offsetWidth
@@ -261,18 +274,18 @@ function PriceChart({ prices, livePrice, label, pipSize = 2 }: {
     const yOf = (p: number) => padT + (1 - (p - lo) / range) * chartH
 
     // bg
-    ctx.fillStyle = '#060f1c'
+    ctx.fillStyle = cv('--bg0')
     ctx.fillRect(0, 0, W, H)
 
     // horizontal grid lines + price labels
     const gridLines = 4
     for (let i = 0; i <= gridLines; i++) {
       const y = padT + (i / gridLines) * chartH
-      ctx.strokeStyle = 'rgba(255,255,255,0.05)'
+      ctx.strokeStyle = cv('--bg2')
       ctx.lineWidth = 1
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke()
       const priceVal = hi - (i / gridLines) * range
-      ctx.fillStyle = 'rgba(255,255,255,0.28)'
+      ctx.fillStyle = cv('--txt2')
       ctx.font = `10px monospace`
       ctx.textAlign = 'right'
       ctx.fillText(priceVal.toFixed(pipSize), padL - 4, y + 4)
@@ -280,7 +293,7 @@ function PriceChart({ prices, livePrice, label, pipSize = 2 }: {
 
     // vertical grid lines
     const vStep = Math.max(1, Math.floor(visible.length / 6))
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)'
+    ctx.strokeStyle = cv('--bg1')
     for (let i = 0; i < visible.length; i += vStep) {
       ctx.beginPath(); ctx.moveTo(xOf(i), padT); ctx.lineTo(xOf(i), padT + chartH); ctx.stroke()
     }
@@ -329,9 +342,9 @@ function PriceChart({ prices, livePrice, label, pipSize = 2 }: {
     const ly2 = yOf(visible[visible.length - 1])
     ctx.beginPath(); ctx.arc(lx, ly2, 4, 0, Math.PI * 2)
     ctx.fillStyle = '#FCA311'; ctx.fill()
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+    ctx.strokeStyle = cv('--bg0'); ctx.lineWidth = 1.5; ctx.stroke()
 
-  }, [visible, livePrice])
+  }, [visible, livePrice, themeTick])
 
   if (prices.length < 2) {
     return (
@@ -621,10 +634,15 @@ export default function SpeedbotPage() {
     }
     amount = parseFloat(amount.toFixed(2))
 
-    // Request a one-shot proposal first so the buy carries Deriv's real ask_price
-    // (with a 2% slippage cap) instead of a flat price cap that silently rejects
-    // any trade whose true price exceeds it. The actual buy fires from the
-    // 'proposal' response handler below.
+    // Request a proposal first so the buy carries Deriv's real ask_price (with a
+    // 2% slippage cap) instead of a flat price cap that silently rejects any trade
+    // whose true price exceeds it. The actual buy fires from the 'proposal'
+    // response handler below.
+    //
+    // subscribe:0 (one-shot) is rejected outright by this API with
+    // "Input validation failed: subscribe" — it only accepts subscribe:1. So we
+    // subscribe, use the first response to buy, then `forget` it immediately
+    // (in the proposal handler) instead of leaving it streaming.
     const reqId = ++reqIdRef.current
     pendingProposalsRef.current.add(reqId)
     pendingSpotsByReq.current.set(reqId, null)
@@ -632,7 +650,7 @@ export default function SpeedbotPage() {
 
     ws.send(JSON.stringify({
       proposal: 1,
-      subscribe: 0,
+      subscribe: 1,
       req_id: reqId,
       contract_type:     ct,
       underlying_symbol: symbolRef.current,
@@ -769,6 +787,8 @@ export default function SpeedbotPage() {
             const buyReqId = ++reqIdRef.current
             pendingSpotsByReq.current.set(buyReqId, null)
             ws!.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+            const subId = (msg as { subscription?: { id: string } }).subscription?.id
+            if (subId) ws!.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
           }
         }
 

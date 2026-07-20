@@ -361,11 +361,16 @@ export default function BulkTraderPage() {
   }, [])
 
   /**
-   * Requests a one-shot (non-subscribed) proposal for a contract, instead of buying
-   * directly with a flat price cap. The actual buy is sent once the proposal response
-   * arrives (see the `proposal` message handling in each onmessage handler below), using
-   * Deriv's real ask_price — this is what makes the trade's slippage cap meaningful instead
-   * of a fixed $1000 ceiling that silently rejects any trade whose ask_price exceeds it.
+   * Requests a proposal for a contract instead of buying directly with a flat price
+   * cap. The actual buy is sent once the proposal response arrives (see the `proposal`
+   * message handling in each onmessage handler below), using Deriv's real ask_price —
+   * this is what makes the trade's slippage cap meaningful instead of a fixed $1000
+   * ceiling that silently rejects any trade whose ask_price exceeds it.
+   *
+   * subscribe:0 (one-shot) is rejected outright by this API with
+   * "Input validation failed: subscribe" — it only accepts subscribe:1. So we
+   * subscribe, use the first response to buy, then `forget` the subscription
+   * immediately (see the proposal handler) so it doesn't keep streaming.
    */
   const requestProposal = useCallback((
     ws: WebSocket, contractType: string, barrierVal: number|null,
@@ -375,7 +380,7 @@ export default function BulkTraderPage() {
     const propReqId = ++reqIdRef.current
     proposalPending.set(propReqId, { rowId, stake:stakeVal })
     ws.send(JSON.stringify({
-      proposal:1, subscribe:0, req_id:propReqId,
+      proposal:1, subscribe:1, req_id:propReqId,
       contract_type:contractType, underlying_symbol:sym,
       duration:5, duration_unit:'t', amount:stakeVal, basis:'stake', currency:cur,
       ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
@@ -447,6 +452,10 @@ export default function BulkTraderPage() {
             const buyReqId = ++reqIdRef.current
             pending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake })
             ws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+            // We subscribed (subscribe:0 is rejected by this API) just to get one
+            // price — cancel the stream now so it doesn't keep pushing updates.
+            const subId = (msg.subscription as Record<string,unknown>)?.id
+            if (subId) ws.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
           }
         }
       }
@@ -533,6 +542,8 @@ export default function BulkTraderPage() {
             const buyReqId = ++reqIdRef.current
             scanPending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake, source: scanRowSource.get(pr.rowId) ?? 'scanner' })
             bws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+            const subId = (msg.subscription as Record<string,unknown>)?.id
+            if (subId) bws.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
           }
         }
       }
@@ -830,19 +841,19 @@ export default function BulkTraderPage() {
             </div>
           )}
 
-          <div style={{ flex:1, overflowY:'auto', padding:'.45rem .62rem', fontFamily:"'SF Mono','Fira Code','Consolas',monospace", fontSize:'.67rem', lineHeight:1.85, background:'#040b0a' }}>
+          <div style={{ flex:1, overflowY:'auto', padding:'.45rem .62rem', fontFamily:"'SF Mono','Fira Code','Consolas',monospace", fontSize:'.67rem', lineHeight:1.85, background:'var(--bg2)' }}>
             {logLines.length===0
-              ? <p style={{ color:'rgba(229,229,229,.3)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
+              ? <p style={{ color:'var(--txt2)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
               : logLines.map(l => (
-                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'rgba(229,229,229,.8)' }}>
-                  <span style={{ color:'rgba(229,229,229,.3)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
+                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'var(--txt0)' }}>
+                  <span style={{ color:'var(--txt2)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
                 </div>
               ))}
             <div ref={logEndRef}/>
           </div>
-          <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', background:'#040b0a', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-            <span style={{ fontSize:'.56rem', color:'rgba(229,229,229,.3)' }}>primary≥40 · recovery≥80 · 20s cd</span>
-            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'rgba(229,229,229,.3)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
+          <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', background:'var(--bg2)', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+            <span style={{ fontSize:'.56rem', color:'var(--txt2)' }}>primary≥40 · recovery≥80 · 20s cd</span>
+            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'var(--txt2)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
           </div>
         </div>
 

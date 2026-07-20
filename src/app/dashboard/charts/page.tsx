@@ -442,7 +442,24 @@ export default function ChartsPage() {
       if (chartEl.current) chart.resize(chartEl.current.offsetWidth, chartEl.current.offsetHeight)
     })
     obs.observe(chartEl.current)
-    return () => { obs.disconnect(); chart.remove(); chartRef.current = null }
+
+    // lightweight-charts renders to a <canvas> via its own imperative API — it has
+    // no idea the `html.light` class exists, so colors captured above are frozen
+    // at creation time. Watch for the theme toggle and re-apply them on change.
+    const applyTheme = () => {
+      const c = getComputedStyle(document.documentElement)
+      const v = (name: string) => c.getPropertyValue(name).trim()
+      chart.applyOptions({
+        layout:          { background: { color: v('--bg0') }, textColor: v('--txt1') },
+        grid:            { vertLines: { color: v('--bg1') }, horzLines: { color: v('--bg1') } },
+        rightPriceScale: { borderColor: v('--bg2') },
+        timeScale:       { borderColor: v('--bg2') },
+      })
+    }
+    const themeObs = new MutationObserver(applyTheme)
+    themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+
+    return () => { themeObs.disconnect(); obs.disconnect(); chart.remove(); chartRef.current = null }
   }, [])
 
   const rebuildSeries = useCallback((

@@ -1277,11 +1277,16 @@ export default function AnalysisPage() {
     pendingSpotsByReq.current.set(reqId, livePriceRef.current)
 
     /*
-     * Request a one-shot proposal first instead of buying with a flat price cap.
-     * A fixed price:1000 cap has no relationship to the actual ask_price, so it
-     * either does nothing (small stakes) or silently rejects the trade (stakes
-     * whose ask_price exceeds 1000). The real buy fires from the 'proposal'
-     * response handler below, using Deriv's actual ask_price with a 2% cap.
+     * Request a proposal first instead of buying with a flat price cap. A fixed
+     * price:1000 cap has no relationship to the actual ask_price, so it either does
+     * nothing (small stakes) or silently rejects the trade (stakes whose ask_price
+     * exceeds 1000). The real buy fires from the 'proposal' response handler below,
+     * using Deriv's actual ask_price with a 2% cap.
+     *
+     * subscribe:0 (one-shot) is rejected outright by this API with
+     * "Input validation failed: subscribe" — it only accepts subscribe:1. So we
+     * subscribe, use the first response to buy, then `forget` it immediately
+     * (in the proposal handler) instead of leaving it streaming.
      *
      * contract_type: one of DIGITEVEN | DIGITODD | DIGITMATCH | DIGITDIFF | DIGITOVER | DIGITUNDER
      * duration: 1, duration_unit: "t" → 1-tick digit contract
@@ -1290,7 +1295,7 @@ export default function AnalysisPage() {
     pendingProposalsRef.current.add(reqId)
     ws.send(JSON.stringify({
       proposal: 1,
-      subscribe: 0,
+      subscribe: 1,
       req_id: reqId,
       contract_type:     ct,
       underlying_symbol: symbolRef.current,
@@ -1530,6 +1535,8 @@ export default function AnalysisPage() {
             const buyReqId = ++reqIdRef.current
             pendingSpotsByReq.current.set(buyReqId, entrySpot)
             ws!.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+            const subId = (msg as { subscription?: { id: string } }).subscription?.id
+            if (subId) ws!.send(JSON.stringify({ forget: subId, req_id: ++reqIdRef.current }))
           }
         }
 
