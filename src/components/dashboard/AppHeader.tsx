@@ -20,6 +20,7 @@ interface AccountRow {
 interface BalanceData {
   accounts:        AccountRow[]
   activeAccountId: string
+  accountsError?:  boolean
 }
 
 function CurrencyFlag({ currency }: { currency: string }) {
@@ -243,6 +244,24 @@ export default function AppHeader() {
 
       {/* Right side — theme toggle + account switcher */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+
+        {/* ── Accounts-load error banner ── */}
+        {!loading && data?.accountsError && (
+          <button
+            onClick={() => fetchBalance(true)}
+            title="We couldn't load your Deriv accounts. Click to retry."
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              background: 'rgba(248,81,73,0.12)',
+              border: '1px solid rgba(248,81,73,0.4)',
+              borderRadius: 8, padding: '6px 10px',
+              color: 'var(--clr-red)', fontSize: '0.78rem', fontWeight: 600,
+              cursor: 'pointer', flexShrink: 0,
+            }}
+          >
+            ⚠ Account data unavailable — retry
+          </button>
+        )}
 
         {/* ── Theme toggle button ── */}
         <button

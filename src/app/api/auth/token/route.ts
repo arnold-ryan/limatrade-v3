@@ -83,6 +83,7 @@ export async function POST(req: NextRequest) {
 
     // ── Fetch user's accounts ────────────────────────────────────────────
     let accounts: AccountInfo[] = []
+    let accountsError = false
     try {
       const accountsRes = await fetch(`${DERIV_API_URL}/trading/v1/options/accounts`, {
         headers: {
@@ -100,10 +101,19 @@ export async function POST(req: NextRequest) {
           balance:   a.balance ?? undefined,
           type:      a.account_type ?? a.type,
         })).filter((a: any) => a.accountId)
+      } else {
+        const errText = await accountsRes.text()
+        console.error('[Lima Trade] Accounts fetch failed:', accountsRes.status, errText)
+        accountsError = true
       }
     } catch (e) {
       console.warn('[Lima Trade] Could not fetch accounts:', e)
+      accountsError = true
     }
+
+    // A 200 response with zero accounts is just as broken as a failed
+    // request — either way the user can't do anything, so treat it as an error.
+    if (!accountsError && accounts.length === 0) accountsError = true
 
     const primary = accounts.find(a => a.isDemo) ?? accounts[0]
 
@@ -116,13 +126,14 @@ export async function POST(req: NextRequest) {
     session.tokenExpiresAt  = Date.now() + (expires_in - 60) * 1000
     session.activeAccountId = primary?.accountId
     session.accounts        = accounts
+    session.accountsError   = accountsError
     session.isLoggedIn      = true
     session.pkceVerifier    = undefined
     session.oauthState      = undefined
     await session.save()
 
-    console.log(`[Lima Trade] Login OK — account=${primary?.accountId} hasRefreshToken=${!!refresh_token}`)
-    return NextResponse.json({ ok: true })
+    console.log(`[Lima Trade] Login OK — account=${primary?.accountId} hasRefreshToken=${!!refresh_token} accountsError=${accountsError}`)
+    return NextResponse.json({ ok: true, accountsError })
 
   } catch (e) {
     console.error('[Lima Trade] Auth token error:', e)

@@ -100,7 +100,7 @@ function Bar({ label, color, count, total }: {
       </span>
       <div style={{
         flex: 1, height: '8px',
-        background: 'rgba(255,255,255,0.06)',
+        background: bg2,
         borderRadius: '99px', overflow: 'hidden',
       }}>
         <div style={{
@@ -150,7 +150,7 @@ function Sequence({ seq, colorMap, rawDigits, flash, tickN }: {
   return (
     <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
       {seq.map((s, i) => {
-        const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
+        const c = colorMap[s] ?? { bg: bg1, border: bdr, text: txt1 }
         const isFlashing = flash != null && i === flashIdx
         // Fade glow slightly as it ages (1 = fresh, dims after 3 ticks but still visible)
         const elapsed    = flash != null && tickN != null ? (tickN - flash.atTickN) : 0
@@ -228,7 +228,7 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
           style={{
             width: '27px', height: '27px', borderRadius: '50%',
             fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-            border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
+            border: `1.5px solid ${selected === d ? 'var(--gold)' : bdr}`,
             background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
             color: selected === d ? 'var(--gold)' : txt1,
             transition: 'all 0.15s',
@@ -625,7 +625,7 @@ function RunPanel({
                   return (
                     <div key={tx.id}
                       style={{ display: 'grid', gridTemplateColumns: '56px 1fr 90px', alignItems: 'center', padding: '0.6rem 1rem', borderBottom: `1px solid ${bdr}`, transition: 'background 0.1s' }}
-                      onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
+                      onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = bg1}
                       onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
                     >
                       {/* Type: market grid icon + direction arrow */}
@@ -758,8 +758,8 @@ function RunPanel({
               fontSize: '0.88rem', fontWeight: 700, cursor: 'pointer',
               letterSpacing: '0.03em', transition: 'background 0.15s, color 0.15s, border-color 0.15s',
             }}
-            onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff'; b.style.borderColor = 'rgba(255,255,255,0.35)' }}
-            onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = txt1; b.style.borderColor = 'rgba(255,255,255,0.2)' }}
+            onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = bg2; b.style.color = txt0; b.style.borderColor = bdr }}
+            onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = txt1; b.style.borderColor = bdr }}
           >
             Reset
           </button>
@@ -955,7 +955,7 @@ function ViewDetailModal({
                 borderBottom: `1px solid ${bdr}`,
                 alignItems: 'center',
               }}
-                onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.03)'}
+                onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = bg1}
                 onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}
               >
                 <span style={{ fontSize: '0.7rem', color: txt2 }}>
@@ -1203,6 +1203,8 @@ export default function AnalysisPage() {
   const pendingBuysRef    = useRef<Map<number, { buyPrice: number; entrySpot: number | null; longcode?: string; potentialPayout?: number }>>(new Map())
   /** Maps req_id → entrySpot — bridges executeTrade (req_id) to buy response (contract_id) */
   const pendingSpotsByReq = useRef<Map<number, number | null>>(new Map())
+  /** req_ids of in-flight one-shot proposal requests, awaiting a price before the real buy fires */
+  const pendingProposalsRef = useRef<Set<number>>(new Set())
   const reqIdRef        = useRef(200)
   /** Auto-reconnect: attempt count + backoff timer */
   const reconnectCount  = useRef(0)
@@ -1275,28 +1277,29 @@ export default function AnalysisPage() {
     pendingSpotsByReq.current.set(reqId, livePriceRef.current)
 
     /*
-     * Deriv WebSocket API — buy (without prior proposal)
-     * buy: "1"   → use inline parameters instead of a proposal id
-     * price: 1000 → max price we'll pay (always fills at actual ask_price)
+     * Request a one-shot proposal first instead of buying with a flat price cap.
+     * A fixed price:1000 cap has no relationship to the actual ask_price, so it
+     * either does nothing (small stakes) or silently rejects the trade (stakes
+     * whose ask_price exceeds 1000). The real buy fires from the 'proposal'
+     * response handler below, using Deriv's actual ask_price with a 2% cap.
      *
      * contract_type: one of DIGITEVEN | DIGITODD | DIGITMATCH | DIGITDIFF | DIGITOVER | DIGITUNDER
      * duration: 1, duration_unit: "t" → 1-tick digit contract
      * barrier (optional): the digit prediction for MATCH/DIFF/OVER/UNDER
      */
+    pendingProposalsRef.current.add(reqId)
     ws.send(JSON.stringify({
-      buy: '1',
-      price: 1000,
+      proposal: 1,
+      subscribe: 0,
       req_id: reqId,
-      parameters: {
-        contract_type:     ct,
-        underlying_symbol: symbolRef.current,
-        duration:          1,
-        duration_unit:     't',
-        amount,
-        basis:    'stake',
-        currency: currencyRef.current,
-        ...(hasBar ? { barrier: barrierRef.current } : {}),
-      },
+      contract_type:     ct,
+      underlying_symbol: symbolRef.current,
+      duration:          1,
+      duration_unit:     't',
+      amount,
+      basis:    'stake',
+      currency: currencyRef.current,
+      ...(hasBar ? { barrier: barrierRef.current } : {}),
     }))
   }, [])
 
@@ -1513,6 +1516,20 @@ export default function AnalysisPage() {
                 }
               }
             }
+          }
+        }
+
+        /* ── proposal response — fire the real buy at Deriv's ask_price ── */
+        if (msg.msg_type === 'proposal') {
+          const propReqId = msg.req_id as number | undefined
+          if (propReqId != null && pendingProposalsRef.current.has(propReqId)) {
+            pendingProposalsRef.current.delete(propReqId)
+            const entrySpot = pendingSpotsByReq.current.get(propReqId) ?? null
+            pendingSpotsByReq.current.delete(propReqId)
+            const prop = msg.proposal as { id: string; ask_price: number }
+            const buyReqId = ++reqIdRef.current
+            pendingSpotsByReq.current.set(buyReqId, entrySpot)
+            ws!.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
           }
         }
 
@@ -1767,6 +1784,7 @@ export default function AnalysisPage() {
     runningRef.current = false
     pendingBuysRef.current.clear()
     pendingSpotsByReq.current.clear()
+    pendingProposalsRef.current.clear()
     setRunStats({ totalStake: 0, totalPayout: 0, runs: 0, lost: 0, won: 0, profit: 0 })
     setTxLog([])
   }
@@ -1940,12 +1958,12 @@ export default function AnalysisPage() {
 
   /* Circle styling */
   function circleStyle(digit: number): React.CSSProperties {
-    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = txt1
+    let bg = bg2, border = '2px solid rgba(252,163,17,0.12)', color = txt1
     if      (digit === highest)    { bg = '#FCA311'; border = '2px solid #FCA311'; color = '#000' }
     else if (digit === secondHigh) { bg = 'rgba(252,163,17,0.2)'; border = '2px solid rgba(252,163,17,0.5)'; color = '#FCA311' }
     else if (digit === lowest)     { bg = 'rgba(239,68,68,0.22)'; border = '2px solid #ef4444'; color = '#ef4444' }
     else if (digit === secondLow)  { bg = 'rgba(239,68,68,0.1)'; border = '2px solid rgba(239,68,68,0.4)'; color = 'rgba(239,68,68,0.85)' }
-    if (digit === lastDigit)       { border = '3px solid #fff' }
+    if (digit === lastDigit)       { border = `3px solid ${txt0}` }
     return { background: bg, border, color } as React.CSSProperties
   }
 
@@ -1984,7 +2002,7 @@ export default function AnalysisPage() {
               flex: 1, padding: '0.65rem',
               fontSize: '0.82rem', fontWeight: 700,
               cursor: 'pointer', border: 'none',
-              background: activeTab === t ? 'rgba(252,163,17,0.12)' : '#050505',
+              background: activeTab === t ? 'rgba(252,163,17,0.12)' : bg1,
               color: activeTab === t ? 'var(--gold)' : txt2,
               borderBottom: activeTab === t ? '2px solid var(--gold)' : '2px solid transparent',
               textTransform: 'capitalize', transition: 'all 0.15s',

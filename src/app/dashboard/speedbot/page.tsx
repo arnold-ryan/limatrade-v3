@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
+import { bg0, bg1, bg2, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /**
  * Speedbot — High-speed digit trading with dual strategy
@@ -9,7 +9,7 @@ import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
  * Deriv API (verified against docs):
  *  • Public ticks WS : wss://api.derivws.com/trading/v1/options/ws/public
  *  • Authenticated WS: /api/user/ws-url → OTP URL from Deriv REST
- *  • Buy            : { buy:'1', price:1000, parameters:{ underlying_symbol, contract_type, ... } }
+ *  • Buy            : one-shot { proposal:1, subscribe:0, ... } then { buy: id, price: ask_price*1.02 }
  *  • Transaction    : { transaction:1, subscribe:1 } — auth_required, scope:trade
  *  • forget_all     : sent on WS cleanup to prevent server-side subscription leaks
  *
@@ -172,7 +172,7 @@ function SbSequence({ seq, colorMap, rawDigits, flashWon, flashExitDigit, ticksT
   return (
     <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap', marginTop: '0.75rem', justifyContent: 'center' }}>
       {seq.map((s, i) => {
-        const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
+        const c = colorMap[s] ?? { bg: bg1, border: bdr, text: txt1 }
         const isFlashing = (i === flashIdx) && flashWon != null
         const display   = (s === 'E' || s === 'O' || s === 'M' || s === 'D') ? s : rawDigits != null ? String(rawDigits[i] ?? s) : s
         return (
@@ -206,7 +206,7 @@ function SbDigitPicker({ selected, onSelect, disabled }: { selected: number; onS
         <button key={d} onClick={() => !disabled && onSelect(d)} style={{
           width: '27px', height: '27px', borderRadius: '50%',
           fontSize: '0.72rem', fontWeight: 700, cursor: disabled ? 'default' : 'pointer',
-          border: `1.5px solid ${selected === d ? '#FCA311' : 'rgba(255,255,255,0.14)'}`,
+          border: `1.5px solid ${selected === d ? '#FCA311' : bdr}`,
           background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
           color: selected === d ? '#FCA311' : txt1,
           transition: 'all 0.15s',
@@ -371,6 +371,7 @@ export default function SpeedbotPage() {
   const [zigzag,      setZigzag]     = useState(false)
   const [altOnLoss,   setAltOnLoss]  = useState(false)
   const [martMult,    setMartMult]   = useState('2.0')
+  const [maxStake,    setMaxStake]   = useState('50.00')
 
   /* ── Bot state ── */
   const [running,     setRunning]    = useState(false)
@@ -417,6 +418,8 @@ export default function SpeedbotPage() {
   const zigzagRef       = useRef(false)
   const altOnLossRef    = useRef(false)
   const martMultRef     = useRef('2.0')
+  /** Hard ceiling on martingale escalation — prevents an uncapped loss streak. */
+  const maxStakeRef     = useRef(parseFloat('50.00'))
   const currencyRef     = useRef('USD')
 
   /* ── Bot WS infra refs ── */
@@ -427,6 +430,8 @@ export default function SpeedbotPage() {
   const currentStakeRef   = useRef(1.00)    // escalates with martingale, resets on win
   const pendingBuysRef    = useRef<Map<number, { buyPrice: number }>>(new Map())
   const pendingSpotsByReq = useRef<Map<number, null>>(new Map())
+  /** req_ids of in-flight one-shot proposal requests, awaiting a price before the real buy fires */
+  const pendingProposalsRef = useRef<Set<number>>(new Set())
   const reqIdRef          = useRef(200)
   const reconnectCount    = useRef(0)
   const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -466,6 +471,7 @@ export default function SpeedbotPage() {
   useEffect(() => { zigzagRef.current      = zigzag      }, [zigzag])
   useEffect(() => { altOnLossRef.current   = altOnLoss   }, [altOnLoss])
   useEffect(() => { martMultRef.current    = martMult    }, [martMult])
+  useEffect(() => { maxStakeRef.current    = parseFloat(maxStake) || 50 }, [maxStake])
   useEffect(() => { currencyRef.current    = currency    }, [currency])
   // keep effectiveTypeRef in sync when trade type changes manually (reset zigzag state)
   useEffect(() => { effectiveTypeRef.current = tradeType }, [tradeType])
@@ -473,83 +479,94 @@ export default function SpeedbotPage() {
 
   /* ── Tick WebSocket (public — no auth) ── */
   useEffect(() => {
-    const ws = new WebSocket(PUBLIC_WS_URL)
+    let alive = true
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        ticks_history: symbol,
-        end:   'latest',
-        count: 100,
-        style: 'ticks',
-        subscribe: 1,
-        req_id: 1,
-      }))
-    }
+    function connect() {
+      if (!alive) return
+      ws = new WebSocket(PUBLIC_WS_URL)
 
-    ws.onmessage = (ev) => {
-      let msg: Record<string, unknown>
-      try { msg = JSON.parse(ev.data as string) } catch { return }
-
-      if (msg.msg_type === 'history') {
-        // Capture pip_size (top-level field per ticks_history_response.schema.json)
-        const ps = (msg as { pip_size?: number }).pip_size
-        if (ps != null) pipSizeRef.current = ps
-        // prices are numbers per schema (not strings)
-        const hist = (msg as { history: { prices: number[] } }).history.prices
-        const digits = hist.map(p => lastDigit(Number(p), pipSizeRef.current))
-        setRecentDigits(digits.slice(-30))
-        setTicksTotal(hist.length)
-        setPrices(hist.map(Number))
+      ws.onopen = () => {
+        ws!.send(JSON.stringify({
+          ticks_history: symbol,
+          end:   'latest',
+          count: 100,
+          style: 'ticks',
+          subscribe: 1,
+          req_id: 1,
+        }))
       }
 
-      if (msg.msg_type === 'tick') {
-        // pip_size is REQUIRED on every tick per ticks_response.schema.json
-        const tickData = (msg as { tick: { quote: number; pip_size: number } }).tick
-        if (tickData.pip_size != null) pipSizeRef.current = tickData.pip_size
-        const q = tickData.quote
-        livePriceRef.current = q      // sync immediately — critical for entry spot accuracy
-        ticksCountRef.current += 1    // sync counter — never stale, used by tick gate below
-        setLivePrice(q)
-        setRecentDigits(prev => [...prev.slice(-29), lastDigit(q, pipSizeRef.current)])
-        setTicksTotal(t => t + 1)
-        setPrices(prev => [...prev.slice(-499), q])
+      ws.onmessage = (ev) => {
+        let msg: Record<string, unknown>
+        try { msg = JSON.parse(ev.data as string) } catch { return }
 
-        /* ── Tick gate: fire next trade exactly ticksDur+1 ticks after buy confirms ──
-         * Only active for Standard strategy — Martingale needs the sell result first
-         * to calculate the next stake, so it keeps sell-based firing.
-         * This removes dependence on Deriv's async sell notification timing.
-         */
-        if (
-          strategyRef.current !== 'martingale' &&
-          runningRef.current &&
-          inTradeRef.current &&
-          ticksAtBuyRef.current !== null &&
-          tickGateFiredIdRef.current === null &&
-          ticksCountRef.current - ticksAtBuyRef.current >= ticksDurRef.current + 1
-        ) {
-          tickGateFiredIdRef.current = openContractIdRef.current  // mark this contract as tick-released
-          ticksAtBuyRef.current      = null
-          openContractIdRef.current  = null
-          inTradeRef.current         = false
-          // setTimeout(0) yields to event loop — allows a queued STOP click to cancel before buy fires
-          const _ws = botWsRef.current
-          setTimeout(() => {
-            if (runningRef.current && _ws?.readyState === WebSocket.OPEN) {
-              executeTrade(_ws)
-            }
-          }, 0)
+        if (msg.msg_type === 'history') {
+          // Capture pip_size (top-level field per ticks_history_response.schema.json)
+          const ps = (msg as { pip_size?: number }).pip_size
+          if (ps != null) pipSizeRef.current = ps
+          // prices are numbers per schema (not strings)
+          const hist = (msg as { history: { prices: number[] } }).history.prices
+          const digits = hist.map(p => lastDigit(Number(p), pipSizeRef.current))
+          setRecentDigits(digits.slice(-30))
+          setTicksTotal(hist.length)
+          setPrices(hist.map(Number))
+        }
+
+        if (msg.msg_type === 'tick') {
+          // pip_size is REQUIRED on every tick per ticks_response.schema.json
+          const tickData = (msg as { tick: { quote: number; pip_size: number } }).tick
+          if (tickData.pip_size != null) pipSizeRef.current = tickData.pip_size
+          const q = tickData.quote
+          livePriceRef.current = q      // sync immediately — critical for entry spot accuracy
+          ticksCountRef.current += 1    // sync counter — never stale, used by tick gate below
+          setLivePrice(q)
+          setRecentDigits(prev => [...prev.slice(-29), lastDigit(q, pipSizeRef.current)])
+          setTicksTotal(t => t + 1)
+          setPrices(prev => [...prev.slice(-499), q])
+
+          /* ── Tick gate: fire next trade exactly ticksDur+1 ticks after buy confirms ──
+           * Only active for Standard strategy — Martingale needs the sell result first
+           * to calculate the next stake, so it keeps sell-based firing.
+           * This removes dependence on Deriv's async sell notification timing.
+           */
+          if (
+            strategyRef.current !== 'martingale' &&
+            runningRef.current &&
+            inTradeRef.current &&
+            ticksAtBuyRef.current !== null &&
+            tickGateFiredIdRef.current === null &&
+            ticksCountRef.current - ticksAtBuyRef.current >= ticksDurRef.current + 1
+          ) {
+            tickGateFiredIdRef.current = openContractIdRef.current  // mark this contract as tick-released
+            ticksAtBuyRef.current      = null
+            openContractIdRef.current  = null
+            inTradeRef.current         = false
+            // setTimeout(0) yields to event loop — allows a queued STOP click to cancel before buy fires
+            const _ws = botWsRef.current
+            setTimeout(() => {
+              if (runningRef.current && _ws?.readyState === WebSocket.OPEN) {
+                executeTrade(_ws)
+              }
+            }, 0)
+          }
         }
       }
+
+      ws.onerror = () => {}
+      ws.onclose = () => { if (alive) reconnectTimer = setTimeout(connect, 3000) }
     }
 
-    ws.onerror = () => {}
-    ws.onclose = () => {}
+    connect()
 
     return () => {
-      if (ws.readyState === WebSocket.OPEN) {
+      alive = false
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws?.readyState === WebSocket.OPEN) {
         try { ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 9999 })) } catch { /**/ }
       }
-      ws.close()
+      ws?.close()
       // Clear stale price data so the chart doesn't flash old market prices
       setPrices([])
       setLivePrice(null)
@@ -601,24 +618,27 @@ export default function SpeedbotPage() {
     }
     amount = parseFloat(amount.toFixed(2))
 
+    // Request a one-shot proposal first so the buy carries Deriv's real ask_price
+    // (with a 2% slippage cap) instead of a flat price cap that silently rejects
+    // any trade whose true price exceeds it. The actual buy fires from the
+    // 'proposal' response handler below.
     const reqId = ++reqIdRef.current
+    pendingProposalsRef.current.add(reqId)
     pendingSpotsByReq.current.set(reqId, null)
-    inTradeRef.current = true  // lock until sell arrives
+    inTradeRef.current = true  // lock until sell arrives (or proposal/buy error resets it)
 
     ws.send(JSON.stringify({
-      buy: '1',
-      price: 1000,   // max price cap — actual charge is ask_price
+      proposal: 1,
+      subscribe: 0,
       req_id: reqId,
-      parameters: {
-        contract_type:     ct,
-        underlying_symbol: symbolRef.current,
-        duration:          ticksDurRef.current,
-        duration_unit:     't',
-        amount,
-        basis:    'stake',
-        currency: currencyRef.current,
-        ...(BARRIER_TYPES.has(ct) ? { barrier: String(predictionRef.current) } : {}),
-      },
+      contract_type:     ct,
+      underlying_symbol: symbolRef.current,
+      duration:          ticksDurRef.current,
+      duration_unit:     't',
+      amount,
+      basis:    'stake',
+      currency: currencyRef.current,
+      ...(BARRIER_TYPES.has(ct) ? { barrier: String(predictionRef.current) } : {}),
     }))
   }, [])
 
@@ -734,6 +754,19 @@ export default function SpeedbotPage() {
               ? null
               : prev
           )
+        }
+
+        /* ── Proposal response — fire the real buy at Deriv's ask_price ── */
+        if (msg.msg_type === 'proposal') {
+          const reqId = msg.req_id as number | undefined
+          if (reqId != null && pendingProposalsRef.current.has(reqId)) {
+            pendingProposalsRef.current.delete(reqId)
+            pendingSpotsByReq.current.delete(reqId)
+            const prop = msg.proposal as { id: string; ask_price: number }
+            const buyReqId = ++reqIdRef.current
+            pendingSpotsByReq.current.set(buyReqId, null)
+            ws!.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+          }
         }
 
         /* ── Buy response ── */
@@ -913,11 +946,18 @@ export default function SpeedbotPage() {
                 currentStakeRef.current = parseFloat(stakeRef.current) || 1.00
                 accumLossRef.current    = 0
               } else {
-                // Loss: multiply
+                // Loss: multiply, capped at maxStake so a losing streak can't escalate unbounded
                 const mult = parseFloat(martMultRef.current) || 2
                 accumLossRef.current += buyPrice
                 const nextStake = parseFloat((accumLossRef.current * mult).toFixed(2))
-                currentStakeRef.current = Math.max(nextStake, 0.35)
+                currentStakeRef.current = Math.min(Math.max(nextStake, 0.35), maxStakeRef.current)
+                if (nextStake > maxStakeRef.current) {
+                  // Capping breaks the martingale recovery math (the next win won't fully
+                  // recoup the accumulated losses) — stop the bot instead of trading blind.
+                  setRunning(false)
+                  runningRef.current = false
+                  setStopReason(`🛑 Martingale hit max stake (${fmt2(maxStakeRef.current)} ${currencyRef.current}) — stopped to avoid trading past your configured ceiling`)
+                }
               }
             } else {
               // Standard: reset stake (stays fixed)
@@ -1324,7 +1364,7 @@ export default function SpeedbotPage() {
 
         {/* ════ LEFT: Config Panel ════ */}
         <div style={{
-          borderRight: isMobile ? 'none' : '1px solid rgba(255,255,255,0.07)',
+          borderRight: isMobile ? 'none' : `1px solid ${bdr}`,
           overflowY: 'auto',
           padding: '1.25rem 1rem',
           display: isMobile && mobileTab !== 'config' ? 'none' : 'flex',
@@ -1346,10 +1386,10 @@ export default function SpeedbotPage() {
                     borderRadius: '8px',
                     border: `1px solid ${strategy === s
                       ? (s === 'martingale' ? 'rgba(239,68,68,0.35)' : 'rgba(252,163,17,0.35)')
-                      : 'rgba(255,255,255,0.08)'}`,
+                      : bdr}`,
                     background: strategy === s
                       ? (s === 'martingale' ? 'rgba(239,68,68,0.18)' : 'rgba(252,163,17,0.18)')
-                      : 'rgba(255,255,255,0.04)',
+                      : bg1,
                     color: strategy === s
                       ? (s === 'martingale' ? '#ef4444' : '#FCA311')
                       : txt2,
@@ -1427,8 +1467,8 @@ export default function SpeedbotPage() {
                   style={{
                     padding: '0.5rem',
                     borderRadius: '8px',
-                    border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : 'rgba(255,255,255,0.08)'}`,
-                    background: execSpeed === sp ? 'rgba(252,163,17,0.15)' : 'rgba(255,255,255,0.04)',
+                    border: `1px solid ${execSpeed === sp ? 'rgba(252,163,17,0.3)' : bdr}`,
+                    background: execSpeed === sp ? 'rgba(252,163,17,0.15)' : bg1,
                     color: execSpeed === sp ? '#FCA311' : txt2,
                     fontWeight: 600, fontSize: '0.75rem',
                     cursor: running ? 'not-allowed' : 'pointer',
@@ -1534,7 +1574,7 @@ export default function SpeedbotPage() {
                     onClick={() => !running && item.set(!item.val)}
                     style={{
                       width: '40px', height: '22px', borderRadius: '11px',
-                      background: item.val ? '#FCA311' : 'rgba(255,255,255,0.12)',
+                      background: item.val ? '#FCA311' : bdr,
                       border: 'none', cursor: running ? 'not-allowed' : 'pointer',
                       position: 'relative', flexShrink: 0, transition: 'background 0.2s',
                     }}
@@ -1562,6 +1602,15 @@ export default function SpeedbotPage() {
                   style={inputSt} />
                 <p style={{ fontSize: '0.63rem', color: txt2, margin: '0.35rem 0 0', lineHeight: 1.4 }}>
                   After a loss, next stake = accumulated_losses × multiplier. Resets on win.
+                </p>
+              </div>
+              <div style={{ marginBottom: '0.75rem' }}>
+                <span style={labelSt}>Max Stake ({currency})</span>
+                <input type="number" min="0.35" step="1" value={maxStake}
+                  onChange={e => setMaxStake(e.target.value)} disabled={running}
+                  style={inputSt} />
+                <p style={{ fontSize: '0.63rem', color: txt2, margin: '0.35rem 0 0', lineHeight: 1.4 }}>
+                  Hard ceiling on escalation. The bot stops itself rather than trade above this.
                 </p>
               </div>
               {/* Current effective stake indicator */}
@@ -1802,8 +1851,8 @@ export default function SpeedbotPage() {
                         fontSize: '0.65rem', fontWeight: 700,
                         background: tx.settled
                           ? (tx.won ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)')
-                          : 'rgba(255,255,255,0.06)',
-                        border: `1px solid ${tx.settled ? (tx.won ? '#22c55e' : '#ef4444') : 'rgba(255,255,255,0.12)'}`,
+                          : bg2,
+                        border: `1px solid ${tx.settled ? (tx.won ? '#22c55e' : '#ef4444') : bdr}`,
                         color: tx.settled
                           ? (tx.won ? '#22c55e' : '#ef4444')
                           : txt2,
@@ -1908,7 +1957,7 @@ export default function SpeedbotPage() {
             fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer',
             transition: 'all 0.15s',
           }}
-          onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'rgba(255,255,255,0.07)'; b.style.color = '#fff' }}
+          onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = bg2; b.style.color = txt0 }}
           onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.color = txt2 }}
         >
           Reset

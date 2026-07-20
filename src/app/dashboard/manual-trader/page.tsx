@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { bg0, bg1, bdr, txt0, txt1, txt2 } from '@/lib/colors'
+import { bg0, bg1, bg2, bdr, txt0, txt1, txt2 } from '@/lib/colors'
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
 const PUBLIC_WS_URL  = 'wss://api.derivws.com/trading/v1/options/ws/public'
@@ -133,7 +133,7 @@ function Sequence({ seq, colorMap, rawDigits }: {
   return (
     <div style={{ display: 'flex', gap: '0.3rem', marginTop: '0.75rem', overflow: 'hidden', justifyContent: 'center' }}>
       {recent.map((s, i) => {
-        const c = colorMap[s] ?? { bg: 'rgba(255,255,255,0.05)', border: 'rgba(255,255,255,0.12)', text: '#aaa' }
+        const c = colorMap[s] ?? { bg: bg1, border: bdr, text: txt1 }
         const isLast = i === recent.length - 1
         const display = recentRaw != null ? String(recentRaw[i] ?? s) : s
         return (
@@ -160,7 +160,7 @@ function DigitPicker({ selected, onSelect }: { selected: number; onSelect: (d: n
         <button key={d} onClick={() => onSelect(d)} style={{
           width: '27px', height: '27px', borderRadius: '50%',
           fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-          border: `1.5px solid ${selected === d ? 'var(--gold)' : 'rgba(255,255,255,0.14)'}`,
+          border: `1.5px solid ${selected === d ? 'var(--gold)' : bdr}`,
           background: selected === d ? 'rgba(252,163,17,0.18)' : 'transparent',
           color: selected === d ? 'var(--gold)' : txt1,
           transition: 'all 0.15s',
@@ -378,7 +378,7 @@ function PositionsPanel({
             {(['positions', 'history'] as const).map(t => (
               <button key={t} onClick={() => setTab(t)} style={{
                 flex: 1, padding: '0.35rem', borderRadius: '6px', border: 'none',
-                background: tab === t ? 'rgba(252,163,17,0.12)' : 'rgba(255,255,255,0.04)',
+                background: tab === t ? 'rgba(252,163,17,0.12)' : bg1,
                 color: tab === t ? 'var(--gold)' : txt2,
                 fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer', textTransform: 'capitalize',
               }}>
@@ -616,37 +616,48 @@ export default function ManualTraderPage() {
     setPrices([])
     setLivePrice(null)
 
-    const ws = new WebSocket(PUBLIC_WS_URL)
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        ticks_history: symbol, end: 'latest', start: 1,
-        count: MAX_HISTORY, style: 'ticks', subscribe: 1,
-      }))
-    }
-    ws.onmessage = (ev) => {
-      let msg: Record<string, unknown>
-      try { msg = JSON.parse(ev.data as string) } catch { return }
-      if (msg.msg_type === 'history') {
-        const ps = (msg as { pip_size?: number }).pip_size
-        if (ps != null) pipSizeRef.current = ps
-        const hist = (msg as { history: { prices: number[] } }).history.prices.map(Number)
-        setPrices(hist)
-        setLivePrice(hist[hist.length - 1] ?? null)
-        setLoading(false)
+    let alive = true
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    function connect() {
+      if (!alive) return
+      ws = new WebSocket(PUBLIC_WS_URL)
+      ws.onopen = () => {
+        ws!.send(JSON.stringify({
+          ticks_history: symbol, end: 'latest', start: 1,
+          count: MAX_HISTORY, style: 'ticks', subscribe: 1,
+        }))
       }
-      if (msg.msg_type === 'tick') {
-        const td = (msg as { tick: { quote: number; pip_size: number } }).tick
-        if (td.pip_size != null) pipSizeRef.current = td.pip_size
-        const q = td.quote
-        setLivePrice(q)
-        setPrices(prev => { const n = [...prev, q]; return n.length > MAX_HISTORY ? n.slice(-MAX_HISTORY) : n })
+      ws.onmessage = (ev) => {
+        let msg: Record<string, unknown>
+        try { msg = JSON.parse(ev.data as string) } catch { return }
+        if (msg.msg_type === 'history') {
+          const ps = (msg as { pip_size?: number }).pip_size
+          if (ps != null) pipSizeRef.current = ps
+          const hist = (msg as { history: { prices: number[] } }).history.prices.map(Number)
+          setPrices(hist)
+          setLivePrice(hist[hist.length - 1] ?? null)
+          setLoading(false)
+        }
+        if (msg.msg_type === 'tick') {
+          const td = (msg as { tick: { quote: number; pip_size: number } }).tick
+          if (td.pip_size != null) pipSizeRef.current = td.pip_size
+          const q = td.quote
+          setLivePrice(q)
+          setPrices(prev => { const n = [...prev, q]; return n.length > MAX_HISTORY ? n.slice(-MAX_HISTORY) : n })
+        }
       }
+      ws.onerror = () => setLoading(false)
+      ws.onclose = () => { if (alive) reconnectTimer = setTimeout(connect, 3000) }
     }
-    ws.onerror = () => setLoading(false)
-    ws.onclose = () => {}
+    connect()
+
     return () => {
-      try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 9999 })) } catch { /**/ }
-      ws.close()
+      alive = false
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      try { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ forget_all: 'ticks', req_id: 9999 })) } catch { /**/ }
+      ws?.close()
     }
   }, [symbol])
 
@@ -987,12 +998,12 @@ export default function ManualTraderPage() {
 
   /* Circle style */
   function circleStyle(d: number): React.CSSProperties {
-    let bg = '#0d1524', border = '2px solid rgba(252,163,17,0.12)', color = txt1
+    let bg = bg2, border = '2px solid rgba(252,163,17,0.12)', color = txt1
     if      (d === highest)    { bg = '#FCA311'; border = '2px solid #FCA311'; color = '#000' }
     else if (d === secondHigh) { bg = 'rgba(252,163,17,0.2)'; border = '2px solid rgba(252,163,17,0.5)'; color = '#FCA311' }
     else if (d === lowest)     { bg = 'rgba(239,68,68,0.22)'; border = '2px solid #ef4444'; color = '#ef4444' }
     else if (d === secondLow)  { bg = 'rgba(239,68,68,0.1)'; border = '2px solid rgba(239,68,68,0.4)'; color = 'rgba(239,68,68,0.85)' }
-    if (d === lastDig)         { border = '3px solid #fff' }
+    if (d === lastDig)         { border = `3px solid ${txt0}` }
     return { background: bg, border, color }
   }
 
@@ -1050,8 +1061,8 @@ export default function ManualTraderPage() {
         <button onClick={() => setPanelOpen(v => !v)} style={{
           display: 'flex', alignItems: 'center', gap: '0.35rem',
           padding: '0.32rem 0.65rem', borderRadius: '7px',
-          border: `1px solid ${panelOpen ? 'rgba(252,163,17,0.4)' : 'rgba(255,255,255,0.12)'}`,
-          background: panelOpen ? 'rgba(252,163,17,0.1)' : 'rgba(255,255,255,0.04)',
+          border: `1px solid ${panelOpen ? 'rgba(252,163,17,0.4)' : bdr}`,
+          background: panelOpen ? 'rgba(252,163,17,0.1)' : bg1,
           color: panelOpen ? '#FCA311' : txt1,
           fontSize: '0.7rem', fontWeight: 700, cursor: 'pointer',
         }}>
@@ -1092,7 +1103,7 @@ export default function ManualTraderPage() {
                     <span style={{ fontSize: '0.54rem', fontWeight: 600, opacity: 0.82, marginTop: '1px' }}>{pct.toFixed(1)}%</span>
                   </div>
                   {d === lastDig && (
-                    <div style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderTop: '5px solid rgba(255,255,255,0.65)' }} />
+                    <div style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderTop: `5px solid ${txt1}` }} />
                   )}
                 </div>
               )
@@ -1206,7 +1217,7 @@ export default function ManualTraderPage() {
         color: panelOpen ? '#FCA311' : openCount > 0 ? '#FCA311' : txt2,
         fontSize: '0.9rem', fontWeight: 700, lineHeight: 1,
         transition: 'right 0.28s cubic-bezier(0.4,0,0.2,1)',
-        borderColor: openCount > 0 || panelOpen ? 'rgba(252,163,17,0.35)' : 'rgba(255,255,255,0.1)',
+        borderColor: openCount > 0 || panelOpen ? 'rgba(252,163,17,0.35)' : bdr,
       }}>
         {panelOpen ? '›' : openCount > 0 ? `‹${openCount}` : '‹'}
       </button>

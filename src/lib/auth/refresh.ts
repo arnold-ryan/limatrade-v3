@@ -87,9 +87,18 @@ export async function ensureValidToken(
             balance:   a.balance ?? undefined,
             type:      a.account_type ?? a.type,
           })).filter((a: any) => a.accountId)
+          session.accountsError = false
+        } else {
+          session.accountsError = true
         }
+      } else {
+        console.error('[Lima Trade] Silent-refresh accounts fetch failed:', accountsRes.status)
+        session.accountsError = true
       }
-    } catch { /* non-fatal */ }
+    } catch (e) {
+      console.warn('[Lima Trade] Silent-refresh accounts fetch error:', e)
+      session.accountsError = true
+    }
 
     await session.save()
     console.log('[Lima Trade] Token refreshed successfully')

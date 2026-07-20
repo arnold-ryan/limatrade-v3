@@ -3,8 +3,16 @@ import { NextRequest, NextResponse } from 'next/server'
 /**
  * GET /api/auth/debug
  * Shows the exact OAuth config Lima Trade will use. Visit this first when debugging login.
+ *
+ * Disabled outside development — it echoes back client_id and the resolved
+ * redirect_uri, which has no business being reachable by anonymous visitors
+ * on a production deployment.
  */
 export async function GET(req: NextRequest) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+  }
+
   const clientId = process.env.DERIV_CLIENT_ID?.trim() ?? '(not set)'
 
   let redirectUri: string

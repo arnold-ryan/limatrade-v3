@@ -1023,7 +1023,9 @@ export default function ChartsPage() {
     // Guard: reject stale proposal from previous market
     if (prop.sym && prop.sym !== symbolRef.current) return
     // Guard: reject if stake exceeds current balance
-    if (balance !== null && parseFloat(stakeRef.current) > balance) return
+    const stakeNum = parseFloat(stakeRef.current)
+    if (!Number.isFinite(stakeNum) || stakeNum <= 0) return
+    if (balance !== null && stakeNum > balance) return
     buyingSideRef.current = side  // set before state update so WS callback sees it
     if (side === 'A') setBuyingA(true); else setBuyingB(true)
 

@@ -33,9 +33,13 @@ export async function GET() {
     })
 
     if (!res.ok) {
+      console.error('[Lima Trade] Balance accounts fetch failed:', res.status, await res.text())
+      session.accountsError = true
+      await session.save()
       return NextResponse.json({
         accounts:        session.accounts ?? [],
         activeAccountId: session.activeAccountId,
+        accountsError:   true,
       })
     }
 
@@ -49,14 +53,20 @@ export async function GET() {
       type:      a.account_type ?? a.type,
     })).filter((a: any) => a.accountId)
 
-    session.accounts = accounts
+    const accountsError = accounts.length === 0
+    session.accounts      = accounts
+    session.accountsError = accountsError
     await session.save()
 
-    return NextResponse.json({ accounts, activeAccountId: session.activeAccountId })
+    return NextResponse.json({ accounts, activeAccountId: session.activeAccountId, accountsError })
   } catch (e) {
+    console.error('[Lima Trade] Balance route error:', e)
+    session.accountsError = true
+    await session.save()
     return NextResponse.json({
       accounts:        session.accounts ?? [],
       activeAccountId: session.activeAccountId,
+      accountsError:   true,
     })
   }
 }

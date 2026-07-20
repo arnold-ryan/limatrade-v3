@@ -21,6 +21,9 @@ export interface SessionData {
   activeAccountId?:  string
   /** All accounts returned from the accounts endpoint */
   accounts?:         AccountInfo[]
+  /** True when the last attempt to fetch accounts from Deriv failed — the UI
+   *  should show a visible error instead of trusting an empty/stale account list. */
+  accountsError?:    boolean
   isLoggedIn:        boolean
   /** Temporary PKCE fields — cleared after token exchange */
   pkceVerifier?:     string

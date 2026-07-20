@@ -201,6 +201,8 @@ interface TradeRow {
   id: number; ts: number; contractType: string; symbol: string
   stake: number; payout: number; won: boolean | null; profit: number | null
   source: 'manual' | 'scanner' | 'recovery'
+  /** True when the proposal/buy request itself was rejected by Deriv — no money was won or lost. */
+  failed?: boolean
 }
 interface LogLine { id: number; text: string; color: 'green'|'amber'|'red'|'cyan'|'white'|'purple'; ts: number }
 
@@ -214,7 +216,7 @@ function DigitGauge({ digit, count, total, liveDigit }: {
   return (
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:2 }}>
       <svg width="42" height="42" viewBox="0 0 42 42">
-        <circle cx="21" cy="21" r={r} fill="none" stroke="rgba(255,255,255,.07)" strokeWidth="3.5"/>
+        <circle cx="21" cy="21" r={r} fill="none" stroke="var(--bg2)" strokeWidth="3.5"/>
         <circle cx="21" cy="21" r={r} fill="none" stroke={live ? '#fff' : DIGIT_COLORS[digit]}
           strokeWidth={live ? 5 : 3.5}
           strokeDasharray={`${dash} ${circ - dash}`} strokeDashoffset={circ / 4}
@@ -223,7 +225,7 @@ function DigitGauge({ digit, count, total, liveDigit }: {
         <text x="21" y="25" textAnchor="middle" fontSize="11" fontWeight="800"
           fill={live ? '#fff' : DIGIT_COLORS[digit]}>{digit}</text>
       </svg>
-      <span style={{ fontSize:'.6rem', color:'rgba(229,229,229,.4)' }}>{pct.toFixed(0)}%</span>
+      <span style={{ fontSize:'.6rem', color:'var(--txt1)' }}>{pct.toFixed(0)}%</span>
     </div>
   )
 }
@@ -298,26 +300,41 @@ export default function BulkTraderPage() {
   const winRate  = settled.length > 0 ? (wins.length / settled.length) * 100 : 0
 
   useEffect(() => {
-    const ws = new WebSocket(PUBLIC_WS_URL)
-    ws.onopen = () => ws.send(JSON.stringify({ ticks_history:symbol, end:'latest', count:100, style:'ticks', subscribe:1, req_id:1 }))
-    ws.onmessage = (ev) => {
-      let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
-      if (msg.msg_type === 'history') {
-        const h = msg as {pip_size?:number;history?:{prices:number[]}}
-        if (h.pip_size != null) pipSizeRef.current = h.pip_size
-        const prices: number[] = h.history?.prices ?? []
-        setRecentDigits(prices.map(p => lastDigit(Number(p), pipSizeRef.current)).slice(-100))
-        setLivePrice(prices.at(-1) ?? null)
+    let alive = true
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    function connect() {
+      if (!alive) return
+      ws = new WebSocket(PUBLIC_WS_URL)
+      ws.onopen = () => ws!.send(JSON.stringify({ ticks_history:symbol, end:'latest', count:100, style:'ticks', subscribe:1, req_id:1 }))
+      ws.onmessage = (ev) => {
+        let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
+        if (msg.msg_type === 'history') {
+          const h = msg as {pip_size?:number;history?:{prices:number[]}}
+          if (h.pip_size != null) pipSizeRef.current = h.pip_size
+          const prices: number[] = h.history?.prices ?? []
+          setRecentDigits(prices.map(p => lastDigit(Number(p), pipSizeRef.current)).slice(-100))
+          setLivePrice(prices.at(-1) ?? null)
+        }
+        if (msg.msg_type === 'tick') {
+          const t = msg as {tick?:{pip_size?:number;quote?:number}}
+          if (t.tick?.pip_size != null) pipSizeRef.current = t.tick.pip_size
+          const q = t.tick?.quote
+          if (q != null) { setLivePrice(q); setRecentDigits(prev => [...prev.slice(-99), lastDigit(Number(q), pipSizeRef.current)]) }
+        }
       }
-      if (msg.msg_type === 'tick') {
-        const t = msg as {tick?:{pip_size?:number;quote?:number}}
-        if (t.tick?.pip_size != null) pipSizeRef.current = t.tick.pip_size
-        const q = t.tick?.quote
-        if (q != null) { setLivePrice(q); setRecentDigits(prev => [...prev.slice(-99), lastDigit(Number(q), pipSizeRef.current)]) }
-      }
+      ws.onerror = () => {}
+      ws.onclose = () => { if (alive) reconnectTimer = setTimeout(connect, 3000) }
     }
-    ws.onerror = () => {}; ws.onclose = () => {}
-    return () => { try { ws.send(JSON.stringify({ forget_all:'ticks', req_id:9999 })) } catch { /**/ } ws.close(); setLivePrice(null); setRecentDigits([]) }
+    connect()
+
+    return () => {
+      alive = false
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      try { ws?.send(JSON.stringify({ forget_all:'ticks', req_id:9999 })) } catch { /**/ }
+      ws?.close(); setLivePrice(null); setRecentDigits([])
+    }
   }, [symbol])
 
   const log = useCallback((text: string, color: LogLine['color'] = 'white') => {
@@ -333,6 +350,33 @@ export default function BulkTraderPage() {
   const settleTrade = useCallback((rowId: number, payout: number, stakeVal: number) => {
     const profit = payout - stakeVal
     setTrades(prev => prev.map(t => t.id === rowId ? { ...t, payout, profit, won:profit>0 } : t))
+  }, [])
+
+  /** A proposal or buy request was rejected by Deriv — no stake was ever placed. */
+  const failTrade = useCallback((rowId: number) => {
+    setTrades(prev => prev.map(t => t.id === rowId ? { ...t, failed:true } : t))
+  }, [])
+
+  /**
+   * Requests a one-shot (non-subscribed) proposal for a contract, instead of buying
+   * directly with a flat price cap. The actual buy is sent once the proposal response
+   * arrives (see the `proposal` message handling in each onmessage handler below), using
+   * Deriv's real ask_price — this is what makes the trade's slippage cap meaningful instead
+   * of a fixed $1000 ceiling that silently rejects any trade whose ask_price exceeds it.
+   */
+  const requestProposal = useCallback((
+    ws: WebSocket, contractType: string, barrierVal: number|null,
+    stakeVal: number, sym: string, cur: string, rowId: number,
+    proposalPending: Map<number,{rowId:number;stake:number}>,
+  ) => {
+    const propReqId = ++reqIdRef.current
+    proposalPending.set(propReqId, { rowId, stake:stakeVal })
+    ws.send(JSON.stringify({
+      proposal:1, subscribe:0, req_id:propReqId,
+      contract_type:contractType, underlying_symbol:sym,
+      duration:5, duration_unit:'t', amount:stakeVal, basis:'stake', currency:cur,
+      ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
+    }))
   }, [])
 
   const connectBotWs = useCallback(async (): Promise<WebSocket|null> => {
@@ -363,22 +407,13 @@ export default function BulkTraderPage() {
     ws: WebSocket, contractType: string, barrierVal: number|null,
     stakeVal: number, count: number, sym: string, cur: string,
     source: TradeRow['source'],
-    reqToRow: Map<number,number>, pending: Map<number,{rowId:number;stake:number}>,
+    proposalPending: Map<number,{rowId:number;stake:number}>,
   ) => {
     for (let i = 0; i < count; i++) {
-      const reqId = ++reqIdRef.current
       const rowId = addTrade(contractType, sym, stakeVal, source)
-      pending.set(reqId, { rowId, stake:stakeVal })
-      ws.send(JSON.stringify({
-        buy:'1', price:1000, req_id:reqId,
-        parameters: {
-          contract_type:contractType, underlying_symbol:sym,
-          duration:5, duration_unit:'t', amount:stakeVal, basis:'stake', currency:cur,
-          ...(barrierVal !== null ? { barrier:String(barrierVal) } : {}),
-        },
-      }))
+      requestProposal(ws, contractType, barrierVal, stakeVal, sym, cur, rowId, proposalPending)
     }
-  }, [addTrade])
+  }, [addTrade, requestProposal])
 
   const handleManualTrade = useCallback(async (contractType: string) => {
     if (isTrading) return
@@ -388,32 +423,58 @@ export default function BulkTraderPage() {
     const ws = await connectBotWs()
     if (!ws) { setTradeError('Connection failed'); setIsTrading(false); return }
     intentionalClose.current = false
+    const proposalPending = new Map<number,{rowId:number;stake:number}>()
     const pending  = new Map<number,{rowId:number;stake:number}>()
     const reqToRow = new Map<number,number>()
+    const cidToStake = new Map<number,number>()
     let doneCount = 0
+    const finishOne = () => { doneCount++; if (doneCount >= n) { intentionalClose.current = true; ws.close(); setIsTrading(false) } }
     ws.onmessage = (ev) => {
       let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
       if (msg.msg_type === 'balance') window.dispatchEvent(new CustomEvent('deriv-balance', { detail:{ balance:(msg.balance as Record<string,unknown>)?.balance, currency:(msg.balance as Record<string,unknown>)?.currency } }))
+      if (msg.msg_type === 'proposal') {
+        const pr = proposalPending.get(msg.req_id as number)
+        proposalPending.delete(msg.req_id as number)
+        if (pr) {
+          if (msg.error) {
+            failTrade(pr.rowId)
+            finishOne()
+          } else {
+            const prop = msg.proposal as Record<string,unknown>
+            const buyReqId = ++reqIdRef.current
+            pending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake })
+            ws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+          }
+        }
+      }
       if (msg.msg_type === 'buy') {
         const ri = pending.get(msg.req_id as number)
-        if (ri && (msg.buy as Record<string,unknown>)?.contract_id) reqToRow.set((msg.buy as Record<string,unknown>).contract_id as number, ri.rowId)
+        if (ri) {
+          if (msg.error) { failTrade(ri.rowId); finishOne() }
+          else if ((msg.buy as Record<string,unknown>)?.contract_id) {
+            const cid = (msg.buy as Record<string,unknown>).contract_id as number
+            reqToRow.set(cid, ri.rowId)
+            cidToStake.set(cid, ri.stake)
+          }
+        }
       }
       if (msg.msg_type === 'transaction' && (msg.transaction as Record<string,unknown>)?.action === 'sell') {
         const tx  = msg.transaction as Record<string,unknown>
         const cid = tx.contract_id as number
         const payout = Math.abs(tx.amount as number ?? 0)
         const rowId = reqToRow.get(cid)
-        let stk = stakeVal; for (const [,v] of pending) { stk = v.stake; break }
+        const stk = cidToStake.get(cid) ?? stakeVal
         if (rowId != null) settleTrade(rowId, payout, stk)
-        doneCount++
-        if (doneCount >= n) { intentionalClose.current = true; ws.close(); setIsTrading(false) }
+        finishOne()
       }
-      if (msg.error) { setTradeError((msg.error as Record<string,unknown>)?.message as string ?? 'Trade error'); intentionalClose.current = true; ws.close(); setIsTrading(false) }
+      if (msg.error && msg.msg_type !== 'proposal' && msg.msg_type !== 'buy') {
+        setTradeError((msg.error as Record<string,unknown>)?.message as string ?? 'Trade error'); intentionalClose.current = true; ws.close(); setIsTrading(false)
+      }
     }
     ws.onclose = () => { if (!intentionalClose.current) setIsTrading(false) }
     ws.send(JSON.stringify({ transaction:1, subscribe:1, req_id:100 }))
-    fireTrades(ws, contractType, (tradeType === 'over_under' || tradeType === 'matches_differs') ? digit : null, stakeVal, n, symbol, currency, 'manual', reqToRow, pending)
-  }, [isTrading, stake, bulkCount, tradeType, digit, symbol, currency, connectBotWs, fireTrades, settleTrade])
+    fireTrades(ws, contractType, (tradeType === 'over_under' || tradeType === 'matches_differs') ? digit : null, stakeVal, n, symbol, currency, 'manual', proposalPending)
+  }, [isTrading, stake, bulkCount, tradeType, digit, symbol, currency, connectBotWs, fireTrades, settleTrade, failTrade])
 
   const startScanner = useCallback(async () => {
     setScannerActive(true); setScannerStatus('scanning'); setLogLines([])
@@ -438,17 +499,54 @@ export default function BulkTraderPage() {
     const bws = await connectBotWs()
     if (!bws) { log('ERROR: trading WS failed', 'red'); setScannerActive(false); setScannerStatus('idle'); return }
     scannerBotWsRef.current = bws
+    const scanProposalPending = new Map<number,{rowId:number;stake:number}>()
+    const scanRowSource = new Map<number,TradeRow['source']>()
     const scanPending  = new Map<number,{rowId:number;stake:number;source:TradeRow['source']}>()
     const scanReqToRow = new Map<number,number>()
+    const scanCidToStake = new Map<number,number>()
+    const scanCidToSource = new Map<number,TradeRow['source']>()
+
+    const scanFinishOne = () => {
+      scanPendingCount.current = Math.max(0, scanPendingCount.current - 1)
+      if (scanPendingCount.current === 0 && scanModeRef.current === 'once' && scannerBotWsRef.current) {
+        try { scannerBotWsRef.current.close() } catch { /**/ }
+        scannerBotWsRef.current = null
+      }
+    }
 
     bws.onmessage = (ev) => {
       let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
       if (msg.msg_type === 'balance') window.dispatchEvent(new CustomEvent('deriv-balance', { detail:{ balance:(msg.balance as Record<string,unknown>)?.balance, currency:(msg.balance as Record<string,unknown>)?.currency } }))
+      if (msg.msg_type === 'proposal') {
+        const pr = scanProposalPending.get(msg.req_id as number)
+        scanProposalPending.delete(msg.req_id as number)
+        if (pr) {
+          if (msg.error) {
+            log(`  ✗ Proposal rejected: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
+            failTrade(pr.rowId)
+            scanFinishOne()
+          } else {
+            const prop = msg.proposal as Record<string,unknown>
+            const buyReqId = ++reqIdRef.current
+            scanPending.set(buyReqId, { rowId:pr.rowId, stake:pr.stake, source: scanRowSource.get(pr.rowId) ?? 'scanner' })
+            bws.send(JSON.stringify({ buy: prop.id, price: +(Number(prop.ask_price) * 1.02).toFixed(2), req_id: buyReqId }))
+          }
+        }
+      }
       if (msg.msg_type === 'buy') {
         const ri = scanPending.get(msg.req_id as number)
-        if (ri && (msg.buy as Record<string,unknown>)?.contract_id) {
-          scanReqToRow.set((msg.buy as Record<string,unknown>).contract_id as number, ri.rowId)
-          log(`  ✓ Contract #${(msg.buy as Record<string,unknown>).contract_id} placed`, 'green')
+        if (ri) {
+          if (msg.error) {
+            log(`  ✗ Buy rejected: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
+            failTrade(ri.rowId)
+            scanFinishOne()
+          } else if ((msg.buy as Record<string,unknown>)?.contract_id) {
+            const cid = (msg.buy as Record<string,unknown>).contract_id as number
+            scanReqToRow.set(cid, ri.rowId)
+            scanCidToStake.set(cid, ri.stake)
+            scanCidToSource.set(cid, ri.source)
+            log(`  ✓ Contract #${cid} placed`, 'green')
+          }
         }
       }
       if (msg.msg_type === 'transaction' && (msg.transaction as Record<string,unknown>)?.action === 'sell') {
@@ -456,14 +554,11 @@ export default function BulkTraderPage() {
         const cid    = tx.contract_id as number
         const payout = Math.abs(tx.amount as number ?? 0)
         const rowId  = scanReqToRow.get(cid)
-        const entry  = scanPending.get(Array.from(scanPending.entries()).find(([,v]) => v.rowId === rowId)?.[0] ?? -1)
-        let stk = parseFloat(scanStakeRef.current)||1
-        for (const [,v] of scanPending) { stk = v.stake; break }
+        const stk    = scanCidToStake.get(cid) ?? (parseFloat(scanStakeRef.current) || 1)
+        const src    = scanCidToSource.get(cid) ?? 'scanner'
         if (rowId != null) {
           settleTrade(rowId, payout, stk)
-          scanPendingCount.current = Math.max(0, scanPendingCount.current - 1)
           const won = payout > stk
-          const src = entry?.source ?? 'scanner'
           const tag = src === 'recovery' ? '[RECOVERY] ' : ''
           log(`  ${won ? '\u2713 WIN' : '\u2717 LOSS'} ${tag}${won?'+':''}${fmt2(payout-stk)} ${scanCurrencyRef.current}`, won ? 'green' : 'red')
           if (!won && !recoveryMode.current && scanTradeTypeRef.current === 'over_under') {
@@ -472,14 +567,12 @@ export default function BulkTraderPage() {
             log('\u2501\u2501 RECOVERY MODE ACTIVATED \u2501\u2501', 'amber')
             log('  Now scanning Over 3 / Under 6 alongside primary (score\u226580)', 'amber')
           }
-          // One Shot: close bot WS only after all pending trades have settled
-          if (scanPendingCount.current === 0 && scanModeRef.current === 'once' && scannerBotWsRef.current) {
-            try { scannerBotWsRef.current.close() } catch { /**/ }
-            scannerBotWsRef.current = null
-          }
+          scanFinishOne()
         }
       }
-      if (msg.error) log(`  ERROR: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
+      if (msg.error && msg.msg_type !== 'proposal' && msg.msg_type !== 'buy') {
+        log(`  ERROR: ${(msg.error as Record<string,unknown>)?.message}`, 'red')
+      }
     }
     bws.send(JSON.stringify({ transaction:1, subscribe:1, req_id:100 }))
 
@@ -533,19 +626,14 @@ export default function BulkTraderPage() {
                   primaryPersists.current.set(sym, 0)
                   setScannerStatus('fired'); setTimeout(() => setScannerStatus('scanning'), 3000)
                   if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
-                    const rId = ++reqIdRef.current
-                    const n   = scanCountRef.current
+                    const n = scanCountRef.current
+                    const stakeVal = parseFloat(scanStakeRef.current) || 1
                     scanPendingCount.current += n
                     for (let i = 0; i < n; i++) {
-                      const reqId = ++reqIdRef.current
-                      const rowId = addTrade(pResult.contractType, sym, parseFloat(scanStakeRef.current)||1, 'scanner')
-                      scanPending.set(reqId, { rowId, stake:parseFloat(scanStakeRef.current)||1, source:'scanner' })
-                      scannerBotWsRef.current.send(JSON.stringify({
-                        buy:'1', price:1000, req_id:reqId,
-                        parameters: { contract_type:pResult.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, barrier:String(pResult.barrier) },
-                      }))
+                      const rowId = addTrade(pResult.contractType, sym, stakeVal, 'scanner')
+                      scanRowSource.set(rowId, 'scanner')
+                      requestProposal(scannerBotWsRef.current, pResult.contractType, pResult.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
                     }
-                    void rId
                     // One Shot: stop feeds now; bot WS stays open until all trades settle
                     if (scanModeRef.current === 'once') stopScannerRef.current?.()
                   }
@@ -577,15 +665,12 @@ export default function BulkTraderPage() {
                     setScannerStatus('recovery'); setTimeout(() => setScannerStatus('scanning'), 3000)
                     if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
                       const n = scanCountRef.current
+                      const stakeVal = parseFloat(scanStakeRef.current) || 1
                       scanPendingCount.current += n
                       for (let i = 0; i < n; i++) {
-                        const reqId = ++reqIdRef.current
-                        const rowId = addTrade(rResult.contractType, sym, parseFloat(scanStakeRef.current)||1, 'recovery')
-                        scanPending.set(reqId, { rowId, stake:parseFloat(scanStakeRef.current)||1, source:'recovery' })
-                        scannerBotWsRef.current.send(JSON.stringify({
-                          buy:'1', price:1000, req_id:reqId,
-                          parameters: { contract_type:rResult.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, barrier:String(rResult.barrier) },
-                        }))
+                        const rowId = addTrade(rResult.contractType, sym, stakeVal, 'recovery')
+                        scanRowSource.set(rowId, 'recovery')
+                        requestProposal(scannerBotWsRef.current, rResult.contractType, rResult.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
                       }
                       if (scanModeRef.current === 'once') stopScannerRef.current?.()
                     }
@@ -620,15 +705,12 @@ export default function BulkTraderPage() {
               setScannerStatus('fired'); setTimeout(() => setScannerStatus('scanning'), 3000)
               if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
                 const n = scanCountRef.current
+                const stakeVal = parseFloat(scanStakeRef.current) || 1
                 scanPendingCount.current += n
                 for (let i = 0; i < n; i++) {
-                  const reqId = ++reqIdRef.current
-                  const rowId = addTrade(result.contractType, sym, parseFloat(scanStakeRef.current)||1, 'scanner')
-                  scanPending.set(reqId, { rowId, stake:parseFloat(scanStakeRef.current)||1, source:'scanner' })
-                  scannerBotWsRef.current.send(JSON.stringify({
-                    buy:'1', price:1000, req_id:reqId,
-                    parameters: { contract_type:result.contractType, underlying_symbol:sym, duration:5, duration_unit:'t', amount:parseFloat(scanStakeRef.current)||1, basis:'stake', currency:scanCurrencyRef.current, ...(result.barrier !== null ? { barrier:String(result.barrier) } : {}) },
-                  }))
+                  const rowId = addTrade(result.contractType, sym, stakeVal, 'scanner')
+                  scanRowSource.set(rowId, 'scanner')
+                  requestProposal(scannerBotWsRef.current, result.contractType, result.barrier, stakeVal, sym, scanCurrencyRef.current, rowId, scanProposalPending)
                 }
                 if (scanModeRef.current === 'once') stopScannerRef.current?.()
               }
@@ -642,7 +724,7 @@ export default function BulkTraderPage() {
       }
       ws.onerror = () => log(`WS error: ${sym}`, 'red')
     })
-  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log])
+  }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, requestProposal, failTrade])
 
   const stopScanner = useCallback((keepBotWs = false) => {
     setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
@@ -672,10 +754,10 @@ export default function BulkTraderPage() {
   return (
     <>
       <style>{`
-        .bt-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:.72rem .82rem}
-        .bt-lbl{font-size:.6rem;font-weight:700;letter-spacing:.08em;color:rgba(229,229,229,.35);text-transform:uppercase;margin-bottom:.32rem}
-        .bt-sel{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:7px;color:#e5e5e5;padding:.4rem .58rem;font-size:.78rem;outline:none;cursor:pointer}
-        .bt-inp{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:7px;color:#e5e5e5;padding:.4rem .58rem;font-size:.84rem;outline:none;box-sizing:border-box;width:100%}
+        .bt-card{background:var(--bg2);border:1px solid var(--bdr);border-radius:10px;padding:.72rem .82rem}
+        .bt-lbl{font-size:.6rem;font-weight:700;letter-spacing:.08em;color:var(--txt1);text-transform:uppercase;margin-bottom:.32rem}
+        .bt-sel{width:100%;background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;color:var(--txt0);padding:.4rem .58rem;font-size:.78rem;outline:none;cursor:pointer}
+        .bt-inp{background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;color:var(--txt0);padding:.4rem .58rem;font-size:.84rem;outline:none;box-sizing:border-box;width:100%}
         .bt-inp:focus{border-color:#00e5cc}
         .bt-btn{border:none;border-radius:8px;font-weight:800;cursor:pointer;transition:opacity .15s}
         .bt-btn:disabled{opacity:.4;cursor:not-allowed}
@@ -683,7 +765,7 @@ export default function BulkTraderPage() {
         .tw-chip{padding:.3rem 0;border-radius:6px;font-size:.72rem;font-weight:700;cursor:pointer;border:1px solid transparent;transition:all .15s;flex:1;text-align:center}
         .dot-cell{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;font-size:.64rem;font-weight:800;flex-shrink:0}
         .hr-row{display:grid;grid-template-columns:1fr 52px 28px 52px;gap:2px;align-items:center;padding:.26rem .38rem;border-radius:5px;font-size:.68rem}
-        .hr-row:hover{background:rgba(255,255,255,.04)}
+        .hr-row:hover{background:var(--bg2)}
         @keyframes fadeIn{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
         @keyframes scanPulse{0%,100%{opacity:1}50%{opacity:.2}}
         @keyframes recoveryGlow{0%,100%{box-shadow:0 0 0 rgba(252,163,17,0)}50%{box-shadow:0 0 12px rgba(252,163,17,.3)}}
@@ -692,15 +774,15 @@ export default function BulkTraderPage() {
       <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
 
         {/* LEFT: Scanner */}
-        <div style={{ width:250, flexShrink:0, borderRight:'1px solid rgba(255,255,255,.07)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.2)', animation:recoveryActive?'recoveryGlow 2s ease infinite':undefined }}>
-          <div style={{ padding:'.58rem .72rem', borderBottom:'1px solid rgba(255,255,255,.06)', flexShrink:0 }}>
+        <div style={{ width:250, flexShrink:0, borderRight:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.2)', animation:recoveryActive?'recoveryGlow 2s ease infinite':undefined }}>
+          <div style={{ padding:'.58rem .72rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'.35rem' }}>
-              <span style={{ fontSize:'.8rem', fontWeight:800, color:'#e5e5e5' }}>AI Scanner V2</span>
+              <span style={{ fontSize:'.8rem', fontWeight:800, color:'var(--txt0)' }}>AI Scanner V2</span>
               <span style={{
                 padding:'.18rem .5rem', borderRadius:20, fontSize:'.61rem', fontWeight:700,
-                background:scannerStatus==='idle'?'rgba(255,255,255,.05)':scannerStatus==='recovery'?'rgba(252,163,17,.15)':scannerStatus==='scanning'?'#00e5cc18':'rgba(34,197,94,.15)',
-                color:scannerStatus==='idle'?'rgba(229,229,229,.3)':scannerStatus==='recovery'?'#FCA311':scannerStatus==='scanning'?'#00e5cc':'#22c55e',
-                border:`1px solid ${scannerStatus==='idle'?'rgba(255,255,255,.07)':scannerStatus==='recovery'?'rgba(252,163,17,.3)':scannerStatus==='scanning'?'#00e5cc44':'rgba(34,197,94,.3)'}`,
+                background:scannerStatus==='idle'?'var(--bg2)':scannerStatus==='recovery'?'rgba(252,163,17,.15)':scannerStatus==='scanning'?'#00e5cc18':'rgba(34,197,94,.15)',
+                color:scannerStatus==='idle'?'var(--txt2)':scannerStatus==='recovery'?'#FCA311':scannerStatus==='scanning'?'#00e5cc':'#22c55e',
+                border:`1px solid ${scannerStatus==='idle'?'var(--bdr)':scannerStatus==='recovery'?'rgba(252,163,17,.3)':scannerStatus==='scanning'?'#00e5cc44':'rgba(34,197,94,.3)'}`,
               }}>
                 {scannerActive && <span style={{ width:5,height:5,borderRadius:'50%',background:scannerStatus==='recovery'?'#FCA311':'#22c55e',display:'inline-block',marginRight:4,animation:'scanPulse 1.2s ease infinite' }}/>}
                 {scannerStatus==='idle'?'IDLE':scannerStatus==='scanning'?'SCANNING':scannerStatus==='recovery'?'RECOVERY':'FIRED'}
@@ -717,28 +799,28 @@ export default function BulkTraderPage() {
             </button>
           </div>
 
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:4, padding:'.45rem .55rem', borderBottom:'1px solid rgba(255,255,255,.06)', flexShrink:0 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:4, padding:'.45rem .55rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
             {([
-              { label:'P&L', value:`${totalPnl>=0?'+':''}${fmt2(totalPnl)}`, color:totalPnl>0?'#22c55e':totalPnl<0?'#ef4444':'rgba(229,229,229,.4)' },
-              { label:'Win Rate', value:settled.length>0?`${winRate.toFixed(0)}%`:'--', color:winRate>=50?'#22c55e':winRate>0?'#ef4444':'rgba(229,229,229,.4)' },
-              { label:'Settled', value:String(settled.length), color:'rgba(229,229,229,.7)' },
-              { label:'Pending', value:String(trades.filter(t=>t.won===null).length), color:'#FCA311' },
+              { label:'P&L', value:`${totalPnl>=0?'+':''}${fmt2(totalPnl)}`, color:totalPnl>0?'#22c55e':totalPnl<0?'#ef4444':'var(--txt1)' },
+              { label:'Win Rate', value:settled.length>0?`${winRate.toFixed(0)}%`:'--', color:winRate>=50?'#22c55e':winRate>0?'#ef4444':'var(--txt1)' },
+              { label:'Settled', value:String(settled.length), color:'var(--txt0)' },
+              { label:'Pending', value:String(trades.filter(t=>t.won===null && !t.failed).length), color:'#FCA311' },
             ] as const).map(s => (
-              <div key={s.label} style={{ background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.06)', borderRadius:6, padding:'.28rem .38rem' }}>
-                <div style={{ fontSize:'.54rem', color:'rgba(229,229,229,.28)', textTransform:'uppercase', letterSpacing:'.05em' }}>{s.label}</div>
+              <div key={s.label} style={{ background:'var(--bg2)', border:'1px solid var(--bdr)', borderRadius:6, padding:'.28rem .38rem' }}>
+                <div style={{ fontSize:'.54rem', color:'var(--txt2)', textTransform:'uppercase', letterSpacing:'.05em' }}>{s.label}</div>
                 <div style={{ fontSize:'.8rem', fontWeight:800, color:s.color, fontVariantNumeric:'tabular-nums' }}>{s.value}</div>
               </div>
             ))}
           </div>
 
           {tradeType === 'over_under' && scannerActive && (
-            <div style={{ padding:'.38rem .58rem', borderBottom:'1px solid rgba(255,255,255,.05)', flexShrink:0 }}>
-              <div style={{ fontSize:'.58rem', color:'rgba(229,229,229,.35)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Strategy</div>
+            <div style={{ padding:'.38rem .58rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
+              <div style={{ fontSize:'.58rem', color:'var(--txt1)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Strategy</div>
               <div style={{ display:'flex', gap:4 }}>
                 <div style={{ flex:1, background:'rgba(34,197,94,.08)', border:'1px solid rgba(34,197,94,.2)', borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:'#22c55e', fontWeight:700 }}>
                   ● Under 8 / Over 1
                 </div>
-                <div style={{ flex:1, background:recoveryActive?'rgba(252,163,17,.1)':'rgba(255,255,255,.03)', border:`1px solid ${recoveryActive?'rgba(252,163,17,.28)':'rgba(255,255,255,.07)'}`, borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:recoveryActive?'#FCA311':'rgba(229,229,229,.28)', fontWeight:700 }}>
+                <div style={{ flex:1, background:recoveryActive?'rgba(252,163,17,.1)':'var(--bg2)', border:`1px solid ${recoveryActive?'rgba(252,163,17,.28)':'var(--bdr)'}`, borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:recoveryActive?'#FCA311':'var(--txt2)', fontWeight:700 }}>
                   {recoveryActive?'⚡ Over 3 / Under 6':'○ Recovery off'}
                 </div>
               </div>
@@ -747,17 +829,17 @@ export default function BulkTraderPage() {
 
           <div style={{ flex:1, overflowY:'auto', padding:'.45rem .62rem', fontFamily:"'SF Mono','Fira Code','Consolas',monospace", fontSize:'.67rem', lineHeight:1.85, background:'#040b0a' }}>
             {logLines.length===0
-              ? <p style={{ color:'rgba(229,229,229,.15)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
+              ? <p style={{ color:'var(--txt2)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
               : logLines.map(l => (
-                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'rgba(229,229,229,.67)' }}>
-                  <span style={{ color:'rgba(229,229,229,.14)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
+                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'var(--txt0)' }}>
+                  <span style={{ color:'var(--txt2)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
                 </div>
               ))}
             <div ref={logEndRef}/>
           </div>
           <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-            <span style={{ fontSize:'.56rem', color:'rgba(229,229,229,.18)' }}>primary≥40 · recovery≥80 · 20s cd</span>
-            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'rgba(229,229,229,.2)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
+            <span style={{ fontSize:'.56rem', color:'var(--txt2)' }}>primary≥40 · recovery≥80 · 20s cd</span>
+            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'var(--txt2)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
           </div>
         </div>
 
@@ -765,14 +847,14 @@ export default function BulkTraderPage() {
         <div style={{ flex:1, minWidth:0, overflowY:'auto', padding:'.82rem .95rem', display:'flex', flexDirection:'column', gap:'.65rem' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
             <div>
-              <h1 style={{ margin:0, fontSize:'1.08rem', fontWeight:900, color:'#fff' }}>⣿ Bulk Trader</h1>
-              <p style={{ margin:'1px 0 0', fontSize:'.67rem', color:'rgba(229,229,229,.28)' }}>Fire multiple contracts simultaneously on pattern signals</p>
+              <h1 style={{ margin:0, fontSize:'1.08rem', fontWeight:900, color:'var(--txt0)' }}>⣿ Bulk Trader</h1>
+              <p style={{ margin:'1px 0 0', fontSize:'.67rem', color:'var(--txt2)' }}>Fire multiple contracts simultaneously on pattern signals</p>
             </div>
             <div style={{ textAlign:'right' }}>
               <div style={{ fontSize:'1.22rem', fontWeight:900, color:'#00e5cc', fontVariantNumeric:'tabular-nums' }}>
                 {livePrice!=null?livePrice.toFixed(pipSizeRef.current):'—'}
               </div>
-              <div style={{ fontSize:'.6rem', color:'rgba(229,229,229,.27)' }}>
+              <div style={{ fontSize:'.6rem', color:'var(--txt2)' }}>
                 {liveDigit!=null
                   ? <span>LIVE · <span style={{ color:DIGIT_COLORS[liveDigit], fontWeight:800 }}>digit {liveDigit}</span></span>
                   : 'LIVE PRICE'}
@@ -792,9 +874,9 @@ export default function BulkTraderPage() {
               <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
                 {(['even_odd','over_under','matches_differs'] as const).map(t=>(
                   <button key={t} className="tt-chip" onClick={()=>setTradeType(t)} style={{
-                    background:tradeType===t?'#00e5cc20':'rgba(255,255,255,.04)',
-                    border:`1px solid ${tradeType===t?'#00e5cc':'rgba(255,255,255,.1)'}`,
-                    color:tradeType===t?'#00e5cc':'rgba(229,229,229,.44)',
+                    background:tradeType===t?'#00e5cc20':'var(--bg2)',
+                    border:`1px solid ${tradeType===t?'#00e5cc':'var(--bdr)'}`,
+                    color:tradeType===t?'#00e5cc':'var(--txt1)',
                   }}>{t==='even_odd'?'Even / Odd':t==='over_under'?'Over / Under':'Matches / Differs'}</button>
                 ))}
               </div>
@@ -806,14 +888,14 @@ export default function BulkTraderPage() {
                   {Array.from({length:10},(_,d)=>(
                     <button key={d} onClick={()=>setDigit(d)} style={{
                       width:23,height:23,borderRadius:5,cursor:'pointer',
-                      border:`1px solid ${digit===d?DIGIT_COLORS[d]:'rgba(255,255,255,.1)'}`,
+                      border:`1px solid ${digit===d?DIGIT_COLORS[d]:'var(--bdr)'}`,
                       background:digit===d?`${DIGIT_COLORS[d]}22`:'transparent',
-                      color:digit===d?DIGIT_COLORS[d]:'rgba(229,229,229,.36)',
+                      color:digit===d?DIGIT_COLORS[d]:'var(--txt1)',
                       fontWeight:800,fontSize:'.68rem',
                     }}>{d}</button>
                   ))}
                 </div>
-                <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'rgba(229,229,229,.26)' }}>
+                <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'var(--txt2)' }}>
                   {tradeType==='over_under'?'Scanner auto-selects Under 8 / Over 1':'Digit to differ from (manual)'}
                 </p>
               </div>
@@ -825,16 +907,16 @@ export default function BulkTraderPage() {
             <div className="bt-card">
               <div className="bt-lbl">No. of Bulk Trades</div>
               <input className="bt-inp" type="number" min="1" max="50" step="1" value={bulkCount} onChange={e=>setBulkCount(e.target.value)}/>
-              <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'rgba(229,229,229,.26)' }}>Contracts per signal</p>
+              <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'var(--txt2)' }}>Contracts per signal</p>
             </div>
             <div className="bt-card">
               <div className="bt-lbl">Ticks</div>
               <div style={{ display:'flex', gap:4 }}>
                 {[30,60,100].map(n=>(
                   <button key={n} className="tw-chip" onClick={()=>setTicks(n)} style={{
-                    background:ticks===n?'rgba(252,163,17,.12)':'rgba(255,255,255,.04)',
-                    border:`1px solid ${ticks===n?'rgba(252,163,17,.5)':'rgba(255,255,255,.1)'}`,
-                    color:ticks===n?'#FCA311':'rgba(229,229,229,.44)',
+                    background:ticks===n?'rgba(252,163,17,.12)':'var(--bg2)',
+                    border:`1px solid ${ticks===n?'rgba(252,163,17,.5)':'var(--bdr)'}`,
+                    color:ticks===n?'#FCA311':'var(--txt1)',
                   }}>{n}</button>
                 ))}
               </div>
@@ -844,18 +926,18 @@ export default function BulkTraderPage() {
               <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
                 <button className="tw-chip" onClick={()=>setScanMode('once')} style={{
                   padding:'.38rem 0',
-                  background:scanMode==='once'?'rgba(139,92,246,.15)':'rgba(255,255,255,.04)',
-                  border:`1px solid ${scanMode==='once'?'rgba(139,92,246,.5)':'rgba(255,255,255,.1)'}`,
-                  color:scanMode==='once'?'#a78bfa':'rgba(229,229,229,.44)',
+                  background:scanMode==='once'?'rgba(139,92,246,.15)':'var(--bg2)',
+                  border:`1px solid ${scanMode==='once'?'rgba(139,92,246,.5)':'var(--bdr)'}`,
+                  color:scanMode==='once'?'#a78bfa':'var(--txt1)',
                 }}>⚡ One Shot</button>
                 <button className="tw-chip" onClick={()=>setScanMode('continuous')} style={{
                   padding:'.38rem 0',
-                  background:scanMode==='continuous'?'rgba(0,229,204,.12)':'rgba(255,255,255,.04)',
-                  border:`1px solid ${scanMode==='continuous'?'#00e5cc55':'rgba(255,255,255,.1)'}`,
-                  color:scanMode==='continuous'?'#00e5cc':'rgba(229,229,229,.44)',
+                  background:scanMode==='continuous'?'rgba(0,229,204,.12)':'var(--bg2)',
+                  border:`1px solid ${scanMode==='continuous'?'#00e5cc55':'var(--bdr)'}`,
+                  color:scanMode==='continuous'?'#00e5cc':'var(--txt1)',
                 }}>∞ Auto Scan</button>
               </div>
-              <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'rgba(229,229,229,.26)' }}>
+              <p style={{ margin:'4px 0 0', fontSize:'.57rem', color:'var(--txt2)' }}>
                 {scanMode==='once'?'Fires once then stops':'Runs until manually stopped'}
               </p>
             </div>
@@ -916,34 +998,34 @@ export default function BulkTraderPage() {
         </div>
 
         {/* RIGHT: Trade history */}
-        <div style={{ width:212, flexShrink:0, borderLeft:'1px solid rgba(255,255,255,.07)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.18)' }}>
-          <div style={{ padding:'.52rem .62rem', borderBottom:'1px solid rgba(255,255,255,.06)', flexShrink:0, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            <span style={{ fontSize:'.78rem', fontWeight:800, color:'#e5e5e5' }}>Trade History</span>
-            <span style={{ fontSize:'.6rem', color:'rgba(229,229,229,.28)' }}>{trades.length>0?trades.length:''}</span>
+        <div style={{ width:212, flexShrink:0, borderLeft:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.18)' }}>
+          <div style={{ padding:'.52rem .62rem', borderBottom:'1px solid var(--bdr)', flexShrink:0, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span style={{ fontSize:'.78rem', fontWeight:800, color:'var(--txt0)' }}>Trade History</span>
+            <span style={{ fontSize:'.6rem', color:'var(--txt2)' }}>{trades.length>0?trades.length:''}</span>
           </div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 52px 28px 52px', gap:2, padding:'.23rem .38rem', borderBottom:'1px solid rgba(255,255,255,.04)', flexShrink:0 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 52px 28px 52px', gap:2, padding:'.23rem .38rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
             {['Type','Stake','','P&L'].map((h,i)=>(
-              <span key={i} style={{ fontSize:'.55rem', color:'rgba(229,229,229,.23)', fontWeight:700, textTransform:'uppercase', textAlign:i>=2?'center':i===1?'right':'left' as const }}>{h}</span>
+              <span key={i} style={{ fontSize:'.55rem', color:'var(--txt2)', fontWeight:700, textTransform:'uppercase', textAlign:i>=2?'center':i===1?'right':'left' as const }}>{h}</span>
             ))}
           </div>
           <div style={{ flex:1, overflowY:'auto', padding:'.12rem' }}>
             {trades.length===0
-              ?<div style={{ padding:'2rem .8rem', textAlign:'center', color:'rgba(229,229,229,.13)', fontSize:'.7rem' }}>No trades yet.</div>
+              ?<div style={{ padding:'2rem .8rem', textAlign:'center', color:'var(--txt2)', fontSize:'.7rem' }}>No trades yet.</div>
               :trades.map(t=>{
                 const short  = t.contractType.replace('DIGIT','')
                 const mkt    = MARKETS.find(m=>m.symbol===t.symbol)?.label.replace('Volatility ','V') ?? t.symbol
-                const pnlClr = t.won===null?'#FCA311':t.won?'#22c55e':'#ef4444'
-                const pnlTxt = t.won===null?'…':`${(t.profit??0)>=0?'+':''}${fmt2(t.profit??0)}`
-                const srcClr = t.source==='recovery'?'#FCA311':t.source==='scanner'?'#00e5cc':'rgba(229,229,229,.8)'
+                const pnlClr = t.failed?'var(--txt1)':t.won===null?'#FCA311':t.won?'#22c55e':'#ef4444'
+                const pnlTxt = t.failed?'rejected':t.won===null?'…':`${(t.profit??0)>=0?'+':''}${fmt2(t.profit??0)}`
+                const srcClr = t.source==='recovery'?'#FCA311':t.source==='scanner'?'#00e5cc':'var(--txt0)'
                 return (
                   <div key={t.id} className="hr-row" style={{ animation:'fadeIn .18s ease' }}>
                     <div style={{ minWidth:0 }}>
                       <div style={{ fontSize:'.68rem', fontWeight:700, color:srcClr, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{short}{t.source==='recovery'?<span style={{ fontSize:'.54rem', marginLeft:2, opacity:.7 }}>R</span>:null}</div>
-                      <div style={{ fontSize:'.55rem', color:'rgba(229,229,229,.23)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{mkt}</div>
+                      <div style={{ fontSize:'.55rem', color:'var(--txt2)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{mkt}</div>
                     </div>
-                    <div style={{ textAlign:'right', fontSize:'.67rem', color:'rgba(229,229,229,.43)', fontVariantNumeric:'tabular-nums' }}>{fmt2(t.stake)}</div>
+                    <div style={{ textAlign:'right', fontSize:'.67rem', color:'var(--txt1)', fontVariantNumeric:'tabular-nums' }}>{fmt2(t.stake)}</div>
                     <div style={{ textAlign:'center' }}>
-                      {t.won===null?<span style={{ color:'#FCA311', fontSize:'.58rem' }}>●</span>:t.won?<span style={{ color:'#22c55e', fontSize:'.58rem' }}>✓</span>:<span style={{ color:'#ef4444', fontSize:'.58rem' }}>✗</span>}
+                      {t.failed?<span style={{ color:'var(--txt1)', fontSize:'.58rem' }}>⊘</span>:t.won===null?<span style={{ color:'#FCA311', fontSize:'.58rem' }}>●</span>:t.won?<span style={{ color:'#22c55e', fontSize:'.58rem' }}>✓</span>:<span style={{ color:'#ef4444', fontSize:'.58rem' }}>✗</span>}
                     </div>
                     <div style={{ textAlign:'right', fontSize:'.68rem', fontWeight:700, color:pnlClr, fontVariantNumeric:'tabular-nums' }}>{pnlTxt}</div>
                   </div>
@@ -951,8 +1033,8 @@ export default function BulkTraderPage() {
               })}
           </div>
           {trades.length>0&&(
-            <div style={{ padding:'.38rem', borderTop:'1px solid rgba(255,255,255,.05)', flexShrink:0 }}>
-              <button onClick={()=>setTrades([])} style={{ width:'100%', padding:'.28rem', borderRadius:6, cursor:'pointer', background:'rgba(255,255,255,.04)', border:'1px solid rgba(255,255,255,.07)', color:'rgba(229,229,229,.28)', fontSize:'.67rem' }}>
+            <div style={{ padding:'.38rem', borderTop:'1px solid var(--bdr)', flexShrink:0 }}>
+              <button onClick={()=>setTrades([])} style={{ width:'100%', padding:'.28rem', borderRadius:6, cursor:'pointer', background:'var(--bg2)', border:'1px solid var(--bdr)', color:'var(--txt2)', fontSize:'.67rem' }}>
                 Clear history
               </button>
             </div>
