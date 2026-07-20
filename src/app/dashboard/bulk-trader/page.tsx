@@ -97,45 +97,6 @@ function detectPrimary(digits: number[], persistCount: number): ScanResult {
 }
 
 /**
- * RECOVERY over/under detection — DIGITOVER 3 and DIGITUNDER 6 only.
- * Natural win rate for both = 60%.  Fires only at composite ≥ 80 (high confidence).
- * Activated only after a scanner trade settles as a loss.
- */
-function detectRecovery(digits: number[], persistCount: number): ScanResult {
-  if (digits.length < 30) return NO_SIGNAL
-  const d60 = digits.slice(-60)
-  const d30 = digits.slice(-30)
-  const entropy      = shannonEntropy(d60)
-  const entropyBonus = Math.min(15, Math.max(0, Math.round((3.32 - entropy) / 3.32 * 30)))
-  const persistBonus = Math.min(10, persistCount * 5)
-
-  let bestScore = 79   // must beat 80
-  let best: ScanResult = NO_SIGNAL
-
-  const candidates: Array<{ nat: number; obs60: number; obs30: number; ct: 'DIGITUNDER'|'DIGITOVER'; b: number; label: string }> = [
-    { nat: 0.60, obs60: d60.filter(d => d > 3).length / d60.length, obs30: d30.filter(d => d > 3).length / d30.length, ct: 'DIGITOVER',  b: 3, label: 'Over 3'  },
-    { nat: 0.60, obs60: d60.filter(d => d < 6).length / d60.length, obs30: d30.filter(d => d < 6).length / d30.length, ct: 'DIGITUNDER', b: 6, label: 'Under 6' },
-  ]
-
-  for (const c of candidates) {
-    if (c.obs60 > c.nat + 0.05 && c.obs30 > c.nat + 0.02) {
-      const base  = Math.min(50, (c.obs60 - c.nat) * 600)
-      const agree = Math.min(25, (c.obs30 - c.nat) * 500)
-      const score = Math.min(100, base + agree + entropyBonus + persistBonus)
-      if (score > bestScore) {
-        bestScore = score
-        best = {
-          signal: true, score: Math.round(score), contractType: c.ct, barrier: c.b,
-          reason: `[RECOVERY] ${c.label} — ${Math.round(c.obs60*100)}% (60t) / ${Math.round(c.obs30*100)}% (30t) vs 60% natural`,
-          detail: `base=${Math.round(base)} agree=${Math.round(agree)} entropy=${entropyBonus} persist=${persistBonus}`,
-        }
-      }
-    }
-  }
-  return best
-}
-
-/**
  * Even/Odd and Matches/Differs detection (unchanged from v196).
  */
 function detectSignal(
@@ -203,7 +164,7 @@ function detectSignal(
 interface TradeRow {
   id: number; ts: number; contractType: string; symbol: string
   stake: number; payout: number; won: boolean | null; profit: number | null
-  source: 'manual' | 'scanner' | 'recovery'
+  source: 'manual' | 'scanner'
   /** True when the proposal/buy request itself was rejected by Deriv — no money was won or lost. */
   failed?: boolean
 }
@@ -258,8 +219,7 @@ export default function BulkTraderPage() {
   const tradeIdRef = useRef(0)
 
   const [scannerActive, setScannerActive] = useState(false)
-  const [scannerStatus, setScannerStatus] = useState<'idle'|'scanning'|'fired'|'recovery'>('idle')
-  const [recoveryActive, setRecoveryActive] = useState(false)
+  const [scannerStatus, setScannerStatus] = useState<'idle'|'scanning'|'fired'>('idle')
   const [logLines,       setLogLines]       = useState<LogLine[]>([])
   const logIdRef        = useRef(0)
   const logEndRef       = useRef<HTMLDivElement>(null)
@@ -271,11 +231,6 @@ export default function BulkTraderPage() {
   /* primary strategy refs (UNDER 8 / OVER 1) */
   const primaryCooldowns = useRef<Map<string,number>>(new Map())
   const primaryPersists  = useRef<Map<string,number>>(new Map())
-
-  /* recovery strategy refs (OVER 3 / UNDER 6) — activates after first loss */
-  const recoveryMode      = useRef(false)
-  const recoveryCooldowns = useRef<Map<string,number>>(new Map())
-  const recoveryPersists  = useRef<Map<string,number>>(new Map())
 
   /* general cooldowns for even_odd / matches_differs */
   const generalCooldowns = useRef<Map<string,number>>(new Map())
@@ -469,7 +424,6 @@ export default function BulkTraderPage() {
 
   const startScanner = useCallback(async () => {
     setScannerActive(true); setScannerStatus('scanning'); setLogLines([])
-    recoveryMode.current = false; setRecoveryActive(false)
     scanPendingCount.current = 0
     scanTradeTypeRef.current = tradeType
     scanStakeRef.current     = stake
@@ -480,8 +434,7 @@ export default function BulkTraderPage() {
     const isOU = tradeType === 'over_under'
     log('━━━ AI BULK SCANNER V2 ━━━', 'cyan')
     if (isOU) {
-      log('Mode: Over/Under — PRIMARY: Under 8 + Over 1 (80% natural)', 'white')
-      log('RECOVERY: Over 3 + Under 6 activates after first loss (score≥80)', 'amber')
+      log('Mode: Over/Under — Under 8 + Over 1 (80% natural)', 'white')
     } else {
       log(`Mode: ${tradeType === 'even_odd' ? 'Even / Odd' : 'Matches / Differs (DIGITDIFF, auto-digit)'}`, 'white')
     }
@@ -490,10 +443,9 @@ export default function BulkTraderPage() {
     const bws = await connectBotWs()
     if (!bws) { log('ERROR: trading WS failed', 'red'); setScannerActive(false); setScannerStatus('idle'); return }
     scannerBotWsRef.current = bws
-    const scanPending  = new Map<number,{rowId:number;stake:number;source:TradeRow['source']}>()
+    const scanPending  = new Map<number,{rowId:number;stake:number}>()
     const scanReqToRow = new Map<number,number>()
     const scanCidToStake = new Map<number,number>()
-    const scanCidToSource = new Map<number,TradeRow['source']>()
 
     const scanFinishOne = () => {
       scanPendingCount.current = Math.max(0, scanPendingCount.current - 1)
@@ -509,10 +461,10 @@ export default function BulkTraderPage() {
     // proposal". A direct buy has no such subscription, so all of them fire truly
     // simultaneously. price is capped just above the stake since basis:'stake'
     // means the actual charge always ~equals the stake by definition.
-    const scanFireBuy = (ct: string, barrierVal: number|null, sym: string, rowId: number, source: TradeRow['source']) => {
+    const scanFireBuy = (ct: string, barrierVal: number|null, sym: string, rowId: number) => {
       const stakeVal = parseFloat(scanStakeRef.current) || 1
       const reqId = ++reqIdRef.current
-      scanPending.set(reqId, { rowId, stake:stakeVal, source })
+      scanPending.set(reqId, { rowId, stake:stakeVal })
       bws.send(JSON.stringify({
         buy:'1', price:+(stakeVal * 1.02).toFixed(2), req_id:reqId,
         parameters: {
@@ -537,7 +489,6 @@ export default function BulkTraderPage() {
             const cid = (msg.buy as Record<string,unknown>).contract_id as number
             scanReqToRow.set(cid, ri.rowId)
             scanCidToStake.set(cid, ri.stake)
-            scanCidToSource.set(cid, ri.source)
             log(`  ✓ Contract #${cid} placed`, 'green')
           }
         }
@@ -548,18 +499,10 @@ export default function BulkTraderPage() {
         const payout = Math.abs(tx.amount as number ?? 0)
         const rowId  = scanReqToRow.get(cid)
         const stk    = scanCidToStake.get(cid) ?? (parseFloat(scanStakeRef.current) || 1)
-        const src    = scanCidToSource.get(cid) ?? 'scanner'
         if (rowId != null) {
           settleTrade(rowId, payout, stk)
           const won = payout > stk
-          const tag = src === 'recovery' ? '[RECOVERY] ' : ''
-          log(`  ${won ? '\u2713 WIN' : '\u2717 LOSS'} ${tag}${won?'+':''}${fmt2(payout-stk)} ${scanCurrencyRef.current}`, won ? 'green' : 'red')
-          if (!won && !recoveryMode.current && scanTradeTypeRef.current === 'over_under') {
-            recoveryMode.current = true
-            setRecoveryActive(true)
-            log('\u2501\u2501 RECOVERY MODE ACTIVATED \u2501\u2501', 'amber')
-            log('  Now scanning Over 3 / Under 6 alongside primary (score\u226580)', 'amber')
-          }
+          log(`  ${won ? '\u2713 WIN' : '\u2717 LOSS'} ${won?'+':''}${fmt2(payout-stk)} ${scanCurrencyRef.current}`, won ? 'green' : 'red')
           scanFinishOne()
         }
       }
@@ -572,7 +515,6 @@ export default function BulkTraderPage() {
     SCAN_SYMBOLS.forEach(sym => {
       scannerDigits.current.set(sym, [])
       primaryPersists.current.set(sym, 0)
-      recoveryPersists.current.set(sym, 0)
       generalPersists.current.set(sym, 0)
       let localPipSize = 2, tickCount = 0
 
@@ -624,7 +566,7 @@ export default function BulkTraderPage() {
                     scanPendingCount.current += n
                     for (let i = 0; i < n; i++) {
                       const rowId = addTrade(pResult.contractType, sym, stakeVal, 'scanner')
-                      scanFireBuy(pResult.contractType, pResult.barrier, sym, rowId, 'scanner')
+                      scanFireBuy(pResult.contractType, pResult.barrier, sym, rowId)
                     }
                     // One Shot: stop feeds now; bot WS stays open until all trades settle
                     if (scanModeRef.current === 'once') stopScannerRef.current?.()
@@ -637,42 +579,6 @@ export default function BulkTraderPage() {
               }
             }
 
-            /* RECOVERY: OVER 3 / UNDER 6 (only after a loss) */
-            if (recoveryMode.current) {
-              const rCool = recoveryCooldowns.current.get(sym) ?? 0
-              if (Date.now() - rCool >= 25_000) {
-                const rPersist = recoveryPersists.current.get(sym) ?? 0
-                const rResult  = detectRecovery(digits, rPersist)
-                if (rResult.signal && rResult.contractType) {
-                  recoveryPersists.current.set(sym, rPersist + 1)
-                  if (rPersist >= 1) {
-                    const mkt = MARKETS.find(m => m.symbol === sym)?.label ?? sym
-                    const dir = rResult.contractType.replace('DIGIT','')
-                    log(`━━ ${mkt} [RECOVERY] ━━`, 'purple')
-                    log(`  ${rResult.reason}`, 'amber')
-                    log(`  Score: ${rResult.score}/100  [${rResult.detail}]`, 'white')
-                    log(`  → ${scanCountRef.current}× ${dir} ${rResult.barrier} @ ${scanStakeRef.current} ${scanCurrencyRef.current}`, 'green')
-                    recoveryCooldowns.current.set(sym, Date.now())
-                    recoveryPersists.current.set(sym, 0)
-                    setScannerStatus('recovery'); setTimeout(() => setScannerStatus('scanning'), 3000)
-                    if (scannerBotWsRef.current?.readyState === WebSocket.OPEN) {
-                      const n = scanCountRef.current
-                      const stakeVal = parseFloat(scanStakeRef.current) || 1
-                      scanPendingCount.current += n
-                      for (let i = 0; i < n; i++) {
-                        const rowId = addTrade(rResult.contractType, sym, stakeVal, 'recovery')
-                        scanFireBuy(rResult.contractType, rResult.barrier, sym, rowId, 'recovery')
-                      }
-                      if (scanModeRef.current === 'once') stopScannerRef.current?.()
-                    }
-                  } else {
-                    log(`  ${sym} recovery building (${rPersist+1}/2, score=${rResult.score})`, 'amber')
-                  }
-                } else {
-                  if (rPersist > 0) recoveryPersists.current.set(sym, 0)
-                }
-              }
-            }
             return
           }
 
@@ -700,7 +606,7 @@ export default function BulkTraderPage() {
                 scanPendingCount.current += n
                 for (let i = 0; i < n; i++) {
                   const rowId = addTrade(result.contractType, sym, stakeVal, 'scanner')
-                  scanFireBuy(result.contractType, result.barrier, sym, rowId, 'scanner')
+                  scanFireBuy(result.contractType, result.barrier, sym, rowId)
                 }
                 if (scanModeRef.current === 'once') stopScannerRef.current?.()
               }
@@ -717,13 +623,11 @@ export default function BulkTraderPage() {
   }, [tradeType, stake, bulkCount, currency, scanMode, connectBotWs, addTrade, settleTrade, log, failTrade])
 
   const stopScanner = useCallback((keepBotWs = false) => {
-    setScannerActive(false); setScannerStatus('idle'); setRecoveryActive(false)
-    recoveryMode.current = false
+    setScannerActive(false); setScannerStatus('idle')
     log('━━━ SCANNER STOPPED ━━━', 'amber')
     scannerWsRefs.current.forEach(ws => { try { ws.close() } catch { /**/ } })
     scannerWsRefs.current.clear(); scannerDigits.current.clear()
     primaryCooldowns.current.clear(); primaryPersists.current.clear()
-    recoveryCooldowns.current.clear(); recoveryPersists.current.clear()
     generalCooldowns.current.clear(); generalPersists.current.clear()
     // keepBotWs=true (One Shot): bot WS stays open to receive settle events; closed by settle handler
     if (!keepBotWs) {
@@ -758,31 +662,25 @@ export default function BulkTraderPage() {
         .hr-row:hover{background:var(--bg2)}
         @keyframes fadeIn{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
         @keyframes scanPulse{0%,100%{opacity:1}50%{opacity:.2}}
-        @keyframes recoveryGlow{0%,100%{box-shadow:0 0 0 rgba(252,163,17,0)}50%{box-shadow:0 0 12px rgba(252,163,17,.3)}}
       `}</style>
 
       <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
 
         {/* LEFT: Scanner */}
-        <div style={{ width:250, flexShrink:0, borderRight:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'var(--bg1)', animation:recoveryActive?'recoveryGlow 2s ease infinite':undefined }}>
+        <div style={{ width:250, flexShrink:0, borderRight:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'var(--bg1)' }}>
           <div style={{ padding:'.58rem .72rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'.35rem' }}>
               <span style={{ fontSize:'.8rem', fontWeight:800, color:'var(--txt0)' }}>AI Scanner V2</span>
               <span style={{
                 padding:'.18rem .5rem', borderRadius:20, fontSize:'.61rem', fontWeight:700,
-                background:scannerStatus==='idle'?'var(--bg2)':scannerStatus==='recovery'?'rgba(252,163,17,.15)':scannerStatus==='scanning'?'#00e5cc18':'rgba(34,197,94,.15)',
-                color:scannerStatus==='idle'?'var(--txt2)':scannerStatus==='recovery'?'#FCA311':scannerStatus==='scanning'?'#00e5cc':'#22c55e',
-                border:`1px solid ${scannerStatus==='idle'?'var(--bdr)':scannerStatus==='recovery'?'rgba(252,163,17,.3)':scannerStatus==='scanning'?'#00e5cc44':'rgba(34,197,94,.3)'}`,
+                background:scannerStatus==='idle'?'var(--bg2)':scannerStatus==='scanning'?'#00e5cc18':'rgba(34,197,94,.15)',
+                color:scannerStatus==='idle'?'var(--txt2)':scannerStatus==='scanning'?'#00e5cc':'#22c55e',
+                border:`1px solid ${scannerStatus==='idle'?'var(--bdr)':scannerStatus==='scanning'?'#00e5cc44':'rgba(34,197,94,.3)'}`,
               }}>
-                {scannerActive && <span style={{ width:5,height:5,borderRadius:'50%',background:scannerStatus==='recovery'?'#FCA311':'#22c55e',display:'inline-block',marginRight:4,animation:'scanPulse 1.2s ease infinite' }}/>}
-                {scannerStatus==='idle'?'IDLE':scannerStatus==='scanning'?'SCANNING':scannerStatus==='recovery'?'RECOVERY':'FIRED'}
+                {scannerActive && <span style={{ width:5,height:5,borderRadius:'50%',background:'#22c55e',display:'inline-block',marginRight:4,animation:'scanPulse 1.2s ease infinite' }}/>}
+                {scannerStatus==='idle'?'IDLE':scannerStatus==='scanning'?'SCANNING':'FIRED'}
               </span>
             </div>
-            {recoveryActive && (
-              <div style={{ background:'rgba(252,163,17,.08)', border:'1px solid rgba(252,163,17,.25)', borderRadius:6, padding:'.28rem .5rem', marginBottom:'.35rem', fontSize:'.63rem', color:'#FCA311', fontWeight:700 }}>
-                ⚡ Recovery: Over 3 / Under 6 active
-              </div>
-            )}
             <button className="bt-btn" onClick={scannerActive?()=>stopScanner():startScanner}
               style={{ width:'100%', padding:'.38rem', fontSize:'.77rem', background:scannerActive?'rgba(239,68,68,.12)':'#00e5cc18', color:scannerActive?'#ef4444':'#00e5cc', border:`1px solid ${scannerActive?'rgba(239,68,68,.3)':'#00e5cc44'}` }}>
               {scannerActive?'■  Stop Scanner':'▶  Start Scanner'}
@@ -806,13 +704,8 @@ export default function BulkTraderPage() {
           {tradeType === 'over_under' && scannerActive && (
             <div style={{ padding:'.38rem .58rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
               <div style={{ fontSize:'.58rem', color:'var(--txt1)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Strategy</div>
-              <div style={{ display:'flex', gap:4 }}>
-                <div style={{ flex:1, background:'rgba(34,197,94,.08)', border:'1px solid rgba(34,197,94,.2)', borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:'#22c55e', fontWeight:700 }}>
-                  ● Under 8 / Over 1
-                </div>
-                <div style={{ flex:1, background:recoveryActive?'rgba(252,163,17,.1)':'var(--bg2)', border:`1px solid ${recoveryActive?'rgba(252,163,17,.28)':'var(--bdr)'}`, borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:recoveryActive?'#FCA311':'var(--txt2)', fontWeight:700 }}>
-                  {recoveryActive?'⚡ Over 3 / Under 6':'○ Recovery off'}
-                </div>
+              <div style={{ background:'rgba(34,197,94,.08)', border:'1px solid rgba(34,197,94,.2)', borderRadius:5, padding:'.22rem .35rem', fontSize:'.6rem', color:'#22c55e', fontWeight:700 }}>
+                ● Under 8 / Over 1
               </div>
             </div>
           )}
@@ -828,7 +721,7 @@ export default function BulkTraderPage() {
             <div ref={logEndRef}/>
           </div>
           <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', background:'var(--bg2)', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-            <span style={{ fontSize:'.56rem', color:'var(--txt2)' }}>primary≥40 · recovery≥80 · 20s cd</span>
+            <span style={{ fontSize:'.56rem', color:'var(--txt2)' }}>score≥40 · 20s cd</span>
             <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'var(--txt2)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
           </div>
         </div>
@@ -1006,11 +899,11 @@ export default function BulkTraderPage() {
                 const mkt    = MARKETS.find(m=>m.symbol===t.symbol)?.label.replace('Volatility ','V') ?? t.symbol
                 const pnlClr = t.failed?'var(--txt1)':t.won===null?'#FCA311':t.won?'#22c55e':'#ef4444'
                 const pnlTxt = t.failed?'rejected':t.won===null?'…':`${(t.profit??0)>=0?'+':''}${fmt2(t.profit??0)}`
-                const srcClr = t.source==='recovery'?'#FCA311':t.source==='scanner'?'#00e5cc':'var(--txt0)'
+                const srcClr = t.source==='scanner'?'#00e5cc':'var(--txt0)'
                 return (
                   <div key={t.id} className="hr-row" style={{ animation:'fadeIn .18s ease' }}>
                     <div style={{ minWidth:0 }}>
-                      <div style={{ fontSize:'.68rem', fontWeight:700, color:srcClr, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{short}{t.source==='recovery'?<span style={{ fontSize:'.54rem', marginLeft:2, opacity:.7 }}>R</span>:null}</div>
+                      <div style={{ fontSize:'.68rem', fontWeight:700, color:srcClr, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{short}</div>
                       <div style={{ fontSize:'.55rem', color:'var(--txt2)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{mkt}</div>
                     </div>
                     <div style={{ textAlign:'right', fontSize:'.67rem', color:'var(--txt1)', fontVariantNumeric:'tabular-nums' }}>{fmt2(t.stake)}</div>
