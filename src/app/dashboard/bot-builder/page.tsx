@@ -571,7 +571,7 @@ export default function BotBuilderPage() {
         <span style={{ fontSize: 13, fontWeight: 800, color: txt0 }}>⚙ Bot Builder</span>
         <div style={{ flex: 1 }} />
         {lastResult && (
-          <div style={{ padding: '2px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: lastResult === 'won' ? `${green}22` : `${red}22`, color: lastResult === 'won' ? green : red, border: `1px solid ${lastResult === 'won' ? green : red}` }}>
+          <div style={{ padding: '2px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: lastResult === 'won' ? `color-mix(in srgb, ${green} 13%, transparent)` : `color-mix(in srgb, ${red} 13%, transparent)`, color: lastResult === 'won' ? green : red, border: `1px solid ${lastResult === 'won' ? green : red}` }}>
             {lastResult === 'won' ? '✓ Won' : '✗ Lost'}
           </div>
         )}
@@ -603,7 +603,7 @@ export default function BotBuilderPage() {
               </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {tickCountdown > 0 && (
-                  <span style={{ fontSize: 9, color: amber, fontWeight: 700, background: amber + '22', border: `1px solid ${amber}44`, borderRadius: 4, padding: '1px 6px' }}>
+                  <span style={{ fontSize: 9, color: amber, fontWeight: 700, background: `color-mix(in srgb, ${amber} 13%, transparent)`, border: `1px solid color-mix(in srgb, ${amber} 27%, transparent)`, borderRadius: 4, padding: '1px 6px' }}>
                     next in {tickCountdown}
                   </span>
                 )}
@@ -634,10 +634,10 @@ export default function BotBuilderPage() {
                         width: 24, height: 24, borderRadius: 5, flexShrink: 0,
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         fontSize: 10, fontWeight: 700,
-                        background: isLatest ? color + '40' : color + '1a',
-                        border: `1px solid ${isLatest ? color + 'cc' : color + '44'}`,
+                        background: isLatest ? color : `color-mix(in srgb, ${color} 12%, ${bg1})`,
+                        border: `1px solid color-mix(in srgb, ${color} ${isLatest ? 90 : 40}%, transparent)`,
                         color: isLatest ? '#fff' : color,
-                        boxShadow: isLatest ? `0 0 7px ${color}88` : 'none',
+                        boxShadow: isLatest ? `0 0 7px color-mix(in srgb, ${color} 53%, transparent)` : 'none',
                         transform: isLatest ? 'scale(1.18)' : 'scale(1)',
                         transition: 'transform 0.12s, box-shadow 0.12s',
                         position: 'relative', zIndex: isLatest ? 1 : 0,
@@ -666,7 +666,7 @@ export default function BotBuilderPage() {
           {/* Block 1 — Market & Trade */}
           <BotBlock
             id="trade" label="Market & Trade" icon="⊞"
-            accent={green} accentBg="#0a1f0e"
+            accent={green} accentBg={`color-mix(in srgb, ${green} 14%, ${bg1})`}
             open={openBlocks.has('trade')} onToggle={() => toggleBlock('trade')}
             summary={`${mktInfo?.label ?? market} · ${ctInfo?.label ?? contractType}${needsBarrier ? ` ${barrier}` : ''} · ${duration}t`}
           >
@@ -712,7 +712,7 @@ export default function BotBuilderPage() {
           {/* Block 2 — Purchase */}
           <BotBlock
             id="purchase" label="Purchase" icon="💰"
-            accent={blue} accentBg="#0a1020"
+            accent={blue} accentBg={`color-mix(in srgb, ${blue} 14%, ${bg1})`}
             open={openBlocks.has('purchase')} onToggle={() => toggleBlock('purchase')}
             summary={`Initial stake: ${initialStake} ${currency}`}
           >
@@ -733,7 +733,7 @@ export default function BotBuilderPage() {
           {/* Block 3 — Staking Strategy */}
           <BotBlock
             id="staking" label="Staking Strategy" icon="↻"
-            accent={amber} accentBg="#1a1200"
+            accent={amber} accentBg={`color-mix(in srgb, ${amber} 14%, ${bg1})`}
             open={openBlocks.has('staking')} onToggle={() => toggleBlock('staking')}
             summary={STAKING_LABELS[staking]}
           >
@@ -744,7 +744,7 @@ export default function BotBuilderPage() {
                   onClick={() => !running && setStaking(key)}
                   style={{
                     padding: '7px 10px', fontSize: 11, fontWeight: 600, textAlign: 'left',
-                    background: staking === key ? `${amber}18` : bg2,
+                    background: staking === key ? `color-mix(in srgb, ${amber} 9%, transparent)` : bg2,
                     border: `1px solid ${staking === key ? amber : bdr}`,
                     borderRadius: 6, color: staking === key ? amber : txt1,
                     cursor: running ? 'not-allowed' : 'pointer',
@@ -803,7 +803,7 @@ export default function BotBuilderPage() {
           {/* Block 4 — Stop Conditions */}
           <BotBlock
             id="stop" label="Stop Conditions" icon="⬛"
-            accent={red} accentBg="#1a0808"
+            accent={red} accentBg={`color-mix(in srgb, ${red} 14%, ${bg1})`}
             open={openBlocks.has('stop')} onToggle={() => toggleBlock('stop')}
             summary={[tpOn && `TP +${tpAmt}`, slOn && `SL -${slAmt}`, mtOn && `Max ${mtAmt}`].filter(Boolean).join(' · ') || 'None active'}
           >

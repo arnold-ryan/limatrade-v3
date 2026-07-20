@@ -18,9 +18,12 @@ const MARKETS = [
   { symbol: 'R_10',    label: 'Volatility 10'        },
 ]
 const SCAN_SYMBOLS = ['1HZ100V', '1HZ75V', '1HZ50V', 'R_100', 'R_75']
+// Deeper shades than the usual Tailwind 500s — the brighter versions (yellow,
+// cyan, green, teal especially) fail contrast against a white page background.
+// These hold up on both a light and dark surface.
 const DIGIT_COLORS = [
-  '#ef4444','#f97316','#eab308','#22c55e','#14b8a6',
-  '#3b82f6','#8b5cf6','#ec4899','#06b6d4','#FCA311',
+  '#dc2626','#c2410c','#a16207','#16a34a','#0d9488',
+  '#3b82f6','#8b5cf6','#db2777','#0e7490','#FCA311',
 ]
 
 function lastDigit(price: number, pipSize = 2): number {
@@ -217,13 +220,13 @@ function DigitGauge({ digit, count, total, liveDigit }: {
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:2 }}>
       <svg width="42" height="42" viewBox="0 0 42 42">
         <circle cx="21" cy="21" r={r} fill="none" stroke="var(--bg2)" strokeWidth="3.5"/>
-        <circle cx="21" cy="21" r={r} fill="none" stroke={live ? '#fff' : DIGIT_COLORS[digit]}
+        <circle cx="21" cy="21" r={r} fill="none" stroke={live ? 'var(--txt0)' : DIGIT_COLORS[digit]}
           strokeWidth={live ? 5 : 3.5}
           strokeDasharray={`${dash} ${circ - dash}`} strokeDashoffset={circ / 4}
           strokeLinecap="round"
           style={{ transition:'stroke-dasharray .3s', filter:live?`drop-shadow(0 0 5px ${DIGIT_COLORS[digit]})`:'none' }}/>
         <text x="21" y="25" textAnchor="middle" fontSize="11" fontWeight="800"
-          fill={live ? '#fff' : DIGIT_COLORS[digit]}>{digit}</text>
+          fill={live ? 'var(--txt0)' : DIGIT_COLORS[digit]}>{digit}</text>
       </svg>
       <span style={{ fontSize:'.6rem', color:'var(--txt1)' }}>{pct.toFixed(0)}%</span>
     </div>
@@ -774,7 +777,7 @@ export default function BulkTraderPage() {
       <div style={{ display:'flex', height:'100%', overflow:'hidden' }}>
 
         {/* LEFT: Scanner */}
-        <div style={{ width:250, flexShrink:0, borderRight:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.2)', animation:recoveryActive?'recoveryGlow 2s ease infinite':undefined }}>
+        <div style={{ width:250, flexShrink:0, borderRight:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'var(--bg1)', animation:recoveryActive?'recoveryGlow 2s ease infinite':undefined }}>
           <div style={{ padding:'.58rem .72rem', borderBottom:'1px solid var(--bdr)', flexShrink:0 }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'.35rem' }}>
               <span style={{ fontSize:'.8rem', fontWeight:800, color:'var(--txt0)' }}>AI Scanner V2</span>
@@ -829,17 +832,17 @@ export default function BulkTraderPage() {
 
           <div style={{ flex:1, overflowY:'auto', padding:'.45rem .62rem', fontFamily:"'SF Mono','Fira Code','Consolas',monospace", fontSize:'.67rem', lineHeight:1.85, background:'#040b0a' }}>
             {logLines.length===0
-              ? <p style={{ color:'var(--txt2)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
+              ? <p style={{ color:'rgba(229,229,229,.3)', margin:0 }}>{scannerActive?'Monitoring markets…':'Start the scanner to begin.'}</p>
               : logLines.map(l => (
-                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'var(--txt0)' }}>
-                  <span style={{ color:'var(--txt2)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
+                <div key={l.id} style={{ color:l.color==='green'?'#22c55e':l.color==='amber'?'#FCA311':l.color==='red'?'#ef4444':l.color==='cyan'?'#00e5cc':l.color==='purple'?'#a78bfa':'rgba(229,229,229,.8)' }}>
+                  <span style={{ color:'rgba(229,229,229,.3)', marginRight:'.28rem', fontSize:'.58rem' }}>{fmtTime(l.ts)}</span>{l.text}
                 </div>
               ))}
             <div ref={logEndRef}/>
           </div>
-          <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
-            <span style={{ fontSize:'.56rem', color:'var(--txt2)' }}>primary≥40 · recovery≥80 · 20s cd</span>
-            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'var(--txt2)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
+          <div style={{ padding:'.3rem .55rem', borderTop:'1px solid #00e5cc14', background:'#040b0a', display:'flex', justifyContent:'space-between', alignItems:'center', flexShrink:0 }}>
+            <span style={{ fontSize:'.56rem', color:'rgba(229,229,229,.3)' }}>primary≥40 · recovery≥80 · 20s cd</span>
+            <button onClick={()=>setLogLines([])} style={{ background:'transparent', border:'none', color:'rgba(229,229,229,.3)', cursor:'pointer', fontSize:'.6rem' }}>Clear</button>
           </div>
         </div>
 
@@ -998,7 +1001,7 @@ export default function BulkTraderPage() {
         </div>
 
         {/* RIGHT: Trade history */}
-        <div style={{ width:212, flexShrink:0, borderLeft:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'rgba(0,0,0,.18)' }}>
+        <div style={{ width:212, flexShrink:0, borderLeft:'1px solid var(--bdr)', display:'flex', flexDirection:'column', background:'var(--bg1)' }}>
           <div style={{ padding:'.52rem .62rem', borderBottom:'1px solid var(--bdr)', flexShrink:0, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
             <span style={{ fontSize:'.78rem', fontWeight:800, color:'var(--txt0)' }}>Trade History</span>
             <span style={{ fontSize:'.6rem', color:'var(--txt2)' }}>{trades.length>0?trades.length:''}</span>

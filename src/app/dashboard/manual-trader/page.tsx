@@ -292,8 +292,8 @@ function TradeControls({
             padding: '0.58rem 0.4rem', borderRadius: '8px', border: 'none',
             fontWeight: 800, fontSize: '0.78rem', letterSpacing: '0.02em',
             cursor: can ? 'pointer' : 'not-allowed', transition: 'all 0.15s',
-            background: can ? color : `${color}22`,
-            color: can ? '#fff' : `${color}55`,
+            background: can ? color : `color-mix(in srgb, ${color} 13%, transparent)`,
+            color: can ? '#fff' : `color-mix(in srgb, ${color} 33%, transparent)`,
           }}>
             {isBuying ? '…' : `Buy ${label}`}
           </button>

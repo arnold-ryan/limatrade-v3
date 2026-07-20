@@ -1298,12 +1298,12 @@ export default function ChartsPage() {
                     width: 34, height: 34, borderRadius: '50%',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     fontSize: 12, fontWeight: 700, flexShrink: 0,
-                    background: isCurrent ? amber : isBarrier ? `${amber}22` : bg2,
+                    background: isCurrent ? amber : isBarrier ? `color-mix(in srgb, ${amber} 13%, transparent)` : bg2,
                     border: `2px solid ${isCurrent ? amber : isBarrier ? amber : bdr}`,
                     color: isCurrent ? '#000' : isBarrier ? amber : txt1,
                     cursor: tt.barrier ? 'pointer' : 'default',
                     transition: 'background 0.12s, border-color 0.12s',
-                    boxShadow: isCurrent ? `0 0 8px ${amber}88` : 'none',
+                    boxShadow: isCurrent ? `0 0 8px color-mix(in srgb, ${amber} 53%, transparent)` : 'none',
                   }}
                 >{d}</button>
               )
@@ -1361,7 +1361,7 @@ export default function ChartsPage() {
                   <span style={{ fontSize: 13, fontWeight: 800, color: sigRec.type === 'RISE' ? green : sigRec.type === 'FALL' ? red : green }}>
                     {sigRec.type === 'RISE' ? '↑ Rise' : sigRec.type === 'FALL' ? '↓ Fall' : sigRec.type === 'OVER' ? `Over ${sigRec.barrier}` : sigRec.type === 'UNDER' ? `Under ${sigRec.barrier}` : sigRec.type === 'EVEN' ? 'Even' : sigRec.type === 'ODD' ? 'Odd' : sigRec.type === 'MATCH' ? `Match ${sigRec.barrier}` : `Differ ${sigRec.barrier}`}
                   </span>
-                  <span style={{ fontSize: 10, background: `${green}22`, color: green, border: `1px solid ${green}55`, borderRadius: 4, padding: '1px 6px' }}>
+                  <span style={{ fontSize: 10, background: `color-mix(in srgb, ${green} 13%, transparent)`, color: green, border: `1px solid color-mix(in srgb, ${green} 33%, transparent)`, borderRadius: 4, padding: '1px 6px' }}>
                     +{(sigRec.edge * 100).toFixed(1)}% edge
                   </span>
                 </div>
@@ -1391,7 +1391,7 @@ export default function ChartsPage() {
               <div style={{
                 padding: '7px 10px', borderRadius: 6, marginBottom: 8, textAlign: 'center',
                 background: sigState === 'cooloff' ? 'rgba(230,180,41,0.06)' : bg0,
-                border: `1px solid ${sigState === 'cooloff' ? amber : sigState === 'waiting' ? `${green}44` : bdr}`,
+                border: `1px solid ${sigState === 'cooloff' ? amber : sigState === 'waiting' ? `color-mix(in srgb, ${green} 27%, transparent)` : bdr}`,
               }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: sigState === 'cooloff' ? amber : sigState === 'waiting' ? green : txt2, marginBottom: sigRec && sigState !== 'analyzing' ? 4 : 0 }}>
                   {sigState === 'analyzing' ? 'Analyzing…'
@@ -1403,8 +1403,8 @@ export default function ChartsPage() {
                   <div style={{
                     display: 'inline-flex', alignItems: 'center', gap: 5,
                     padding: '2px 8px', borderRadius: 4,
-                    background: sigState === 'cooloff' ? `${amber}18` : `${green}18`,
-                    border: `1px solid ${sigState === 'cooloff' ? `${amber}55` : `${green}55`}`,
+                    background: sigState === 'cooloff' ? `color-mix(in srgb, ${amber} 9%, transparent)` : `color-mix(in srgb, ${green} 9%, transparent)`,
+                    border: `1px solid ${sigState === 'cooloff' ? `color-mix(in srgb, ${amber} 33%, transparent)` : `color-mix(in srgb, ${green} 33%, transparent)`}`,
                   }}>
                     <span style={{ fontSize: 11, fontWeight: 700, color: sigState === 'cooloff' ? amber : green }}>
                       {sigRec.type === 'RISE' ? '↑ Rise' : sigRec.type === 'FALL' ? '↓ Fall' : sigRec.type === 'OVER' ? `Over ${sigRec.barrier}` : sigRec.type === 'UNDER' ? `Under ${sigRec.barrier}` : sigRec.type === 'EVEN' ? 'Even' : sigRec.type === 'ODD' ? 'Odd' : sigRec.type === 'MATCH' ? `Match ${sigRec.barrier}` : `Differ ${sigRec.barrier}`}
@@ -1427,8 +1427,8 @@ export default function ChartsPage() {
                   return (
                     <div key={d} style={{
                       padding: '4px 2px', borderRadius: 4, textAlign: 'center',
-                      background: isBest ? `${green}28` : isHot ? `${green}12` : isCold ? `${blue}12` : bg2,
-                      border: `1px solid ${isBest ? green : isHot ? `${green}55` : isCold ? `${blue}55` : bdr}`,
+                      background: isBest ? `color-mix(in srgb, ${green} 16%, transparent)` : isHot ? `color-mix(in srgb, ${green} 7%, transparent)` : isCold ? `color-mix(in srgb, ${blue} 7%, transparent)` : bg2,
+                      border: `1px solid ${isBest ? green : isHot ? `color-mix(in srgb, ${green} 33%, transparent)` : isCold ? `color-mix(in srgb, ${blue} 33%, transparent)` : bdr}`,
                       color: isBest ? green : isHot ? green : isCold ? blue : txt2,
                       transition: 'all 0.3s',
                     }}>
@@ -1449,8 +1449,8 @@ export default function ChartsPage() {
                   return (
                     <div key={key} style={{
                       padding: '5px 4px', borderRadius: 4, textAlign: 'center',
-                      background: isBest ? `${green}28` : isGood ? `${green}12` : isBad ? `${red}12` : bg2,
-                      border: `1px solid ${isBest ? green : isGood ? `${green}55` : isBad ? `${red}55` : bdr}`,
+                      background: isBest ? `color-mix(in srgb, ${green} 16%, transparent)` : isGood ? `color-mix(in srgb, ${green} 7%, transparent)` : isBad ? `color-mix(in srgb, ${red} 7%, transparent)` : bg2,
+                      border: `1px solid ${isBest ? green : isGood ? `color-mix(in srgb, ${green} 33%, transparent)` : isBad ? `color-mix(in srgb, ${red} 33%, transparent)` : bdr}`,
                       color: isBest ? green : isGood ? green : isBad ? red : txt2,
                       transition: 'all 0.3s',
                     }}>
@@ -1466,7 +1466,7 @@ export default function ChartsPage() {
                 {rfSigData ? (
                   <>
                     {/* Consensus summary row */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, padding: '5px 8px', borderRadius: 5, background: rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `${green}12` : `${red}12`) : bg2, border: `1px solid ${rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `${green}44` : `${red}44`) : bdr}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, padding: '5px 8px', borderRadius: 5, background: rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `color-mix(in srgb, ${green} 7%, transparent)` : `color-mix(in srgb, ${red} 7%, transparent)`) : bg2, border: `1px solid ${rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? `color-mix(in srgb, ${green} 27%, transparent)` : `color-mix(in srgb, ${red} 27%, transparent)`) : bdr}` }}>
                       <span style={{ fontSize: 10, color: txt2 }}>Consensus</span>
                       <span style={{ fontSize: 12, fontWeight: 800, color: rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? green : red) : txt2 }}>
                         {rfSigData.score >= 3 ? (rfSigData.dir === 'RISE' ? '↑ RISE' : '↓ FALL') : 'WAIT'} {rfSigData.score}/4
@@ -1479,7 +1479,7 @@ export default function ChartsPage() {
                       { name: 'Streak',    vote: rfSigData.streakVote, reading: rfSigData.streakVote !== 0 ? `${rfSigData.streak}t → Rev` : `${rfSigData.streak}t` },
                       { name: 'Channel',   vote: rfSigData.channelVote,reading: rfSigData.channelPos < 0.25 ? 'Near low' : rfSigData.channelPos > 0.75 ? 'Near high' : 'Mid-range' },
                     ] as {name:string;vote:number;reading:string}[]).map(ind => (
-                      <div key={ind.name} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, padding: '4px 8px', borderRadius: 4, background: bg2, border: `1px solid ${ind.vote > 0 ? `${green}33` : ind.vote < 0 ? `${red}33` : bdr}` }}>
+                      <div key={ind.name} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, padding: '4px 8px', borderRadius: 4, background: bg2, border: `1px solid ${ind.vote > 0 ? `color-mix(in srgb, ${green} 20%, transparent)` : ind.vote < 0 ? `color-mix(in srgb, ${red} 20%, transparent)` : bdr}` }}>
                         <span style={{ fontSize: 10, color: txt2, width: 68, flexShrink: 0 }}>{ind.name}</span>
                         <span style={{ fontSize: 10, color: txt1, flex: 1 }}>{ind.reading}</span>
                         <span style={{ fontSize: 13, fontWeight: 700, color: ind.vote > 0 ? green : ind.vote < 0 ? red : txt2 }}>{ind.vote > 0 ? '↑' : ind.vote < 0 ? '↓' : '—'}</span>
@@ -1501,8 +1501,8 @@ export default function ChartsPage() {
                     <div key={label} style={{
                       padding: '4px 1px', borderRadius: 4, textAlign: 'center',
                       fontSize: 9, fontWeight: 700,
-                      background: isBest ? `${green}28` : isGood ? `${green}12` : isBad ? `${red}12` : bg2,
-                      border: `1px solid ${isBest ? green : isGood ? `${green}55` : isBad ? `${red}55` : bdr}`,
+                      background: isBest ? `color-mix(in srgb, ${green} 16%, transparent)` : isGood ? `color-mix(in srgb, ${green} 7%, transparent)` : isBad ? `color-mix(in srgb, ${red} 7%, transparent)` : bg2,
+                      border: `1px solid ${isBest ? green : isGood ? `color-mix(in srgb, ${green} 33%, transparent)` : isBad ? `color-mix(in srgb, ${red} 33%, transparent)` : bdr}`,
                       color: isBest ? green : isGood ? green : isBad ? red : txt2,
                       transition: 'all 0.3s',
                     }}>{label}</div>

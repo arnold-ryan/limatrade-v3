@@ -352,12 +352,12 @@ function RunPanel({
       { label: 'No. of runs',   value: String(stats.runs), color: txt0 },
     ],
     [
-      { label: 'Contracts lost',     value: String(stats.lost), color: stats.lost  > 0 ? '#ef4444' : '#fff' },
-      { label: 'Contracts won',      value: String(stats.won),  color: stats.won   > 0 ? '#22c55e' : '#fff' },
+      { label: 'Contracts lost',     value: String(stats.lost), color: stats.lost  > 0 ? '#ef4444' : txt0 },
+      { label: 'Contracts won',      value: String(stats.won),  color: stats.won   > 0 ? '#22c55e' : txt0 },
       {
         label: 'Total profit/loss',
         value: `${stats.profit.toFixed(2)} ${currency}`,
-        color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff',
+        color: stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : txt0,
       },
     ],
   ]
@@ -420,8 +420,8 @@ function RunPanel({
               flex: 1, padding: '0.8rem 0',
               fontSize: '0.8rem', fontWeight: tab === t ? 700 : 500,
               cursor: 'pointer', border: 'none', background: 'transparent',
-              color: tab === t ? '#fff' : txt2,
-              borderBottom: tab === t ? '2px solid #fff' : '2px solid transparent',
+              color: tab === t ? txt0 : txt2,
+              borderBottom: tab === t ? `2px solid ${txt0}` : '2px solid transparent',
               textTransform: 'capitalize', transition: 'color 0.15s',
             }}
           >

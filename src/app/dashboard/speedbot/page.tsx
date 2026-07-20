@@ -107,9 +107,12 @@ function fmt2(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+// Deeper shades than the usual Tailwind 500s — the brighter versions (yellow,
+// cyan, green, teal especially) fail contrast against a white page background.
+// These hold up on both a light and dark surface.
 const DIGIT_COLORS = [
-  '#ef4444','#f97316','#eab308','#22c55e','#14b8a6',
-  '#3b82f6','#8b5cf6','#ec4899','#06b6d4','#FCA311',
+  '#dc2626','#c2410c','#a16207','#16a34a','#0d9488',
+  '#3b82f6','#8b5cf6','#db2777','#0e7490','#FCA311',
 ]
 
 /* ─── Page ───────────────────────────────────────────────────────────────── */
@@ -181,7 +184,7 @@ function SbSequence({ seq, colorMap, rawDigits, flashWon, flashExitDigit, ticksT
             fontSize: '0.7rem', fontWeight: 700,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: isFlashing
-              ? (flashWon ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)')
+              ? (flashWon ? '#22c55e' : '#ef4444')
               : c.bg,
             border: isFlashing
               ? `2px solid ${flashWon ? '#22c55e' : '#ef4444'}`
@@ -1160,7 +1163,7 @@ export default function SpeedbotPage() {
   }
 
   const currentDigit = recentDigits[recentDigits.length - 1] ?? null
-  const profitColor  = stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : '#fff'
+  const profitColor  = stats.profit > 0 ? '#22c55e' : stats.profit < 0 ? '#ef4444' : txt0
 
   /* ── Analysis card data (recomputed from prices on every tick) ── */
   const sbDigits = useMemo(
@@ -1663,7 +1666,7 @@ export default function SpeedbotPage() {
             <div style={sectionSt}>
               {/* Header */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.9rem' }}>
-                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: txt0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   {sbCard.title}
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
@@ -1706,7 +1709,7 @@ export default function SpeedbotPage() {
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               marginBottom: '0.85rem',
             }}>
-              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 700, color: txt0 }}>
                 Run Statistics
               </span>
               {running && (
@@ -1918,11 +1921,11 @@ export default function SpeedbotPage() {
             width: '220px', height: '44px',
             borderRadius: '10px', border: 'none',
             background: !botReady && !running
-              ? '#1a1a1a'
+              ? bg2
               : running
                 ? 'linear-gradient(135deg, #dc2626, #b91c1c)'
                 : 'linear-gradient(135deg, #16a34a, #15803d)',
-            color: !botReady && !running ? '#555' : '#fff',
+            color: !botReady && !running ? txt2 : '#fff',
             fontWeight: 800, fontSize: '0.95rem',
             cursor: !botReady && !running ? 'not-allowed' : 'pointer',
             letterSpacing: '0.06em',
