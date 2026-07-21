@@ -42,6 +42,8 @@ const AUTH_ERRORS: Record<string, string> = {
   no_accounts:           'No Deriv accounts were returned. Please try logging in again.',
   server_error:          'A server error occurred. Please try again in a moment.',
   network:               'Network error during login. Check your connection and try again.',
+  invalid_session:       'Your login attempt expired before it finished. Please try logging in again.',
+  missing_state:         'Your login attempt expired before it finished. Please try logging in again.',
 }
 
 function StarRow() {

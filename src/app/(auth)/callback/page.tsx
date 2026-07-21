@@ -42,12 +42,25 @@ export default function CallbackPage() {
       .then(r => r.json())
       .then(data => {
         if (data.ok) {
+          try { sessionStorage.removeItem('lima-auth-retry') } catch { /**/ }
           router.replace('/dashboard')
         } else if (data.error === 'invalid_session' || data.error === 'missing_state') {
           // State is stale or missing (browser back-button, expired TTL, etc.)
-          // Restart login automatically — user never sees an error
-          window.location.href = '/api/auth/login'
+          // Retry once automatically — but if it fails again, this is a real,
+          // persistent problem (not a one-off timing glitch), and silently
+          // retrying forever would just bounce the user between us and Deriv
+          // with no visible error and no way out.
+          let retries = 0
+          try { retries = Number(sessionStorage.getItem('lima-auth-retry') ?? '0') } catch { /**/ }
+          if (retries < 1) {
+            try { sessionStorage.setItem('lima-auth-retry', String(retries + 1)) } catch { /**/ }
+            window.location.href = '/api/auth/login'
+          } else {
+            try { sessionStorage.removeItem('lima-auth-retry') } catch { /**/ }
+            router.replace('/?auth_error=' + encodeURIComponent(data.error))
+          }
         } else {
+          try { sessionStorage.removeItem('lima-auth-retry') } catch { /**/ }
           router.replace('/?auth_error=' + encodeURIComponent(data.error ?? 'unknown'))
         }
       })
