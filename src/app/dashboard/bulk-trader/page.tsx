@@ -36,17 +36,8 @@ function fmt2(n: number): string {
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
-function shannonEntropy(digits: number[]): number {
-  if (!digits.length) return 0
-  const freq = Array(10).fill(0)
-  digits.forEach(d => freq[d]++)
-  return freq.reduce((H: number, c: number) => {
-    if (!c) return H
-    const p = c / digits.length
-    return H - p * Math.log2(p)
-  }, 0)
-}
-
+// Scoring logic (entropy/persistence bonuses, thresholds, weights) lives entirely
+// server-side now — see /api/signals/detect. This is just the response shape.
 interface ScanResult {
   signal: boolean
   score: number
@@ -57,108 +48,30 @@ interface ScanResult {
 }
 const NO_SIGNAL: ScanResult = { signal: false, score: 0, contractType: null, barrier: null, reason: '', detail: '' }
 
-/**
- * PRIMARY over/under detection — DIGITUNDER 8 and DIGITOVER 1 only.
- * Natural win rate for both = 80%.  Fires at composite ≥ 40.
- * Uses higher scoring multipliers (×1200/×1000) because excess above 80% natural is small.
- */
-function detectPrimary(digits: number[], persistCount: number): ScanResult {
-  if (digits.length < 30) return NO_SIGNAL
-  const d60 = digits.slice(-60)
-  const d30 = digits.slice(-30)
-  const entropy      = shannonEntropy(d60)
-  const entropyBonus = Math.min(15, Math.max(0, Math.round((3.32 - entropy) / 3.32 * 30)))
-  const persistBonus = Math.min(10, persistCount * 5)
-
-  let bestScore = 39
-  let best: ScanResult = NO_SIGNAL
-
-  const candidates: Array<{ nat: number; obs60: number; obs30: number; ct: 'DIGITUNDER'|'DIGITOVER'; b: number; label: string }> = [
-    { nat: 0.80, obs60: d60.filter(d => d < 8).length / d60.length, obs30: d30.filter(d => d < 8).length / d30.length, ct: 'DIGITUNDER', b: 8, label: 'Under 8' },
-    { nat: 0.80, obs60: d60.filter(d => d > 1).length / d60.length, obs30: d30.filter(d => d > 1).length / d30.length, ct: 'DIGITOVER',  b: 1, label: 'Over 1'  },
-  ]
-
-  for (const c of candidates) {
-    if (c.obs60 > c.nat + 0.015 && c.obs30 > c.nat + 0.005) {
-      const base  = Math.min(50, (c.obs60 - c.nat) * 1200)
-      const agree = Math.min(25, (c.obs30 - c.nat) * 1000)
-      const score = Math.min(100, base + agree + entropyBonus + persistBonus)
-      if (score > bestScore) {
-        bestScore = score
-        best = {
-          signal: true, score: Math.round(score), contractType: c.ct, barrier: c.b,
-          reason: `${c.label} trending — ${Math.round(c.obs60*100)}% (60t) / ${Math.round(c.obs30*100)}% (30t) vs 80% natural`,
-          detail: `base=${Math.round(base)} agree=${Math.round(agree)} entropy=${entropyBonus} persist=${persistBonus}`,
-        }
-      }
-    }
-  }
-  return best
+async function detectPrimary(digits: number[], persistCount: number): Promise<ScanResult> {
+  try {
+    const r = await fetch('/api/signals/detect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'primary', digits, persistCount }),
+    })
+    if (!r.ok) return NO_SIGNAL
+    return await r.json() as ScanResult
+  } catch { return NO_SIGNAL }
 }
 
-/**
- * Even/Odd and Matches/Differs detection (unchanged from v196).
- */
-function detectSignal(
+async function detectSignal(
   digits: number[],
   tradeType: 'even_odd' | 'matches_differs',
   persistCount: number,
-): ScanResult {
-  if (digits.length < 30) return NO_SIGNAL
-  const d60 = digits.slice(-60)
-  const d30 = digits.slice(-30)
-  const entropy      = shannonEntropy(d60)
-  const entropyBonus = Math.min(15, Math.max(0, Math.round((3.32 - entropy) / 3.32 * 30)))
-  const persistBonus = Math.min(10, persistCount * 5)
-
-  if (tradeType === 'even_odd') {
-    const even60 = d60.filter(d => d % 2 === 0).length / d60.length
-    const even30 = d30.filter(d => d % 2 === 0).length / d30.length
-    const dominant = even60 >= 0.5 ? 'even' : 'odd'
-    const domPct60 = dominant === 'even' ? even60 : 1 - even60
-    const domPct30 = dominant === 'even' ? even30 : 1 - even30
-    if (domPct60 < 0.52 || domPct30 <= 0.5) return NO_SIGNAL
-    const base  = Math.min(50, (domPct60 - 0.5) * 600)
-    const agree = Math.min(25, (domPct30 - 0.5) * 500)
-    const score = Math.min(100, base + agree + entropyBonus + persistBonus)
-    if (score < 55) return NO_SIGNAL
-    const betType: 'DIGITEVEN' | 'DIGITODD' = dominant === 'even' ? 'DIGITEVEN' : 'DIGITODD'
-    return {
-      signal: true, score: Math.round(score), contractType: betType, barrier: null,
-      reason: `${dominant === 'even' ? 'Even' : 'Odd'} trending — ${Math.round(domPct60*100)}% (60t) / ${Math.round(domPct30*100)}% (30t) vs 50% natural`,
-      detail: `base=${Math.round(base)} agree=${Math.round(agree)} entropy=${entropyBonus} persist=${persistBonus}`,
-    }
-  }
-
-  /* matches_differs — COLD digit strategy:
-     Pick the digit appearing LEAST in recent history.
-     DIFFERS wins when last digit ≠ barrier, so a cold digit (rarely appears) = high win rate.
-     e.g. digit at 2% observed → DIFFERS wins ~98% vs 90% natural.
-     Betting DIFFERS on a HOT digit is wrong (reduces win rate below natural). */
-  let bestScore = 59   // threshold 60 — fires when deficit is meaningful
-  let best: ScanResult = NO_SIGNAL
-  for (let d = 0; d <= 9; d++) {
-    const nat   = 0.10
-    const o60   = d60.filter(x => x === d).length / d60.length
-    const o30   = d30.filter(x => x === d).length / d30.length
-    const def60 = nat - o60   // how cold the digit is (positive = below natural)
-    const def30 = nat - o30
-    // Only fire when digit is genuinely cold in both windows
-    if (def60 > 0.03 && def30 > 0.01) {
-      const base  = Math.min(50, def60 * 600)   // bigger deficit = higher score
-      const agree = Math.min(25, def30 * 500)
-      const score = Math.min(100, base + agree + entropyBonus + persistBonus)
-      if (score > bestScore) {
-        bestScore = score
-        best = {
-          signal: true, score: Math.round(score), contractType: 'DIGITDIFF', barrier: d,
-          reason: `Digit ${d} cold — ${Math.round(o60*100)}% (60t) / ${Math.round(o30*100)}% (30t) vs 10% natural → Differs ${d} (win rate ~${Math.round((1-o60)*100)}%)`,
-          detail: `base=${Math.round(base)} agree=${Math.round(agree)} entropy=${entropyBonus} persist=${persistBonus}`,
-        }
-      }
-    }
-  }
-  return best
+): Promise<ScanResult> {
+  try {
+    const r = await fetch('/api/signals/detect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: tradeType, digits, persistCount }),
+    })
+    if (!r.ok) return NO_SIGNAL
+    return await r.json() as ScanResult
+  } catch { return NO_SIGNAL }
 }
 
 interface TradeRow {
@@ -231,10 +144,14 @@ export default function BulkTraderPage() {
   /* primary strategy refs (UNDER 8 / OVER 1) */
   const primaryCooldowns = useRef<Map<string,number>>(new Map())
   const primaryPersists  = useRef<Map<string,number>>(new Map())
+  // Detection now round-trips to the server — guards against firing a second
+  // request for the same symbol while one is still in flight.
+  const primaryChecking  = useRef<Set<string>>(new Set())
 
   /* general cooldowns for even_odd / matches_differs */
   const generalCooldowns = useRef<Map<string,number>>(new Map())
   const generalPersists  = useRef<Map<string,number>>(new Map())
+  const generalChecking  = useRef<Set<string>>(new Set())
 
   const scannerBotWsRef  = useRef<WebSocket|null>(null)
   const stopScannerRef   = useRef<(() => void) | null>(null)
@@ -521,7 +438,7 @@ export default function BulkTraderPage() {
       const ws = new WebSocket(PUBLIC_WS_URL)
       scannerWsRefs.current.set(sym, ws)
       ws.onopen = () => ws.send(JSON.stringify({ ticks_history:sym, end:'latest', count:100, style:'ticks', subscribe:1, req_id:1 }))
-      ws.onmessage = (ev) => {
+      ws.onmessage = async (ev) => {
         let msg: Record<string,unknown>; try { msg = JSON.parse(ev.data) } catch { return }
         if (msg.msg_type === 'history') {
           const h = msg as {pip_size?:number;history?:{prices:number[]}}
@@ -545,9 +462,13 @@ export default function BulkTraderPage() {
           if (tt === 'over_under') {
             /* PRIMARY: UNDER 8 / OVER 1 */
             const pCool = primaryCooldowns.current.get(sym) ?? 0
-            if (Date.now() - pCool >= 20_000) {
+            // Detection is now a server round trip — skip this tick if the
+            // previous check for this symbol hasn't come back yet.
+            if (Date.now() - pCool >= 20_000 && !primaryChecking.current.has(sym)) {
+              primaryChecking.current.add(sym)
               const pPersist = primaryPersists.current.get(sym) ?? 0
-              const pResult  = detectPrimary(digits, pPersist)
+              const pResult  = await detectPrimary(digits, pPersist)
+              primaryChecking.current.delete(sym)
               if (pResult.signal && pResult.contractType) {
                 primaryPersists.current.set(sym, pPersist + 1)
                 if (pPersist >= 1) {
@@ -585,8 +506,11 @@ export default function BulkTraderPage() {
           /* ── Even/Odd and Matches/Differs ── */
           const gCool = generalCooldowns.current.get(sym) ?? 0
           if (Date.now() - gCool < 20_000) return
+          if (generalChecking.current.has(sym)) return
+          generalChecking.current.add(sym)
           const gPersist = generalPersists.current.get(sym) ?? 0
-          const result   = detectSignal(digits, tt as 'even_odd'|'matches_differs', gPersist)
+          const result   = await detectSignal(digits, tt as 'even_odd'|'matches_differs', gPersist)
+          generalChecking.current.delete(sym)
           if (result.signal && result.contractType) {
             generalPersists.current.set(sym, gPersist + 1)
             if (gPersist >= 1) {
@@ -627,8 +551,8 @@ export default function BulkTraderPage() {
     log('━━━ SCANNER STOPPED ━━━', 'amber')
     scannerWsRefs.current.forEach(ws => { try { ws.close() } catch { /**/ } })
     scannerWsRefs.current.clear(); scannerDigits.current.clear()
-    primaryCooldowns.current.clear(); primaryPersists.current.clear()
-    generalCooldowns.current.clear(); generalPersists.current.clear()
+    primaryCooldowns.current.clear(); primaryPersists.current.clear(); primaryChecking.current.clear()
+    generalCooldowns.current.clear(); generalPersists.current.clear(); generalChecking.current.clear()
     // keepBotWs=true (One Shot): bot WS stays open to receive settle events; closed by settle handler
     if (!keepBotWs) {
       if (scannerBotWsRef.current) { try { scannerBotWsRef.current.close() } catch { /**/ } }

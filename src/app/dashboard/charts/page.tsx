@@ -205,6 +205,9 @@ export default function ChartsPage() {
   type BgRec  = { type: 'OVER'|'UNDER'|'EVEN'|'ODD'|'DIFFER'; barrier?: number; edge: number; z: number } | null
   type RFRec  = { type: 'RISE'|'FALL'; score: number; rsi: number; channelPos: number; emaVote: number; streakVote: number; channelVote: number } | null
   const bgRecsRef = useRef<{ OU: BgRec; EO: BgRec; MD: BgRec; RF: RFRec }>({ OU: null, EO: null, MD: null, RF: null })
+  // Signal scoring is now a server round trip (see /api/signals/charts) — this
+  // guards against firing a second scan request while one is still in flight.
+  const sigScanningRef = useRef(false)
 
   // ── Account-switch listener (unchanged from v82) ──────────────────────────
   useEffect(() => {
@@ -231,123 +234,32 @@ export default function ChartsPage() {
   }, [])
 
   // ── Signal: compute signal from rolling digit window (all types, every tick) ─
-  const runSigCycle = useCallback(() => {
+  const runSigCycle = useCallback(async () => {
     const arr = sigDigitsRef.current
     if (arr.length < 60) return  // need ≥60 ticks for statistical confidence
+    if (sigScanningRef.current) return  // previous scan still in flight — skip this tick
+    sigScanningRef.current = true
 
-    // ── Shared windows (computed once, reused for all three trade types) ──
-    const slice   = arr.slice(-100); const n = slice.length
-    const freq    = Array(10).fill(0); slice.forEach((d: number) => freq[d]++)
-    const f       = freq.map((c: number) => c / n)
+    // Scoring (z-score thresholds, window sizes, EMA/RSI/streak/channel weights
+    // for Rise/Fall) runs server-side now — see /api/signals/charts. The client
+    // only sends recent digit/price history and gets back a decision.
+    let data: {
+      MD: BgRec; EO: BgRec; OU: BgRec; RF: RFRec
+      rfSigData: {emaVote:number; rsi:number; rsiVote:number; streak:number; streakVote:number; channelPos:number; channelVote:number; score:number; dir:'RISE'|'FALL'|null} | null
+      edges: Record<string, number>
+    } | null = null
+    try {
+      const res = await fetch('/api/signals/charts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'scan', digits: arr.slice(-100), prices: rfPricesRef.current.slice(-25) }),
+      })
+      if (res.ok) data = await res.json()
+    } catch { /* network hiccup — try again next tick */ }
+    sigScanningRef.current = false
+    if (!data) return
 
-    const slice50 = arr.slice(-50)
-    const freq50  = Array(10).fill(0); slice50.forEach((d: number) => freq50[d]++)
-    const f50     = freq50.map((c: number) => c / slice50.length)
-
-    const slice25 = arr.slice(-25)
-    const freq25  = Array(10).fill(0); slice25.forEach((d: number) => freq25[d]++)
-    const f25     = freq25.map((c: number) => c / slice25.length)
-
-    const slice10 = arr.slice(-10)
-    const freq10  = Array(10).fill(0); slice10.forEach((d: number) => freq10[d]++)
-    const f10     = freq10.map((c: number) => c / slice10.length)
-
-    // ── Background: compute best for ALL trade types, every tick ──────────
-    // This runs regardless of active state so switching is always instant.
-
-    // MD — Differ only (cold digit across four windows)
-    let bestMD: BgRec = null
-    {
-      const p_exp = 0.1
-      for (let d = 0; d <= 9; d++) {
-        const edge = f[d] - p_exp
-        const z    = edge / Math.sqrt(p_exp * (1 - p_exp) / n)
-        if (z <= -1.5 && (f50[d] - p_exp) <= -0.02 && (f25[d] - p_exp) <= 0 && f10[d] <= 0.10) {
-          const absZ = -z
-          if (!bestMD || absZ > bestMD.z) bestMD = { type: 'DIFFER', barrier: d, edge: -edge, z: absZ }
-        }
-      }
-    }
-
-    // EO — Even/Odd (triple window + streak guard)
-    let bestEO: BgRec = null
-    {
-      const EVEN = [0, 2, 4, 6, 8]; const p_exp = 0.5
-      let obsEven = 0, obsEven50 = 0, obsEven25 = 0
-      EVEN.forEach(d => { obsEven += f[d]; obsEven50 += f50[d]; obsEven25 += f25[d] })
-      const zEven = (obsEven - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
-      let evenCount10 = 0; slice10.forEach((d: number) => { if (d % 2 === 0) evenCount10++ })
-      const evenFreq10 = evenCount10 / slice10.length
-      if (zEven >= 1.45 && (obsEven50 - p_exp) > 0 && (obsEven25 - p_exp) > 0 && evenFreq10 >= 0.40) {
-        bestEO = { type: 'EVEN', edge: obsEven - p_exp, z: zEven }
-      } else if (-zEven >= 1.45 && ((1-obsEven50) - p_exp) > 0 && ((1-obsEven25) - p_exp) > 0 && evenFreq10 <= 0.60) {
-        bestEO = { type: 'ODD', edge: (1-obsEven) - p_exp, z: -zEven }
-      }
-    }
-
-    // OU — Over/Under (dual window)
-    let bestOU: BgRec = null
-    {
-      for (let b = 1; b <= 5; b++) {
-        const p_exp = (9-b)/10; let obs = 0, obs50 = 0
-        for (let d = b+1; d <= 9; d++) { obs += f[d]; obs50 += f50[d] }
-        const edge = obs - p_exp; const z = edge / Math.sqrt(p_exp*(1-p_exp)/n)
-        if (z >= 1.28 && (obs50-p_exp) > 0) {
-          if (!bestOU || z > bestOU.z) bestOU = { type: 'OVER', barrier: b, edge, z }
-        }
-      }
-      for (let b = 6; b <= 8; b++) {
-        const p_exp = b/10; let obs = 0, obs50 = 0
-        for (let d = 0; d < b; d++) { obs += f[d]; obs50 += f50[d] }
-        const edge = obs - p_exp; const z = edge / Math.sqrt(p_exp*(1-p_exp)/n)
-        if (z >= 1.28 && (obs50-p_exp) > 0) {
-          if (!bestOU || z > bestOU.z) bestOU = { type: 'UNDER', barrier: b, edge, z }
-        }
-      }
-    }
-
-    // ── RF — Rise/Fall multi-indicator consensus (computed every tick) ───────
-    let bestRF: RFRec = null
-    {
-      const rfArr = rfPricesRef.current
-      if (rfArr.length >= 25) {
-        const last25 = rfArr.slice(-25)
-        // EMA: fast(5) vs slow(20)
-        const calcEMA = (prices: number[], n: number) => {
-          const k = 2 / (n + 1); let ema = prices[0]
-          for (let i = 1; i < prices.length; i++) ema = prices[i] * k + ema * (1 - k)
-          return ema
-        }
-        const emaFast  = calcEMA(last25.slice(-10), 5)
-        const emaSlow  = calcEMA(last25, 20)
-        const emaVote  = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
-        // RSI (14 periods = last 15 prices)
-        const rsiPrices = last25.slice(-15); let gains = 0, losses = 0
-        for (let i = 1; i < rsiPrices.length; i++) {
-          const diff = rsiPrices[i] - rsiPrices[i - 1]
-          if (diff > 0) gains += diff; else losses -= diff
-        }
-        const avgGain = gains / 14; const avgLoss = losses / 14
-        const rsi      = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss))
-        const rsiVote  = rsi < 35 ? 1 : rsi > 65 ? -1 : 0
-        // Streak: mean-reversion vote on ≥4 consecutive ticks same direction
-        const recent   = last25.slice(-8); let streak = 1
-        const lastDir  = recent[recent.length - 1] > recent[recent.length - 2]
-        for (let i = recent.length - 2; i > 0; i--) {
-          if ((recent[i] > recent[i - 1]) === lastDir) streak++; else break
-        }
-        const streakVote  = streak >= 4 ? (lastDir ? -1 : 1) : 0
-        // Price channel: where current price sits in 20-tick high/low
-        const win20       = last25.slice(-20)
-        const hiW = Math.max(...win20); const loW = Math.min(...win20)
-        const channelPos  = (hiW - loW) === 0 ? 0.5 : (win20[win20.length - 1] - loW) / (hiW - loW)
-        const channelVote = channelPos < 0.25 ? 1 : channelPos > 0.75 ? -1 : 0
-        const totalScore  = emaVote + rsiVote + streakVote + channelVote
-        const rfDir: 'RISE'|'FALL'|null = Math.abs(totalScore) >= 3 ? (totalScore > 0 ? 'RISE' : 'FALL') : null
-        setRfSigData({ emaVote, rsi, rsiVote, streak, streakVote, channelPos, channelVote, score: Math.abs(totalScore), dir: rfDir })
-        if (rfDir) bestRF = { type: rfDir, score: Math.abs(totalScore), rsi, channelPos, emaVote, streakVote, channelVote }
-      }
-    }
+    const { MD: bestMD, EO: bestEO, OU: bestOU, RF: bestRF, rfSigData, edges: allEdges } = data
+    if (rfSigData) setRfSigData(rfSigData)
 
     bgRecsRef.current = { MD: bestMD, EO: bestEO, OU: bestOU, RF: bestRF }
 
@@ -374,29 +286,7 @@ export default function ChartsPage() {
     }
 
     const best = tid === 'MD' ? bestMD : tid === 'EO' ? bestEO : bestOU
-
-    // Tile edge colors for active type
-    const edges: Record<string, number> = {}
-    if (tid === 'MD') {
-      const p_exp = 0.1
-      for (let d = 0; d <= 9; d++) edges[`D${d}`] = f[d] - p_exp
-    } else if (tid === 'EO') {
-      const EVEN = [0,2,4,6,8]; let obsEven = 0
-      EVEN.forEach(d => obsEven += f[d])
-      edges['EV'] = obsEven - 0.5; edges['OD'] = (1-obsEven) - 0.5
-    } else {
-      for (let b = 1; b <= 5; b++) {
-        const p_exp = (9-b)/10; let obs = 0
-        for (let d = b+1; d <= 9; d++) obs += f[d]
-        edges[`O${b}`] = obs - p_exp
-      }
-      for (let b = 6; b <= 8; b++) {
-        const p_exp = b/10; let obs = 0
-        for (let d = 0; d < b; d++) obs += f[d]
-        edges[`U${b}`] = obs - p_exp
-      }
-    }
-    setSigEdges(edges)
+    setSigEdges(allEdges)
 
     if (best) {
       setSigRec({ type: best.type, barrier: best.barrier, edge: best.edge })
@@ -805,7 +695,7 @@ export default function ChartsPage() {
           setAuthReady(true); setAuthErr(null)
         }
 
-        ws.onmessage = (evt) => {
+        ws.onmessage = async (evt) => {
           if (!alive) return
           try {
           const msg = JSON.parse(evt.data)
@@ -896,91 +786,28 @@ export default function ChartsPage() {
               setPositions(ps => ps.map(p => p.id === poc.contract_id
                 ? { ...p, status, profit, bid: pocBidPrice ?? p.bid } : p))
               // ── Signal re-validation on settlement ───────────────────────
+              // Whether the specific traded signal still holds is computed
+              // server-side now — see /api/signals/charts (action: revalidate).
               if (status === 'won') {
                 sigConsecLossRef.current = 0
               } else {
                 sigConsecLossRef.current++
-                const arr = sigDigitsRef.current
                 const rec = sigRecRef.current
                 let stillValid = false
-                // RF re-validation: recompute multi-indicator consensus on latest prices
-                if ((rec?.type === 'RISE' || rec?.type === 'FALL') && rfPricesRef.current.length >= 25 && sigConsecLossRef.current < 2) {
-                  const rfLast = rfPricesRef.current.slice(-25)
-                  const k5 = 2/6; let ef5 = rfLast[rfLast.length - 10]
-                  for (let i = rfLast.length - 9; i < rfLast.length; i++) ef5 = rfLast[i]*k5 + ef5*(1-k5)
-                  const k20 = 2/21; let ef20 = rfLast[0]
-                  for (let i = 1; i < rfLast.length; i++) ef20 = rfLast[i]*k20 + ef20*(1-k20)
-                  const rfEmaV = ef5 > ef20 ? 1 : ef5 < ef20 ? -1 : 0
-                  const rPr = rfLast.slice(-15); let gg=0,ll=0
-                  for (let i=1;i<rPr.length;i++){const dd=rPr[i]-rPr[i-1];if(dd>0)gg+=dd;else ll-=dd}
-                  const rfRsiVal = ll===0?100:100-(100/(1+(gg/14)/(ll/14)))
-                  const rfRsiV   = rfRsiVal<35?1:rfRsiVal>65?-1:0
-                  const r8=rfLast.slice(-8);let sk=1
-                  const rld=r8[r8.length-1]>r8[r8.length-2]
-                  for(let i=r8.length-2;i>0;i--){if((r8[i]>r8[i-1])===rld)sk++;else break}
-                  const rfStV=sk>=4?(rld?-1:1):0
-                  const w2=rfLast.slice(-20);const hv2=Math.max(...w2),lv2=Math.min(...w2)
-                  const rfCp=(hv2-lv2)===0?0.5:(rfLast[rfLast.length-1]-lv2)/(hv2-lv2)
-                  const rfChV=rfCp<0.25?1:rfCp>0.75?-1:0
-                  const sc2=rfEmaV+rfRsiV+rfStV+rfChV
-                  stillValid = Math.abs(sc2)>=3 && (sc2>0?'RISE':'FALL')===rec.type
-                }
-                if (rec && arr.length >= 60 && sigConsecLossRef.current < 2 && rec.type !== 'RISE' && rec.type !== 'FALL') {
-                  // Re-run the same z-score check used in runSigCycle
-                  const slice = arr.slice(-100)
-                  const n = slice.length
-                  const freq = Array(10).fill(0)
-                  slice.forEach((d: number) => freq[d]++)
-                  const f = freq.map((c: number) => c / n)
-                  const slice50 = arr.slice(-50)
-                  const freq50 = Array(10).fill(0)
-                  slice50.forEach((d: number) => freq50[d]++)
-                  const f50 = freq50.map((c: number) => c / slice50.length)
-                  if (rec.type === 'OVER') {
-                    const b = rec.barrier!
-                    const p_exp = (9 - b) / 10
-                    let obs = 0; for (let d = b + 1; d <= 9; d++) obs += f[d]
-                    const z = (obs - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
-                    let obs50 = 0; for (let d = b + 1; d <= 9; d++) obs50 += f50[d]
-                    stillValid = z >= 1.28 && (obs50 - p_exp) > 0
-                  } else if (rec.type === 'UNDER') {
-                    const b = rec.barrier!
-                    const p_exp = b / 10
-                    let obs = 0; for (let d = 0; d < b; d++) obs += f[d]
-                    const z = (obs - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
-                    let obs50 = 0; for (let d = 0; d < b; d++) obs50 += f50[d]
-                    stillValid = z >= 1.28 && (obs50 - p_exp) > 0
-                  } else if (rec.type === 'DIFFER') {
-                    const slice25 = arr.slice(-25)
-                    const freq25  = Array(10).fill(0)
-                    slice25.forEach((d: number) => freq25[d]++)
-                    const f25 = freq25.map((c: number) => c / slice25.length)
-                    const slice10 = arr.slice(-10)
-                    const freq10  = Array(10).fill(0)
-                    slice10.forEach((d: number) => freq10[d]++)
-                    const f10 = freq10.map((c: number) => c / slice10.length)
-                    const b = rec.barrier!
-                    const p_exp = 0.1
-                    const z = (f[b] - p_exp) / Math.sqrt(p_exp * (1 - p_exp) / n)
-                    stillValid = z <= -1.5 && (f50[b] - p_exp) <= -0.02 && (f25[b] - p_exp) <= 0 && f10[b] <= 0.10
-                  } else {
-                    // EVEN or ODD — triple window re-validation
-                    const slice25 = arr.slice(-25)
-                    const freq25  = Array(10).fill(0)
-                    slice25.forEach((d: number) => freq25[d]++)
-                    const f25 = freq25.map((c: number) => c / slice25.length)
-                    const EVEN    = [0, 2, 4, 6, 8]
-                    const isEven  = rec.type === 'EVEN'
-                    let obs = 0;   EVEN.forEach(d => obs   += f[d]);   if (!isEven) obs   = 1 - obs
-                    let obs50 = 0; EVEN.forEach(d => obs50 += f50[d]); if (!isEven) obs50 = 1 - obs50
-                    let obs25 = 0; EVEN.forEach(d => obs25 += f25[d]); if (!isEven) obs25 = 1 - obs25
-                    const z = (obs - 0.5) / Math.sqrt(0.25 / n)
-                    const sl10 = arr.slice(-10)
-                    let ec10 = 0; sl10.forEach((d: number) => { if (d % 2 === 0) ec10++ })
-                    const ef10 = ec10 / sl10.length
-                    const sgOk = isEven ? ef10 >= 0.40 : ef10 <= 0.60
-                    stillValid = z >= 1.45 && (obs50 - 0.5) > 0 && (obs25 - 0.5) > 0 && sgOk
-                  }
+                if (rec) {
+                  try {
+                    const r = await fetch('/api/signals/charts', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        action: 'revalidate',
+                        digits: sigDigitsRef.current.slice(-100),
+                        prices: rfPricesRef.current.slice(-25),
+                        rec: { type: rec.type, barrier: rec.barrier },
+                        consecLoss: sigConsecLossRef.current,
+                      }),
+                    })
+                    if (r.ok) stillValid = (await r.json()).stillValid === true
+                  } catch { /* treat as invalid on network failure */ }
                 }
                 // Cancel signal if edge is gone OR hit 2 consecutive losses
                 if (!stillValid || sigConsecLossRef.current >= 2) {
