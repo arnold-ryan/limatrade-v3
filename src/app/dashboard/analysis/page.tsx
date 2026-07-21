@@ -1134,14 +1134,256 @@ function RunBar({
 }
 
 /* ─── Scanner ────────────────────────────────────────────── */
+// Native replacement for the old third-party iframe embed. Same scoring engine
+// as the Charts page's SIGNAL panel (/api/signals/charts) — a different view
+// onto logic Lima Trade already owns, not a copy of anyone else's tool.
+
+type ScanStrategy = 'OU' | 'EO' | 'MD' | 'RF'
+const SCAN_STRATEGIES: { id: ScanStrategy; label: string }[] = [
+  { id: 'OU', label: 'Over / Under' },
+  { id: 'EO', label: 'Even / Odd' },
+  { id: 'MD', label: 'Matches / Differs' },
+  { id: 'RF', label: 'Rise / Fall' },
+]
+
+interface BgRec { type: 'OVER'|'UNDER'|'EVEN'|'ODD'|'DIFFER'; barrier?: number; edge: number; z: number }
+interface RfRec { type: 'RISE'|'FALL'; score: number; rsi: number; channelPos: number; emaVote: number; streakVote: number; channelVote: number }
+interface ScanResponse {
+  MD: BgRec | null; EO: BgRec | null; OU: BgRec | null; RF: RfRec | null
+  rfSigData: { emaVote: number; rsi: number; rsiVote: number; streak: number; streakVote: number; channelPos: number; channelVote: number; score: number } | null
+}
 
 function ScannerView() {
+  const [symbol,   setSymbol]   = useState('1HZ100V')
+  const [strategy, setStrategy] = useState<ScanStrategy>('OU')
+  const [running,  setRunning]  = useState(false)
+  const [status,   setStatus]   = useState<'idle'|'connecting'|'collecting'|'live'>('idle')
+  const [livePrice, setLivePrice] = useState<number | null>(null)
+  const [lastDig,   setLastDig]   = useState<number | null>(null)
+  const [rec,       setRec]       = useState<BgRec | null>(null)
+  const [rf,        setRf]        = useState<{ rec: RfRec | null; data: ScanResponse['rfSigData'] } | null>(null)
+
+  const symbolRef   = useRef(symbol)
+  const strategyRef = useRef(strategy)
+  const runningRef  = useRef(false)
+  const wsRef       = useRef<WebSocket | null>(null)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const digitsRef   = useRef<number[]>([])
+  const pricesRef   = useRef<number[]>([])
+  const pipSizeRef  = useRef(2)
+  const scanningRef = useRef(false)
+
+  useEffect(() => { symbolRef.current   = symbol   }, [symbol])
+  useEffect(() => { strategyRef.current = strategy }, [strategy])
+
+  const scan = useCallback(async () => {
+    if (scanningRef.current) return
+    if (digitsRef.current.length < 60) return
+    scanningRef.current = true
+    try {
+      const res = await fetch('/api/signals/charts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'scan',
+          digits: digitsRef.current.slice(-100),
+          prices: pricesRef.current.slice(-25),
+        }),
+      })
+      if (res.ok) {
+        const data: ScanResponse = await res.json()
+        setRf({ rec: data.RF, data: data.rfSigData })
+        const tid = strategyRef.current
+        setRec(tid === 'MD' ? data.MD : tid === 'EO' ? data.EO : tid === 'OU' ? data.OU : null)
+      }
+    } catch { /* network hiccup — next tick retries */ }
+    scanningRef.current = false
+  }, [])
+
+  const connect = useCallback(() => {
+    if (!runningRef.current) return
+    setStatus('connecting')
+    const ws = new WebSocket(WS_URL)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        ticks_history: symbolRef.current, end: 'latest', count: 100, style: 'ticks', subscribe: 1,
+      }))
+    }
+
+    ws.onmessage = (ev) => {
+      let msg: Record<string, unknown>
+      try { msg = JSON.parse(ev.data as string) } catch { return }
+
+      if (msg.msg_type === 'history') {
+        const h = msg as { pip_size?: number; history?: { prices: number[] } }
+        pipSizeRef.current = h.pip_size ?? 2
+        const prices = (h.history?.prices ?? []).map(Number)
+        pricesRef.current = prices
+        digitsRef.current = prices.map(p => getLastDigit(p, pipSizeRef.current))
+        setLivePrice(prices[prices.length - 1] ?? null)
+        setLastDig(digitsRef.current[digitsRef.current.length - 1] ?? null)
+        setStatus('collecting')
+      }
+
+      if (msg.msg_type === 'tick') {
+        const t = msg as { tick?: { pip_size?: number; quote?: number } }
+        if (t.tick?.pip_size != null) pipSizeRef.current = t.tick.pip_size
+        const q = t.tick?.quote
+        if (q == null) return
+        const d = getLastDigit(q, pipSizeRef.current)
+        digitsRef.current = [...digitsRef.current.slice(-199), d]
+        pricesRef.current = [...pricesRef.current.slice(-199), q]
+        setLivePrice(q)
+        setLastDig(d)
+        if (digitsRef.current.length >= 60) setStatus('live')
+        scan()
+      }
+    }
+
+    ws.onerror = () => { /* onclose fires next and handles reconnect */ }
+    ws.onclose = () => {
+      if (runningRef.current) reconnectTimerRef.current = setTimeout(connect, 2000)
+    }
+  }, [scan])
+
+  const start = useCallback(() => {
+    runningRef.current = true
+    setRunning(true)
+    setRec(null); setRf(null)
+    digitsRef.current = []; pricesRef.current = []
+    connect()
+  }, [connect])
+
+  const stop = useCallback(() => {
+    runningRef.current = false
+    setRunning(false)
+    setStatus('idle')
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    try { wsRef.current?.close() } catch { /**/ }
+    wsRef.current = null
+  }, [])
+
+  useEffect(() => () => stop(), [stop])
+
+  // Switching markets while running: reconnect fresh instead of mixing history
+  // from two different instruments.
+  useEffect(() => {
+    if (!running) return
+    stop()
+    start()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol])
+
+  const statusLabel = status === 'idle' ? 'IDLE' : status === 'connecting' ? 'CONNECTING' : status === 'collecting' ? 'COLLECTING TICKS' : 'LIVE'
+  const statusColor = status === 'idle' ? txt2 : status === 'live' ? '#22c55e' : '#FCA311'
+
   return (
-    <iframe
-      src="https://signals-scanner.vercel.app/"
-      title="Signal Scanner"
-      style={{ flex: 1, width: '100%', border: 'none', display: 'block' }}
-    />
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg0, overflow: 'auto' }}>
+      {/* Controls */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center', padding: '0.9rem 1.25rem', borderBottom: `1px solid ${bdr}`, background: bg1 }}>
+        <select
+          value={symbol} onChange={e => setSymbol(e.target.value)}
+          style={{ background: bg2, border: `1px solid ${bdr}`, borderRadius: 7, color: txt0, padding: '0.45rem 0.6rem', fontSize: '0.82rem', outline: 'none' }}
+        >
+          {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.label}</option>)}
+        </select>
+
+        <div style={{ display: 'flex', gap: 4 }}>
+          {SCAN_STRATEGIES.map(s => (
+            <button
+              key={s.id}
+              onClick={() => setStrategy(s.id)}
+              style={{
+                padding: '0.42rem 0.7rem', borderRadius: 7, fontSize: '0.78rem', fontWeight: 700,
+                cursor: 'pointer', border: `1px solid ${strategy === s.id ? 'var(--gold)' : bdr}`,
+                background: strategy === s.id ? 'rgba(252,163,17,0.12)' : bg2,
+                color: strategy === s.id ? 'var(--gold)' : txt2,
+              }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <span style={{
+            fontSize: '0.68rem', fontWeight: 700, padding: '0.25rem 0.6rem', borderRadius: 20,
+            color: statusColor, border: `1px solid ${statusColor}55`, background: `${statusColor}18`,
+          }}>
+            {statusLabel}
+          </span>
+          <button
+            onClick={running ? stop : start}
+            style={{
+              padding: '0.5rem 1.1rem', borderRadius: 8, fontSize: '0.82rem', fontWeight: 800,
+              cursor: 'pointer', border: 'none',
+              background: running ? 'rgba(239,68,68,0.15)' : 'var(--gold)',
+              color: running ? '#ef4444' : '#000',
+            }}
+          >
+            {running ? '■ Stop Scanner' : '▶ Start Scanner'}
+          </button>
+        </div>
+      </div>
+
+      {/* Live readout */}
+      <div style={{ display: 'flex', gap: '1.5rem', padding: '0.9rem 1.25rem', borderBottom: `1px solid ${bdr}` }}>
+        <div>
+          <div style={{ fontSize: '0.62rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Latest Tick</div>
+          <div style={{ fontSize: '1.2rem', fontWeight: 800, color: txt0, fontVariantNumeric: 'tabular-nums' }}>
+            {livePrice != null ? livePrice.toFixed(pipSizeRef.current) : '—'}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: '0.62rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Last Digit</div>
+          <div style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--gold)', fontVariantNumeric: 'tabular-nums' }}>
+            {lastDig ?? '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Analysis dashboard */}
+      <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        {!running ? (
+          <p style={{ color: txt2, fontSize: '0.85rem', margin: 0 }}>
+            Pick a market and strategy, then press Start Scanner.
+          </p>
+        ) : status !== 'live' ? (
+          <p style={{ color: txt2, fontSize: '0.85rem', margin: 0 }}>
+            Collecting ticks — needs 60 before a signal can be scored…
+          </p>
+        ) : strategy === 'RF' ? (
+          rf?.rec ? (
+            <div style={{ background: bg1, border: `1px solid ${rf.rec.type === 'RISE' ? '#22c55e' : '#ef4444'}`, borderRadius: 10, padding: '1rem' }}>
+              <div style={{ fontSize: '1.05rem', fontWeight: 800, color: rf.rec.type === 'RISE' ? '#22c55e' : '#ef4444' }}>
+                {rf.rec.type === 'RISE' ? '↑ RISE' : '↓ FALL'} — score {rf.rec.score}/4
+              </div>
+              <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 4 }}>
+                RSI {rf.rec.rsi.toFixed(0)} · channel {(rf.rec.channelPos * 100).toFixed(0)}%
+              </div>
+            </div>
+          ) : (
+            <div style={{ background: bg1, border: `1px solid ${bdr}`, borderRadius: 10, padding: '1rem', color: txt2, fontSize: '0.85rem' }}>
+              No consensus yet — waiting for the indicators to agree.
+            </div>
+          )
+        ) : rec ? (
+          <div style={{ background: bg1, border: '1px solid var(--gold)', borderRadius: 10, padding: '1rem' }}>
+            <div style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--gold)' }}>
+              {rec.type}{rec.barrier != null ? ` ${rec.barrier}` : ''}
+            </div>
+            <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 4 }}>
+              edge {(rec.edge * 100).toFixed(1)}% · z-score {rec.z.toFixed(2)}
+            </div>
+          </div>
+        ) : (
+          <div style={{ background: bg1, border: `1px solid ${bdr}`, borderRadius: 10, padding: '1rem', color: txt2, fontSize: '0.85rem' }}>
+            No edge currently clears the confidence threshold for this strategy.
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
