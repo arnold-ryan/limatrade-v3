@@ -1134,16 +1134,19 @@ function RunBar({
 }
 
 /* ─── Scanner ────────────────────────────────────────────── */
-// Native replacement for the old third-party iframe embed. Same scoring engine
-// as the Charts page's SIGNAL panel (/api/signals/charts) — a different view
-// onto logic Lima Trade already owns, not a copy of anyone else's tool.
+// Native replacement for the old third-party "Quantum Signal Analyzer" iframe.
+// Same composition — strategy dropdown, market dropdown, tick/digit readout,
+// Analyse button, a dashboard card that reveals itself, a live scrolling feed
+// underneath — restyled in Lima Trade's own palette, and wired to our real
+// scoring engine (/api/signals/charts) instead of the placeholder "null" /
+// "Infinity%" output the original tool showed.
 
-type ScanStrategy = 'OU' | 'EO' | 'MD' | 'RF'
+type ScanStrategy = 'MD' | 'EO' | 'OU' | 'RF'
 const SCAN_STRATEGIES: { id: ScanStrategy; label: string }[] = [
-  { id: 'OU', label: 'Over / Under' },
-  { id: 'EO', label: 'Even / Odd' },
-  { id: 'MD', label: 'Matches / Differs' },
-  { id: 'RF', label: 'Rise / Fall' },
+  { id: 'MD', label: 'Matches & Differs' },
+  { id: 'EO', label: 'Even & Odd' },
+  { id: 'OU', label: 'Over & Under' },
+  { id: 'RF', label: 'Rise & Fall' },
 ]
 
 interface BgRec { type: 'OVER'|'UNDER'|'EVEN'|'ODD'|'DIFFER'; barrier?: number; edge: number; z: number }
@@ -1152,29 +1155,38 @@ interface ScanResponse {
   MD: BgRec | null; EO: BgRec | null; OU: BgRec | null; RF: RfRec | null
   rfSigData: { emaVote: number; rsi: number; rsiVote: number; streak: number; streakVote: number; channelPos: number; channelVote: number; score: number } | null
 }
+interface FeedLine { id: number; text: string; ts: number; tone: 'info'|'good'|'bad' }
 
 function ScannerView() {
-  const [symbol,   setSymbol]   = useState('1HZ100V')
-  const [strategy, setStrategy] = useState<ScanStrategy>('OU')
-  const [running,  setRunning]  = useState(false)
-  const [status,   setStatus]   = useState<'idle'|'connecting'|'collecting'|'live'>('idle')
+  const [strategy, setStrategy] = useState<ScanStrategy>('MD')
+  const [symbol,   setSymbol]   = useState('R_10')
+  const [phase,    setPhase]    = useState<'idle'|'connecting'|'collecting'|'live'>('idle')
   const [livePrice, setLivePrice] = useState<number | null>(null)
   const [lastDig,   setLastDig]   = useState<number | null>(null)
-  const [rec,       setRec]       = useState<BgRec | null>(null)
-  const [rf,        setRf]        = useState<{ rec: RfRec | null; data: ScanResponse['rfSigData'] } | null>(null)
+  const [collected, setCollected] = useState(0)
+  const [rec, setRec] = useState<BgRec | null>(null)
+  const [rf,  setRf]  = useState<{ rec: RfRec | null; data: ScanResponse['rfSigData'] } | null>(null)
+  const [feed, setFeed] = useState<FeedLine[]>([])
 
-  const symbolRef   = useRef(symbol)
   const strategyRef = useRef(strategy)
-  const runningRef  = useRef(false)
-  const wsRef       = useRef<WebSocket | null>(null)
+  const symbolRef    = useRef(symbol)
+  const runningRef   = useRef(false)
+  const wsRef        = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const digitsRef   = useRef<number[]>([])
-  const pricesRef   = useRef<number[]>([])
-  const pipSizeRef  = useRef(2)
-  const scanningRef = useRef(false)
+  const digitsRef    = useRef<number[]>([])
+  const pricesRef    = useRef<number[]>([])
+  const pipSizeRef   = useRef(2)
+  const scanningRef  = useRef(false)
+  const feedIdRef    = useRef(0)
+  const feedEndRef   = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { symbolRef.current   = symbol   }, [symbol])
   useEffect(() => { strategyRef.current = strategy }, [strategy])
+  useEffect(() => { symbolRef.current   = symbol   }, [symbol])
+  useEffect(() => { feedEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [feed])
+
+  const pushFeed = useCallback((text: string, tone: FeedLine['tone'] = 'info') => {
+    setFeed(prev => [...prev.slice(-80), { id: ++feedIdRef.current, text, ts: Date.now(), tone }])
+  }, [])
 
   const scan = useCallback(async () => {
     if (scanningRef.current) return
@@ -1191,21 +1203,30 @@ function ScannerView() {
       })
       if (res.ok) {
         const data: ScanResponse = await res.json()
-        setRf({ rec: data.RF, data: data.rfSigData })
         const tid = strategyRef.current
-        setRec(tid === 'MD' ? data.MD : tid === 'EO' ? data.EO : tid === 'OU' ? data.OU : null)
+        const mkt = MARKETS.find(m => m.symbol === symbolRef.current)?.label ?? symbolRef.current
+        if (tid === 'RF') {
+          setRf({ rec: data.RF, data: data.rfSigData })
+          if (data.RF) pushFeed(`${data.RF.type === 'RISE' ? '↑ RISE' : '↓ FALL'} on ${mkt} — consensus ${data.RF.score}/4`, data.RF.type === 'RISE' ? 'good' : 'bad')
+        } else {
+          const r = tid === 'MD' ? data.MD : tid === 'EO' ? data.EO : data.OU
+          setRec(r)
+          if (r) pushFeed(`${r.type}${r.barrier != null ? ` ${r.barrier}` : ''} on ${mkt} — edge ${(r.edge * 100).toFixed(1)}%, z ${r.z.toFixed(2)}`, 'good')
+        }
       }
     } catch { /* network hiccup — next tick retries */ }
     scanningRef.current = false
-  }, [])
+  }, [pushFeed])
 
   const connect = useCallback(() => {
     if (!runningRef.current) return
-    setStatus('connecting')
+    setPhase('connecting')
+    pushFeed('Connecting to Deriv…')
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
     ws.onopen = () => {
+      pushFeed('Connected — fetching tick history…')
       ws.send(JSON.stringify({
         ticks_history: symbolRef.current, end: 'latest', count: 100, style: 'ticks', subscribe: 1,
       }))
@@ -1223,7 +1244,9 @@ function ScannerView() {
         digitsRef.current = prices.map(p => getLastDigit(p, pipSizeRef.current))
         setLivePrice(prices[prices.length - 1] ?? null)
         setLastDig(digitsRef.current[digitsRef.current.length - 1] ?? null)
-        setStatus('collecting')
+        setCollected(digitsRef.current.length)
+        setPhase(digitsRef.current.length >= 60 ? 'live' : 'collecting')
+        pushFeed(digitsRef.current.length >= 60 ? 'Enough history collected — analysis is live.' : `Collecting ticks (${digitsRef.current.length}/60)…`)
       }
 
       if (msg.msg_type === 'tick') {
@@ -1236,29 +1259,30 @@ function ScannerView() {
         pricesRef.current = [...pricesRef.current.slice(-199), q]
         setLivePrice(q)
         setLastDig(d)
-        if (digitsRef.current.length >= 60) setStatus('live')
-        scan()
+        setCollected(digitsRef.current.length)
+        if (digitsRef.current.length >= 60) { setPhase('live'); scan() }
       }
     }
 
     ws.onerror = () => { /* onclose fires next and handles reconnect */ }
     ws.onclose = () => {
-      if (runningRef.current) reconnectTimerRef.current = setTimeout(connect, 2000)
+      if (runningRef.current) {
+        pushFeed('Connection dropped — reconnecting…', 'bad')
+        reconnectTimerRef.current = setTimeout(connect, 2000)
+      }
     }
-  }, [scan])
+  }, [scan, pushFeed])
 
   const start = useCallback(() => {
     runningRef.current = true
-    setRunning(true)
-    setRec(null); setRf(null)
+    setRec(null); setRf(null); setFeed([]); setCollected(0)
     digitsRef.current = []; pricesRef.current = []
     connect()
   }, [connect])
 
   const stop = useCallback(() => {
     runningRef.current = false
-    setRunning(false)
-    setStatus('idle')
+    setPhase('idle')
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
     try { wsRef.current?.close() } catch { /**/ }
     wsRef.current = null
@@ -1266,121 +1290,126 @@ function ScannerView() {
 
   useEffect(() => () => stop(), [stop])
 
-  // Switching markets while running: reconnect fresh instead of mixing history
-  // from two different instruments.
-  useEffect(() => {
-    if (!running) return
-    stop()
-    start()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol])
-
-  const statusLabel = status === 'idle' ? 'IDLE' : status === 'connecting' ? 'CONNECTING' : status === 'collecting' ? 'COLLECTING TICKS' : 'LIVE'
-  const statusColor = status === 'idle' ? txt2 : status === 'live' ? '#22c55e' : '#FCA311'
+  const strategyLabel = SCAN_STRATEGIES.find(s => s.id === strategy)?.label ?? strategy
+  const marketLabel    = MARKETS.find(m => m.symbol === symbol)?.label ?? symbol
+  const feedToneColor = (tone: FeedLine['tone']) => tone === 'good' ? '#22c55e' : tone === 'bad' ? '#ef4444' : txt1
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg0, overflow: 'auto' }}>
-      {/* Controls */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center', padding: '0.9rem 1.25rem', borderBottom: `1px solid ${bdr}`, background: bg1 }}>
-        <select
-          value={symbol} onChange={e => setSymbol(e.target.value)}
-          style={{ background: bg2, border: `1px solid ${bdr}`, borderRadius: 7, color: txt0, padding: '0.45rem 0.6rem', fontSize: '0.82rem', outline: 'none' }}
-        >
-          {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.label}</option>)}
-        </select>
-
-        <div style={{ display: 'flex', gap: 4 }}>
-          {SCAN_STRATEGIES.map(s => (
-            <button
-              key={s.id}
-              onClick={() => setStrategy(s.id)}
-              style={{
-                padding: '0.42rem 0.7rem', borderRadius: 7, fontSize: '0.78rem', fontWeight: 700,
-                cursor: 'pointer', border: `1px solid ${strategy === s.id ? 'var(--gold)' : bdr}`,
-                background: strategy === s.id ? 'rgba(252,163,17,0.12)' : bg2,
-                color: strategy === s.id ? 'var(--gold)' : txt2,
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
+    <div style={{ flex: 1, display: 'flex', justifyContent: 'center', padding: '2rem 1.25rem', background: bg0, overflow: 'auto' }}>
+      <div style={{
+        width: '100%', maxWidth: 640, alignSelf: 'flex-start',
+        background: bg1, border: `1px solid ${bdr}`, borderRadius: 16,
+        boxShadow: '0 0 0 1px rgba(252,163,17,0.08), 0 12px 40px rgba(0,0,0,0.25)',
+        padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem',
+      }}>
+        {/* Window chrome dots — decorative, matches the "instrument panel" feel */}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} />
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#FCA311' }} />
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
         </div>
 
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <span style={{
-            fontSize: '0.68rem', fontWeight: 700, padding: '0.25rem 0.6rem', borderRadius: 20,
-            color: statusColor, border: `1px solid ${statusColor}55`, background: `${statusColor}18`,
-          }}>
-            {statusLabel}
-          </span>
-          <button
-            onClick={running ? stop : start}
-            style={{
-              padding: '0.5rem 1.1rem', borderRadius: 8, fontSize: '0.82rem', fontWeight: 800,
-              cursor: 'pointer', border: 'none',
-              background: running ? 'rgba(239,68,68,0.15)' : 'var(--gold)',
-              color: running ? '#ef4444' : '#000',
-            }}
+        <h2 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 800, color: 'var(--gold)', textAlign: 'center' }}>
+          Signal Analyzer
+        </h2>
+
+        <div>
+          <label style={{ display: 'block', fontSize: '0.72rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+            Select Strategy
+          </label>
+          <select
+            value={strategy} onChange={e => setStrategy(e.target.value as ScanStrategy)}
+            disabled={phase !== 'idle'}
+            style={{ width: '100%', background: bg2, border: `1px solid ${bdr}`, borderRadius: 8, color: 'var(--gold)', fontWeight: 700, padding: '0.6rem 0.7rem', fontSize: '0.88rem', outline: 'none', cursor: phase === 'idle' ? 'pointer' : 'default' }}
           >
-            {running ? '■ Stop Scanner' : '▶ Start Scanner'}
+            {SCAN_STRATEGIES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label style={{ display: 'block', fontSize: '0.72rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+            Select Market
+          </label>
+          <select
+            value={symbol} onChange={e => setSymbol(e.target.value)}
+            disabled={phase !== 'idle'}
+            style={{ width: '100%', background: bg2, border: `1px solid ${bdr}`, borderRadius: 8, color: 'var(--gold)', fontWeight: 700, padding: '0.6rem 0.7rem', fontSize: '0.88rem', outline: 'none', cursor: phase === 'idle' ? 'pointer' : 'default' }}
+          >
+            {MARKETS.map(m => <option key={m.symbol} value={m.symbol}>{m.label}</option>)}
+          </select>
+        </div>
+
+        <div style={{ background: bg2, border: `1px solid ${bdr}`, borderRadius: 10, padding: '1rem', textAlign: 'center' }}>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+            Latest Tick: {livePrice != null ? livePrice.toFixed(pipSizeRef.current) : '--'}
+          </div>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: '#22c55e', marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+            Last Digit: {lastDig ?? '--'}
+          </div>
+        </div>
+
+        {phase === 'idle' ? (
+          <button
+            onClick={start}
+            style={{ padding: '0.75rem', borderRadius: 9, border: 'none', background: '#22c55e', color: '#000', fontWeight: 800, fontSize: '0.92rem', cursor: 'pointer' }}
+          >
+            Analyse
           </button>
-        </div>
-      </div>
-
-      {/* Live readout */}
-      <div style={{ display: 'flex', gap: '1.5rem', padding: '0.9rem 1.25rem', borderBottom: `1px solid ${bdr}` }}>
-        <div>
-          <div style={{ fontSize: '0.62rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Latest Tick</div>
-          <div style={{ fontSize: '1.2rem', fontWeight: 800, color: txt0, fontVariantNumeric: 'tabular-nums' }}>
-            {livePrice != null ? livePrice.toFixed(pipSizeRef.current) : '—'}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: '0.62rem', color: txt2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Last Digit</div>
-          <div style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--gold)', fontVariantNumeric: 'tabular-nums' }}>
-            {lastDig ?? '—'}
-          </div>
-        </div>
-      </div>
-
-      {/* Analysis dashboard */}
-      <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        {!running ? (
-          <p style={{ color: txt2, fontSize: '0.85rem', margin: 0 }}>
-            Pick a market and strategy, then press Start Scanner.
-          </p>
-        ) : status !== 'live' ? (
-          <p style={{ color: txt2, fontSize: '0.85rem', margin: 0 }}>
-            Collecting ticks — needs 60 before a signal can be scored…
-          </p>
-        ) : strategy === 'RF' ? (
-          rf?.rec ? (
-            <div style={{ background: bg1, border: `1px solid ${rf.rec.type === 'RISE' ? '#22c55e' : '#ef4444'}`, borderRadius: 10, padding: '1rem' }}>
-              <div style={{ fontSize: '1.05rem', fontWeight: 800, color: rf.rec.type === 'RISE' ? '#22c55e' : '#ef4444' }}>
-                {rf.rec.type === 'RISE' ? '↑ RISE' : '↓ FALL'} — score {rf.rec.score}/4
-              </div>
-              <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 4 }}>
-                RSI {rf.rec.rsi.toFixed(0)} · channel {(rf.rec.channelPos * 100).toFixed(0)}%
-              </div>
-            </div>
-          ) : (
-            <div style={{ background: bg1, border: `1px solid ${bdr}`, borderRadius: 10, padding: '1rem', color: txt2, fontSize: '0.85rem' }}>
-              No consensus yet — waiting for the indicators to agree.
-            </div>
-          )
-        ) : rec ? (
-          <div style={{ background: bg1, border: '1px solid var(--gold)', borderRadius: 10, padding: '1rem' }}>
-            <div style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--gold)' }}>
-              {rec.type}{rec.barrier != null ? ` ${rec.barrier}` : ''}
-            </div>
-            <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 4 }}>
-              edge {(rec.edge * 100).toFixed(1)}% · z-score {rec.z.toFixed(2)}
-            </div>
-          </div>
         ) : (
-          <div style={{ background: bg1, border: `1px solid ${bdr}`, borderRadius: 10, padding: '1rem', color: txt2, fontSize: '0.85rem' }}>
-            No edge currently clears the confidence threshold for this strategy.
-          </div>
+          <>
+            <button
+              onClick={stop}
+              style={{ padding: '0.6rem', borderRadius: 9, border: '1px solid rgba(239,68,68,0.35)', background: 'rgba(239,68,68,0.1)', color: '#ef4444', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer' }}
+            >
+              ■ Stop
+            </button>
+
+            <div style={{ borderTop: `1px solid ${bdr}`, paddingTop: '1rem' }}>
+              <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--gold)', marginBottom: 8 }}>
+                Analysis Dashboard — {strategyLabel} on {marketLabel}
+              </div>
+
+              {phase === 'connecting' && <p style={{ margin: 0, fontSize: '0.85rem', color: txt1 }}>Connecting to server…</p>}
+              {phase === 'collecting' && <p style={{ margin: 0, fontSize: '0.85rem', color: txt1 }}>Collecting ticks… {collected}/60</p>}
+              {phase === 'live' && (
+                strategy === 'RF' ? (
+                  rf?.rec ? (
+                    <div>
+                      <div style={{ fontSize: '0.95rem', fontWeight: 800, color: rf.rec.type === 'RISE' ? '#22c55e' : '#ef4444' }}>
+                        {rf.rec.type === 'RISE' ? '↑ RISE' : '↓ FALL'} — consensus {rf.rec.score}/4
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 2 }}>
+                        RSI {rf.rec.rsi.toFixed(0)} · channel {(rf.rec.channelPos * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                  ) : <p style={{ margin: 0, fontSize: '0.85rem', color: txt1 }}>● Live — no consensus yet, watching the indicators.</p>
+                ) : (
+                  rec ? (
+                    <div>
+                      <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--gold)' }}>
+                        {rec.type}{rec.barrier != null ? ` ${rec.barrier}` : ''}
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: txt2, marginTop: 2 }}>
+                        edge {(rec.edge * 100).toFixed(1)}% · z-score {rec.z.toFixed(2)}
+                      </div>
+                    </div>
+                  ) : <p style={{ margin: 0, fontSize: '0.85rem', color: txt1 }}>● Live — no edge currently clears the confidence threshold.</p>
+                )
+              )}
+            </div>
+
+            {/* Live feed — real scanned events, in place of the original's decorative scrolling noise */}
+            <div style={{ background: bg2, border: `1px solid ${bdr}`, borderRadius: 8, height: 160, overflowY: 'auto', padding: '0.6rem 0.75rem', fontFamily: "'SF Mono','Fira Code','Consolas',monospace", fontSize: '0.72rem', lineHeight: 1.7 }}>
+              {feed.length === 0
+                ? <p style={{ margin: 0, color: txt2 }}>Waiting for the first scan…</p>
+                : feed.map(f => (
+                  <div key={f.id} style={{ color: feedToneColor(f.tone) }}>
+                    <span style={{ color: txt2, marginRight: 6 }}>{fmtTime(f.ts)}</span>{f.text}
+                  </div>
+                ))}
+              <div ref={feedEndRef} />
+            </div>
+          </>
         )}
       </div>
     </div>
