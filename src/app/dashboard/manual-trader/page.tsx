@@ -704,38 +704,14 @@ export default function ManualTraderPage() {
       let wsUrl = ''
       try {
         const r = await fetch('/api/user/ws-url')
-        if (!r.ok) {
-          if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }
-          // Surface the actual reason (Deriv's OTP error, rate limit, etc.)
-          // instead of a generic message — otherwise every failure looks
-          // identical and there's no way to tell what's actually wrong.
-          let detail = ''
-          try {
-            const body = await r.json() as { error?: string; detail?: string }
-            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
-          } catch { /**/ }
-          setWsError(`Connection failed [${r.status}]${detail} — retrying…`); scheduleReconnect(); return
-        }
+        if (!r.ok) { if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }; setWsError('Connection failed — retrying…'); scheduleReconnect(); return }
         ;({ wsUrl } = await r.json() as { wsUrl: string })
       } catch { setWsError('Network error — retrying…'); scheduleReconnect(); return }
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
-      const socket = ws
-
-      // Deriv's OTP-authenticated WS occasionally accepts the connection but
-      // never completes the handshake — neither onopen nor onerror/onclose
-      // fires. Without a timeout, that leaves wsReady=false and wsError=null
-      // forever: the header shows "Connecting…" and every Buy button stays
-      // disabled indefinitely, with no retry ever scheduled. Force-close if
-      // it hasn't opened in time so the existing onclose backoff/retry path
-      // takes over instead of hanging.
-      const connectTimeout = setTimeout(() => {
-        if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
-      }, 10_000)
 
       ws.onopen = () => {
-        clearTimeout(connectTimeout)
         reconnectCount.current = 0; setWsError(null); setWsReady(true)
         ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
         ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
@@ -878,7 +854,6 @@ export default function ManualTraderPage() {
 
       ws.onerror = () => {}
       ws.onclose = () => {
-        clearTimeout(connectTimeout)
         setWsReady(false); botWsRef.current = null; setBuying({})
         if (ping) { clearInterval(ping); ping = null }
         if (!intentionalClose.current) {

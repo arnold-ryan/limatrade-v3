@@ -42,22 +42,10 @@ export async function GET(req: NextRequest) {
   // ── Seal verifier into the state param (no cookie needed) ─────────────────
   // Deriv echoes `state` back verbatim on the callback. We unseal it in the
   // token route to recover the verifier — completely cookie-free.
-  const sealed = await sealData(
+  const state = await sealData(
     { verifier: codeVerifier },
-    { password: process.env.SESSION_SECRET!, ttl: 60 * 60 }, // 60-min window — generous
-    // enough that a slow interactive Deriv login (password + 2FA) can't
-    // outrun it, since the clock starts here, not when Deriv finishes.
+    { password: process.env.SESSION_SECRET!, ttl: 60 * 30 }, // 30-min window
   )
-
-  // iron's seal format (`Fe26.2**<hmac>*<salt>*...`) contains `*`, `+`, `/`,
-  // `=` — all legal in a query string once percent-encoded, but only if
-  // every hop treats the value as fully opaque. We can't verify that Deriv's
-  // redirect round-trip does (some OAuth servers decode/re-encode `state`
-  // instead of passing it through byte-for-byte). Re-wrapping in base64url
-  // (alphabet: A-Za-z0-9-_, no padding) removes every character that could
-  // be misinterpreted, so this failure mode is eliminated regardless of
-  // whether it was the actual cause.
-  const state = Buffer.from(sealed, 'utf8').toString('base64url')
 
   console.log(`[Lima Trade] OAuth login → client_id=${clientId} redirect_uri=${redirectUri}`)
 

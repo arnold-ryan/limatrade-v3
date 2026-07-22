@@ -701,12 +701,7 @@ export default function SpeedbotPage() {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
           if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }
-          let detail = ''
-          try {
-            const body = await r.json() as { error?: string; detail?: string }
-            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
-          } catch { /**/ }
-          setBotError(`Connection failed [${r.status}]${detail} — retrying…`)
+          setBotError('Connection failed — retrying…')
           scheduleReconnect()
           return
         }
@@ -720,18 +715,8 @@ export default function SpeedbotPage() {
       connectedAccountRef.current = accountId
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
-      const socket = ws
-
-      // Guard against a handshake that never resolves (Deriv's OTP-authenticated
-      // WS occasionally accepts the connection but never fires onopen/onerror/
-      // onclose) — without this, botReady stays false and every trade action
-      // stays disabled forever with no retry ever scheduled.
-      const connectTimeout = setTimeout(() => {
-        if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
-      }, 10_000)
 
       ws.onopen = () => {
-        clearTimeout(connectTimeout)
         reconnectCount.current = 0
         setBotError(null)
         setBotReady(true)
@@ -1039,7 +1024,6 @@ export default function SpeedbotPage() {
 
       ws.onerror = () => {}
       ws.onclose = () => {
-        clearTimeout(connectTimeout)
         setBotReady(false)
         botWsRef.current = null
         inTradeRef.current = false

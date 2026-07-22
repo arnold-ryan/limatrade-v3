@@ -1627,12 +1627,7 @@ export default function AnalysisPage() {
             window.location.href = '/'
             return
           }
-          let detail = ''
-          try {
-            const body = await res.json() as { error?: string; detail?: string }
-            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
-          } catch { /**/ }
-          setBotError(`Failed to get WS URL [${res.status}]${detail} — retrying…`)
+          setBotError('Failed to get WS URL — retrying…')
           scheduleReconnect()
           return
         }
@@ -1648,18 +1643,8 @@ export default function AnalysisPage() {
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
-      const socket = ws
-
-      // Guard against a handshake that never resolves (Deriv's OTP-authenticated
-      // WS occasionally accepts the connection but never fires onopen/onerror/
-      // onclose) — without this, botReady stays false forever with no retry ever
-      // scheduled, which is exactly what a permanently-disabled trade button looks like.
-      const connectTimeout = setTimeout(() => {
-        if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
-      }, 10_000)
 
       ws.onopen = () => {
-        clearTimeout(connectTimeout)
         reconnectCount.current = 0
         setBotError(null)
         /* New Deriv API: connection is already authenticated via OTP in URL.
@@ -1972,7 +1957,6 @@ export default function AnalysisPage() {
       }
 
       ws.onclose = (ev) => {
-        clearTimeout(connectTimeout)
         setBotReady(false)
         botWsRef.current = null
         if (ping) { clearInterval(ping); ping = null }

@@ -680,30 +680,16 @@ export default function ChartsPage() {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
           if (!alive) return
-          let detail = ''
-          try {
-            const body = await r.json() as { error?: string; detail?: string }
-            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
-          } catch { /**/ }
           // Don't give up — could be a transient server hiccup; retry after 3 s
-          setAuthErr(`Reconnecting [${r.status}]${detail}…`)
+          setAuthErr('Reconnecting…')
           setTimeout(connect, 3000)
           return
         }
         const { wsUrl } = await r.json()
         ws = new WebSocket(wsUrl)
         authRef.current = ws
-        const socket = ws
-
-        // Guard against a handshake that never resolves (Deriv's OTP-authenticated
-        // WS occasionally accepts the connection but never fires onopen/onerror/
-        // onclose) — without this, authReady stays false forever with no retry.
-        const connectTimeout = setTimeout(() => {
-          if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
-        }, 10_000)
 
         ws.onopen = () => {
-          clearTimeout(connectTimeout)
           if (!alive) return
           ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
           setAuthReady(true); setAuthErr(null)
@@ -841,7 +827,6 @@ export default function ChartsPage() {
         }
 
         ws.onclose = () => {
-          clearTimeout(connectTimeout)
           if (alive) {
             setAuthReady(false)
             setBuyingA(false); setBuyingB(false)  // un-stick buttons if WS drops mid-buy

@@ -154,7 +154,6 @@ export default function BulkTraderPage() {
   const generalChecking  = useRef<Set<string>>(new Set())
 
   const scannerBotWsRef  = useRef<WebSocket|null>(null)
-  const scannerActiveRef = useRef(false)
   const stopScannerRef   = useRef<(() => void) | null>(null)
   const scanPendingCount = useRef(0)  // tracks unresolved scanner trades for One Shot cleanup
   const scanTradeTypeRef = useRef<'even_odd'|'over_under'|'matches_differs'>('even_odd')
@@ -566,27 +565,6 @@ export default function BulkTraderPage() {
   stopScannerRef.current = () => stopScanner(scanModeRef.current === 'once')
 
   useEffect(() => () => { stopScanner() }, [stopScanner])
-
-  useEffect(() => { scannerActiveRef.current = scannerActive }, [scannerActive])
-
-  // The scanner's trading WS is opened once when it starts and stays open —
-  // bound to whichever account was active at that moment — for as long as it
-  // keeps running. If the trader switches Real/Demo from the header without
-  // stopping it first, it would otherwise keep firing on the ORIGINAL account
-  // while the header shows the new one. With real money involved, that's not
-  // a cosmetic bug, so we force-stop the scanner the instant an account
-  // switch happens rather than trying to silently re-target it mid-run.
-  useEffect(() => {
-    const onAccountSwitch = () => {
-      if (scannerActiveRef.current) {
-        log('━━━ ACCOUNT SWITCHED — scanner stopped for your safety ━━━', 'red')
-        stopScanner()
-        setTradeError('Account switched — the scanner was stopped so it can never fire on the wrong account. Restart it to keep trading on the new account.')
-      }
-    }
-    window.addEventListener('deriv-account-switch', onAccountSwitch)
-    return () => window.removeEventListener('deriv-account-switch', onAccountSwitch)
-  }, [stopScanner, log])
 
   const liveDigit  = livePrice != null ? lastDigit(livePrice, pipSizeRef.current) : null
   const totalTicks = recentDigits.slice(-ticks).length
