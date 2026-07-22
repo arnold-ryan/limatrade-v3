@@ -24,15 +24,22 @@ export async function POST(req: NextRequest) {
     if (!clientId) return NextResponse.json({ ok: false, error: 'server_config' }, { status: 500 })
 
     // ── Recover PKCE verifier from sealed state ──────────────────────────
+    // login/route.ts wraps the iron seal in base64url before handing it to
+    // Deriv as `state` — unwrap that first. (Older links minted before this
+    // change won't have the wrapper; base64url-decoding an already-plain
+    // iron seal just garbles it, which correctly falls through to
+    // invalid_session below rather than silently misbehaving.)
     let pkceVerifier: string
     try {
-      const sealed = await unsealData<{ verifier: string }>(state, {
+      const sealed = Buffer.from(state, 'base64url').toString('utf8')
+      const unsealed = await unsealData<{ verifier: string }>(sealed, {
         password: process.env.SESSION_SECRET!,
       })
-      pkceVerifier = sealed.verifier
+      pkceVerifier = unsealed.verifier
       if (!pkceVerifier) throw new Error('no verifier in state')
     } catch (e) {
-      console.error('[Lima Trade] Failed to unseal state:', e)
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error(`[Lima Trade] Failed to unseal state (len=${state.length}):`, msg)
       return NextResponse.json({ ok: false, error: 'invalid_session' }, { status: 400 })
     }
 
