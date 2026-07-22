@@ -704,7 +704,18 @@ export default function ManualTraderPage() {
       let wsUrl = ''
       try {
         const r = await fetch('/api/user/ws-url')
-        if (!r.ok) { if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }; setWsError('Connection failed — retrying…'); scheduleReconnect(); return }
+        if (!r.ok) {
+          if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }
+          // Surface the actual reason (Deriv's OTP error, rate limit, etc.)
+          // instead of a generic message — otherwise every failure looks
+          // identical and there's no way to tell what's actually wrong.
+          let detail = ''
+          try {
+            const body = await r.json() as { error?: string; detail?: string }
+            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
+          } catch { /**/ }
+          setWsError(`Connection failed [${r.status}]${detail} — retrying…`); scheduleReconnect(); return
+        }
         ;({ wsUrl } = await r.json() as { wsUrl: string })
       } catch { setWsError('Network error — retrying…'); scheduleReconnect(); return }
 

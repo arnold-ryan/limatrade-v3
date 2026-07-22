@@ -51,8 +51,12 @@ export async function GET() {
     if (!otpRes.ok) {
       const errBody = await otpRes.text()
       console.error('[Lima Trade] OTP fetch failed:', otpRes.status, errBody)
+      // Include a truncated version of Deriv's actual error text in the
+      // response (not just our own generic 'otp_failed' code) — without it,
+      // diagnosing a persistent connection failure means digging through
+      // Vercel function logs, which isn't always practical in the moment.
       return NextResponse.json(
-        { error: 'otp_failed', status: otpRes.status },
+        { error: 'otp_failed', status: otpRes.status, detail: errBody.slice(0, 200) },
         { status: otpRes.status }
       )
     }

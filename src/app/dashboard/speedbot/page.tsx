@@ -701,7 +701,12 @@ export default function SpeedbotPage() {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
           if (r.status === 401) { intentionalClose.current = true; window.location.href = '/'; return }
-          setBotError('Connection failed — retrying…')
+          let detail = ''
+          try {
+            const body = await r.json() as { error?: string; detail?: string }
+            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
+          } catch { /**/ }
+          setBotError(`Connection failed [${r.status}]${detail} — retrying…`)
           scheduleReconnect()
           return
         }

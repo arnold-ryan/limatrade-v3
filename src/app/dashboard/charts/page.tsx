@@ -680,8 +680,13 @@ export default function ChartsPage() {
         const r = await fetch('/api/user/ws-url')
         if (!r.ok) {
           if (!alive) return
+          let detail = ''
+          try {
+            const body = await r.json() as { error?: string; detail?: string }
+            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
+          } catch { /**/ }
           // Don't give up — could be a transient server hiccup; retry after 3 s
-          setAuthErr('Reconnecting…')
+          setAuthErr(`Reconnecting [${r.status}]${detail}…`)
           setTimeout(connect, 3000)
           return
         }

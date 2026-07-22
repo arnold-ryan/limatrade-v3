@@ -1627,7 +1627,12 @@ export default function AnalysisPage() {
             window.location.href = '/'
             return
           }
-          setBotError('Failed to get WS URL — retrying…')
+          let detail = ''
+          try {
+            const body = await res.json() as { error?: string; detail?: string }
+            detail = body?.detail ? `: ${body.detail}` : body?.error ? ` (${body.error})` : ''
+          } catch { /**/ }
+          setBotError(`Failed to get WS URL [${res.status}]${detail} — retrying…`)
           scheduleReconnect()
           return
         }
