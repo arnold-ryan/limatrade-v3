@@ -688,8 +688,17 @@ export default function ChartsPage() {
         const { wsUrl } = await r.json()
         ws = new WebSocket(wsUrl)
         authRef.current = ws
+        const socket = ws
+
+        // Guard against a handshake that never resolves (Deriv's OTP-authenticated
+        // WS occasionally accepts the connection but never fires onopen/onerror/
+        // onclose) — without this, authReady stays false forever with no retry.
+        const connectTimeout = setTimeout(() => {
+          if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
+        }, 10_000)
 
         ws.onopen = () => {
+          clearTimeout(connectTimeout)
           if (!alive) return
           ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
           setAuthReady(true); setAuthErr(null)
@@ -827,6 +836,7 @@ export default function ChartsPage() {
         }
 
         ws.onclose = () => {
+          clearTimeout(connectTimeout)
           if (alive) {
             setAuthReady(false)
             setBuyingA(false); setBuyingB(false)  // un-stick buttons if WS drops mid-buy

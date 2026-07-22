@@ -710,8 +710,21 @@ export default function ManualTraderPage() {
 
       ws = new WebSocket(wsUrl)
       botWsRef.current = ws
+      const socket = ws
+
+      // Deriv's OTP-authenticated WS occasionally accepts the connection but
+      // never completes the handshake — neither onopen nor onerror/onclose
+      // fires. Without a timeout, that leaves wsReady=false and wsError=null
+      // forever: the header shows "Connecting…" and every Buy button stays
+      // disabled indefinitely, with no retry ever scheduled. Force-close if
+      // it hasn't opened in time so the existing onclose backoff/retry path
+      // takes over instead of hanging.
+      const connectTimeout = setTimeout(() => {
+        if (socket.readyState !== WebSocket.OPEN) { try { socket.close() } catch { /**/ } }
+      }, 10_000)
 
       ws.onopen = () => {
+        clearTimeout(connectTimeout)
         reconnectCount.current = 0; setWsError(null); setWsReady(true)
         ws!.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 51 }))
         ws!.send(JSON.stringify({ portfolio: 1, req_id: 600 }))
@@ -854,6 +867,7 @@ export default function ManualTraderPage() {
 
       ws.onerror = () => {}
       ws.onclose = () => {
+        clearTimeout(connectTimeout)
         setWsReady(false); botWsRef.current = null; setBuying({})
         if (ping) { clearInterval(ping); ping = null }
         if (!intentionalClose.current) {

@@ -78,6 +78,7 @@ export default function AppHeader() {
   const [loading,       setLoading]       = useState(true)
   const [spinning,      setSpinning]      = useState(false)
   const [switching,     setSwitching]     = useState(false)
+  const [switchError,   setSwitchError]   = useState<string | null>(null)
   const [open,          setOpen]          = useState(false)
   const [tab,           setTab]           = useState<'real' | 'demo'>('real')
   const [accordionOpen, setAccordionOpen] = useState(true)
@@ -98,19 +99,32 @@ export default function AppHeader() {
   }
 
   /* ── Fetch balance ── */
+  // Several independent triggers call this (mount, post-switch, visibility
+  // change, the 5-min poll) and their requests can resolve out of order —
+  // a stale request that reads the account cookie *before* a switch can
+  // land *after* the fresh one and clobber it, which looks like the display
+  // flipping to the wrong account for a moment before "correcting" itself
+  // on the next refresh. Guard with a sequence number so only the most
+  // recently-issued request is ever allowed to update state.
+  const fetchSeqRef = useRef(0)
   const fetchBalance = useCallback(async (showSpin = false) => {
     if (showSpin) setSpinning(true)
+    const seq = ++fetchSeqRef.current
     try {
       const res = await fetch('/api/user/balance', { cache: 'no-store' })
+      if (seq !== fetchSeqRef.current) return // superseded by a newer call
       if (res.ok) {
         const d: BalanceData = await res.json()
+        if (seq !== fetchSeqRef.current) return
         setData(d)
         const active = d.accounts.find(a => a.accountId === d.activeAccountId)
         if (active) setTab(active.isDemo ? 'demo' : 'real')
       }
     } finally {
-      setLoading(false)
-      if (showSpin) setTimeout(() => setSpinning(false), 600)
+      if (seq === fetchSeqRef.current) {
+        setLoading(false)
+        if (showSpin) setTimeout(() => setSpinning(false), 600)
+      }
     }
   }, [])
 
@@ -174,6 +188,7 @@ export default function AppHeader() {
   async function switchAccount(targetId: string) {
     if (switching) return
     setSwitching(true)
+    setSwitchError(null)
     try {
       const res = await fetch('/api/auth/switch', {
         method:  'POST',
@@ -182,19 +197,33 @@ export default function AppHeader() {
       })
       if (res.ok) {
         await fetchBalance()
+        // Only announce the switch once fetchBalance() has re-synced local
+        // state to the server's truth — pages listening for this (to
+        // reconnect their trading WS to the new account) must never fire
+        // off the old activeAccountId.
         window.dispatchEvent(new CustomEvent('deriv-account-switch'))
+      } else {
+        setSwitchError("Couldn't switch accounts — please try again.")
       }
+    } catch {
+      setSwitchError("Couldn't switch accounts — please try again.")
     } finally {
       setSwitching(false)
     }
   }
 
   async function handleTabClick(t: 'real' | 'demo') {
-    setTab(t)
+    // Deliberately not optimistic: flipping the tab immediately, then having
+    // fetchBalance() correct it back if the switch fails or a stale response
+    // wins the race, is exactly the "reversed for a moment" glitch. `tab`
+    // only ever moves once fetchBalance() confirms what the server actually
+    // switched to — a fraction of a second slower, but never wrong.
     if (!data) return
     const target = data.accounts.find(a => a.isDemo === (t === 'demo'))
     if (target && target.accountId !== data.activeAccountId) {
-      await switchAccount(target.accountId)
+      await switchAccount(target.accountId) // fetchBalance() sets `tab` once this confirms
+    } else {
+      setTab(t) // nothing to switch (already active, or no accounts of this type) — just reveal the list
     }
   }
 
@@ -369,6 +398,18 @@ export default function AppHeader() {
                   </button>
                 ))}
               </div>
+
+              {switchError && (
+                <div style={{
+                  padding: '8px 16px',
+                  background: 'rgba(248,81,73,0.1)',
+                  color: 'var(--clr-red)',
+                  fontSize: '0.76rem',
+                  borderBottom: '1px solid var(--drop-sep)',
+                }}>
+                  {switchError}
+                </div>
+              )}
 
               {/* Accordion header */}
               <div
